@@ -385,28 +385,17 @@ pub(crate) fn rra(a: u8, f: u8) -> (u8, u8) {
 
 /// Flag rules belonging to the `CB`- and `ED`-prefixed instruction sets.
 ///
-/// These have no caller until M2 decodes the prefixes and wires them up. They are written
-/// now, beside the rules they share their arithmetic with, because that adjacency is what
-/// keeps the shared pieces correct for both milestones — `sbc16` and [`add16`] must agree
+/// They live beside the rules they share arithmetic with, rather than beside their callers,
+/// because that adjacency is what stops the two drifting: `sbc16` and [`add16`] must agree
 /// on where the 16-bit half-carry lives, and `rlc` and [`rlca`] must agree on how a byte
-/// rotates. The `#[cfg(test)]` module below exercises every one of them against
-/// hand-derived expectations, so they are verified rather than merely present.
-///
-/// **Not yet written**, and needed before M2 can call itself complete: `BIT`/`RES`/`SET`
-/// (`CB`), the block operations `LDI`/`LDD`/`LDIR`/`LDDR`, `CPI`/`CPD`/`CPIR`/`CPDR`,
-/// `INI`/`OUTI` and their relatives, `IN r,(C)` and `OUT (C),r`, and the nibble rotates
-/// `RLD`/`RRD` (`ED`). Listing them here means M2 finds them by plan rather than by
-/// discovering an unimplemented opcode.
-#[allow(
-    dead_code,
-    // `#[expect]` cannot be used here: it would be unfulfilled under `cfg(test)`, where
-    // the tests below do call these, and `--all-targets -D warnings` compiles that too.
-    reason = "M2 wires the CB/ED prefixes to these; every one is covered by the tests below"
-)]
+/// rotates. All of them are now wired up — the `CB` rotates, shifts, `SLL`, `BIT`, `RES`
+/// and `SET` to both the plain and the `DD`/`FD`-indexed forms, and [`neg`], [`adc16`] and
+/// [`sbc16`] to the `ED` decoder.
 pub(crate) mod prefixed {
     use super::{
-        ADD_SUBTRACT, CARRY, HALF_CARRY_16, LOW_12_BITS, PARITY_OVERFLOW, SIGN, Shifted, WORD_MAX,
-        ZERO, flag, parity, rotate_left_circular, rotate_left_through_carry, rotate_right_circular,
+        ADD_SUBTRACT, BIT3, BIT5, BYTE_MAX, CARRY, HALF_CARRY, HALF_CARRY_16, LOW_12_BITS,
+        PARITY_OVERFLOW, SIGN, Shifted, WORD_MAX, ZERO, flag, logic_flags, parity,
+        rotate_left_circular, rotate_left_through_carry, rotate_right_circular,
         rotate_right_through_carry, sign_and_zero, sub8, undocumented,
     };
 
@@ -531,6 +520,101 @@ pub(crate) mod prefixed {
         (result, shift_flags(result, carry))
     }
 
+    /// Flags for the operations that simply report a byte: `IN r,(C)`, `RRD` and `RLD`.
+    ///
+    /// Sign, zero, parity and the undocumented bits come from the byte; the half-carry and
+    /// add/subtract flags are cleared; the carry is left alone.
+    pub(crate) const fn reported_byte(result: u8, f: u8) -> u8 {
+        logic_flags(result) | (f & CARRY)
+    }
+
+    /// Flags for `LD A,I` and `LD A,R`.
+    ///
+    /// P/V reports `IFF2` rather than parity — the one place the interrupt state is
+    /// readable by software, and the reason these two instructions are used to sample it.
+    pub(crate) const fn load_a_from_interrupt_register(value: u8, iff2: bool, f: u8) -> u8 {
+        sign_and_zero(value) | undocumented(value) | flag(PARITY_OVERFLOW, iff2) | (f & CARRY)
+    }
+
+    /// Flags for `LDI`/`LDD` and their repeating forms.
+    ///
+    /// Neither the sign, the zero flag nor the carry is touched: P/V reports whether `BC`
+    /// is still non-zero, which is what makes `JP PE` the idiomatic loop back-edge. The
+    /// undocumented bits come from `A + transferred`, and **bit 5 of `F` comes from bit 1**
+    /// of that sum, not bit 5 — a genuine quirk, not a typo.
+    pub(crate) const fn block_transfer(a: u8, transferred: u8, more: bool, f: u8) -> u8 {
+        let sum = a.wrapping_add(transferred);
+        (f & (SIGN | ZERO | CARRY))
+            | flag(PARITY_OVERFLOW, more)
+            | flag(BIT3, (sum & 0x08) != 0)
+            | flag(BIT5, (sum & 0x02) != 0)
+    }
+
+    /// Flags for `CPI`/`CPD` and their repeating forms.
+    ///
+    /// The comparison sets sign, zero and half-carry; P/V again reports `BC != 0`; the
+    /// carry is untouched. The undocumented bits come from the difference *minus the
+    /// half-borrow*, with the same bit-1-into-bit-5 quirk as [`block_transfer`].
+    pub(crate) fn block_compare(a: u8, value: u8, more: bool, f: u8) -> u8 {
+        let (difference, compared) = sub8(a, value);
+        let adjusted = difference.wrapping_sub(u8::from((compared & HALF_CARRY) != 0));
+        (f & CARRY)
+            | (compared & (SIGN | ZERO | HALF_CARRY))
+            | ADD_SUBTRACT
+            | flag(PARITY_OVERFLOW, more)
+            | flag(BIT3, (adjusted & 0x08) != 0)
+            | flag(BIT5, (adjusted & 0x02) != 0)
+    }
+
+    /// Flags for `INI`/`IND`/`OUTI`/`OUTD` and their repeating forms.
+    ///
+    /// `counter` is `B` after its decrement — sign, zero and the undocumented bits all come
+    /// from it. `index` is the value added to the transferred byte to derive the carry and
+    /// half-carry: `C + 1` for `INI`, `C - 1` for `IND`, and `L` for the output forms.
+    /// P/V is the parity of the low three bits of that sum exclusive-or'd with the counter.
+    /// Every flag is defined, so no incoming `F` is needed.
+    pub(crate) fn block_io(counter: u8, value: u8, index: u8) -> u8 {
+        let sum = u16::from(value) + u16::from(index);
+        let carried = sum > BYTE_MAX;
+        let [low, _] = sum.to_le_bytes();
+        sign_and_zero(counter)
+            | undocumented(counter)
+            | flag(ADD_SUBTRACT, (value & SIGN) != 0)
+            | flag(HALF_CARRY, carried)
+            | flag(CARRY, carried)
+            | parity((low & 0x07) ^ counter)
+    }
+
+    /// `SLL r` — undocumented: shift left with a **one** into bit 0.
+    ///
+    /// The Z80's designers left this encoding in the gap where a "shift left logical" would
+    /// mirror [`srl`]; it shifts in a one rather than a zero, which is almost certainly not
+    /// what anyone intended. Real software uses it, so it is not optional.
+    pub(crate) fn sll(value: u8) -> (u8, u8) {
+        let result = (value << 1) | 1;
+        (result, shift_flags(result, (value & 0x80) != 0))
+    }
+
+    /// `BIT n,s` — test one bit, discarding everything but the flags.
+    ///
+    /// `undocumented_source` supplies bits 3 and 5, and is **not** always the tested value:
+    /// for `BIT n,(IX+d)` it is the high byte of the effective address, because that is what
+    /// was last on the bus. Corpus vector `ddcb46` separates the two — it expects `F=0x30`,
+    /// which is bit 5 of the address `0xa381`, while the tested value `0xd5` has neither
+    /// undocumented bit set.
+    ///
+    /// P/V mirrors Z, and only bit 7 can set the sign flag.
+    pub(crate) fn bit(value: u8, bit_index: u8, f: u8, undocumented_source: u8) -> u8 {
+        let index = bit_index & 0x07;
+        let tested = value & (1 << index);
+        (f & CARRY)
+            | flag(SIGN, index == 7 && tested != 0)
+            | flag(ZERO, tested == 0)
+            | flag(PARITY_OVERFLOW, tested == 0)
+            | HALF_CARRY
+            | undocumented(undocumented_source)
+    }
+
     /// `SRL r` — shift right, zero into bit 7.
     pub(crate) fn srl(value: u8) -> (u8, u8) {
         let (result, carry) = shift_right_logical(value);
@@ -544,8 +628,9 @@ mod tests {
     use super::*;
 
     // The un-prefixed rules are exercised through their opcodes in `lib.rs`, which proves
-    // both the rule and its wiring. The `CB`/`ED` rules have no opcode until M2, so they
-    // are exercised directly here.
+    // both the rule and its wiring. These are exercised directly as well, because a direct
+    // test names the rule when it fails, where an opcode-level failure only reports that
+    // some instruction came out wrong.
     //
     // Every expectation below is derived from the Z80's documented rule for that class
     // and written out by hand. A test that obtained its expectation by running the

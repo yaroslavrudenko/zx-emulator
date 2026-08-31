@@ -25,8 +25,8 @@ arithmetic — with an external oracle instead of self-assessment.
 
 | Milestone | Goal | Gate | State |
 |---|---|---|---|
-| **M1** | Registers, flags, un-prefixed opcodes | FUSE vectors green for un-prefixed | **290/290 vectors pass**; hardening the bus contract — see [`docs/STATUS.md`](docs/STATUS.md) |
-| M2 | `CB` / `ED` / `DD` / `FD` prefixes | FUSE vectors green in full | — |
+| M1 | Registers, flags, un-prefixed opcodes | FUSE vectors green for un-prefixed | **290/290** — merged |
+| **M2** | `CB` / `ED` / `DD` / `FD` prefixes | FUSE vectors green in full | **1041/1045**; the four outstanding stand by ruling — see [`docs/STATUS.md`](docs/STATUS.md) |
 | M3 | Documented behaviour | `zexdoc` passes | — |
 | M4 | Undocumented flags | **`zexall` passes** — CPU complete | — |
 | M5 | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | — |

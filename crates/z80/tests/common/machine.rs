@@ -64,7 +64,9 @@ pub const MEMORY_SIZE: usize = 0x1_0000;
 /// A core that reports no T-states would otherwise spin the run loop forever. A hanging
 /// suite is strictly worse than a failing one: it gives no diagnosis and blocks CI, so the
 /// loop is bounded and the overrun is reported as an ordinary failure.
-const MAX_STEPS_PER_VECTOR: u32 = 64;
+/// The measured worst cases are 17 instructions un-prefixed and 16 for `edb0` (`LDIR`) at
+/// 331 T-states, so this leaves roughly 4x headroom and is not expected to move at M2.
+pub const MAX_STEPS_PER_VECTOR: u32 = 64;
 
 /// 64K of RAM, the per-T-state address log, and the ordered list of bytes moved.
 pub struct TestBus {
@@ -207,12 +209,19 @@ impl Machine {
         t_states
     }
 
-    /// The sum of what [`Cpu::step`] returned, which must equal the number of `tick` calls.
+    /// The sum of what [`Cpu::step`] returned.
     ///
-    /// Two independent accounts of the same quantity: the core's own arithmetic, and the
-    /// count of T-states it actually charged the machine. A divergence means an
-    /// instruction billed the machine for a different duration than it claims to have
-    /// taken — a defect a total-only design could never surface.
+    /// This used to be described as "a second, independent account" of the T-state total,
+    /// to be cross-checked against the bus's tick count. **It is not, and that claim was
+    /// worse than the missing check** — it stopped anyone from adding a real one. In the
+    /// core, `self.t_states += 1` and `self.bus.tick(address)` are adjacent lines and
+    /// `step` returns that same counter, so comparing the two compares one number with
+    /// itself and can never fail.
+    ///
+    /// The genuine independent oracle is the corpus: its `tstates` column is derived from
+    /// the published machine-cycle lengths, not from our core. So this value is asserted
+    /// against *that*, alongside the bus count, in `fuse_vectors.rs` — two claims each
+    /// measured against an outside authority, rather than against each other.
     pub fn reported_t_states(&self) -> u32 {
         self.reported_t_states
     }

@@ -169,7 +169,7 @@ impl MemoryBlock {
 }
 
 /// The kind of bus access recorded in a `tests.expected` event line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EventKind {
     MemoryRead,
     MemoryWrite,
@@ -351,16 +351,22 @@ impl Expectation {
     }
 
     /// The bytes the instruction must move, in order.
+    ///
+    /// Deliberately `map` and not `filter_map`: a transfer event is guaranteed by
+    /// `as_event` to carry its byte, so there is nothing to filter — and had this stayed a
+    /// `filter_map`, a malformed event would have quietly shortened the expected list
+    /// instead of failing. A loud panic on a broken invariant beats a short list that
+    /// compares cleanly.
     pub fn transfers(&self) -> Vec<Transfer> {
         self.events
             .iter()
             .filter(|event| event.kind.is_transfer())
-            .filter_map(|event| {
-                event.data.map(|data| Transfer {
-                    kind: event.kind,
-                    addr: event.addr,
-                    data,
-                })
+            .map(|event| Transfer {
+                kind: event.kind,
+                addr: event.addr,
+                data: event
+                    .data
+                    .expect("as_event rejects a transfer event with no data byte"),
             })
             .collect()
     }
@@ -424,37 +430,104 @@ pub fn load_corpus(dir: &Path) -> Result<Option<Vec<Vector>>, ParseError> {
     pair(setups, expectations).map(Some)
 }
 
-/// Set this environment variable to `1` in CI to turn "corpus absent" from a skip into
-/// a hard failure. Locally, absence is normal; in CI, a silently skipped conformance
-/// suite is a green tick that proves nothing.
-pub const REQUIRE_CORPUS_ENV: &str = "Z80_FUSE_REQUIRED";
-
-/// The corpus, or a printed explanation of why there isn't one.
+/// The **deliberate opt-out** for a checkout that has no corpus.
 ///
-/// This is the single decision point for "what happens when `testdata/fuse` is missing",
-/// shared by every test binary so they cannot drift apart:
+/// The default is that the corpus is required. It used to be the other way around, and
+/// that was a hole: with `testdata/fuse` moved aside, `cargo test` exited 0 with the same
+/// 87 tests and zero failures, because libtest captures stdout on success and the skip
+/// notice was a `println!`. Five tests verified nothing and the test count did not even
+/// change. Absence has to move the pass/fail surface, not a captured line of text.
+pub const ALLOW_MISSING_CORPUS_ENV: &str = "Z80_FUSE_ALLOW_MISSING";
+
+/// The previous, inverted spelling of the flag above.
+///
+/// It is now obsolete, and being *set* is a hard error rather than a no-op. A variable
+/// that a CI file still sets and the code silently ignores is precisely the failure this
+/// whole module is meant to catch — so the migration refuses to be silent about itself.
+const OBSOLETE_REQUIRE_ENV: &str = "Z80_FUSE_REQUIRED";
+
+/// The lower bound on un-prefixed vectors, shared by every test that loads the corpus.
+///
+/// A floor rather than an exact count: it catches a truncated or half-downloaded corpus
+/// without breaking when the corpus is re-fetched at a different revision. The observed
+/// count is 290.
+pub const MIN_M1_VECTORS: usize = 250;
+
+/// Parse a boolean environment variable, refusing anything ambiguous.
+///
+/// Only `"1"` used to be honoured, which meant `true`, `TRUE`, `yes` and `on` all disarmed
+/// the flag silently — and `true` is the natural YAML spelling, exactly how an unquoted
+/// boolean is serialised into the environment. A variable that is set but unrecognised is a
+/// configuration error, never a silent `false`.
+fn boolean_env(name: &str) -> bool {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return false,
+        Err(std::env::VarError::NotUnicode(value)) => {
+            panic!("{name} is set to a non-Unicode value ({value:?}); expected a boolean")
+        }
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        other => panic!(
+            "{name}={other:?} is not a recognised boolean. Use one of \
+             1/true/yes/on or 0/false/no/off (case-insensitive)."
+        ),
+    }
+}
+
+/// The corpus, or `None` only when its absence has been explicitly declared.
+///
+/// The single decision point for "what happens when `testdata/fuse` is missing", shared by
+/// every test binary so they cannot drift apart:
 ///
 /// * present and well-formed -> `Some(vectors)`
 /// * present and malformed   -> panic (a broken corpus is never acceptable)
-/// * absent, normally        -> `None`, with a message naming the fetch instructions
-/// * absent, with [`REQUIRE_CORPUS_ENV`] set -> panic
+/// * absent                  -> **panic**, naming the fetch instructions
+/// * absent, with [`ALLOW_MISSING_CORPUS_ENV`] set -> `None`, and the caller skips
 pub fn corpus_or_skip() -> Option<Vec<Vector>> {
+    assert!(
+        std::env::var_os(OBSOLETE_REQUIRE_ENV).is_none(),
+        "{OBSOLETE_REQUIRE_ENV} is obsolete and no longer read. The corpus is now required \
+         by default, so nothing needs to set it; to allow a run without the corpus, set \
+         {ALLOW_MISSING_CORPUS_ENV}=1 instead.",
+    );
+
     let dir = corpus_dir();
     let loaded = load_corpus(&dir).unwrap_or_else(|err| panic!("malformed FUSE corpus.\n{err}"));
-
     if let Some(vectors) = loaded {
         return Some(vectors);
     }
 
-    let required = std::env::var(REQUIRE_CORPUS_ENV).is_ok_and(|value| value == "1");
-    let message = format!(
+    assert!(
+        boolean_env(ALLOW_MISSING_CORPUS_ENV),
         "FUSE corpus not found in {}.\n\
          The vectors are gitignored and fetched on demand — see testdata/README.md.\n\
-         Set {REQUIRE_CORPUS_ENV}=1 to make this a hard failure (do this in CI).",
-        dir.display()
+         If you genuinely mean to run without them, set {ALLOW_MISSING_CORPUS_ENV}=1; that \
+         turns every corpus-backed assertion off, so it is refused under CI.",
+        dir.display(),
     );
-    assert!(!required, "{message}");
-    println!("SKIPPING conformance run: {message}");
+
+    // The opt-out is for humans on a fresh clone, and for nobody else.
+    //
+    // Without this it reproduces the original hole exactly: with the corpus absent and the
+    // flag set, the suite exits 0 with the full test count and the skip notice captured, so
+    // the run is indistinguishable from a verified one. The realistic route there is not a
+    // fork — it is somebody exporting the variable once to get a clean checkout building
+    // and never unsetting it, after which every local run looks green forever.
+    //
+    // `CI` is set by every major provider, so this is universally available; `var_os` is
+    // used rather than `var` so `CI=` (an interpolation that failed in a YAML `env:` block)
+    // still counts as set.
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{ALLOW_MISSING_CORPUS_ENV} is set and so is CI. The opt-out exists so a developer \
+         can work on a checkout without the corpus; it must never decide what a pipeline \
+         verifies. Fetch the corpus in CI — see testdata/README.md.",
+    );
+
+    println!("SKIPPING conformance run: no corpus, and {ALLOW_MISSING_CORPUS_ENV} is set.");
     None
 }
 
@@ -661,6 +734,29 @@ fn as_event(line: Line<'_>) -> Result<Option<BusEvent>, ParseError> {
         Some(token) => Some(line.hex8(token, "event line: data")?),
         None => None,
     };
+
+    // Whether the byte is present is an invariant of the event kind, and it is enforced
+    // HERE rather than left to whoever consumes the event.
+    //
+    // `Expectation::transfers()` turns events into transfers by reading `data`. If a
+    // malformed `MR` line without its byte were allowed to parse as `data: None`, that
+    // transfer would simply disappear from the expected list — a *shorter* list that still
+    // compares cleanly against a prefix of reality, which is the same shape of defect as
+    // parsing a mixed-radix column with one radix: nothing fails, everything shifts, and
+    // the wrong answer is entirely believable.
+    if kind.is_transfer() && data.is_none() {
+        return Err(line.err(format!(
+            "event line: {} moves a byte, so it must carry one",
+            kind.token()
+        )));
+    }
+    if kind.is_contention() && data.is_some() {
+        return Err(line.err(format!(
+            "event line: {} is a contention check and must not carry a data byte",
+            kind.token()
+        )));
+    }
+
     Ok(Some(BusEvent {
         at_t_state: line.decimal(fields[0], "event line: time")?,
         kind,

@@ -36,14 +36,11 @@ mod reference;
 mod report;
 
 use reference::{Binary, Unary};
-use vectors::{EventKind, ParseError, Prefix, Transfer};
+use vectors::{EventKind, ParseError, Prefix, Registers, Transfer};
 
 // ---------------------------------------------------------------------------
 // Corpus invariants
 // ---------------------------------------------------------------------------
-
-/// Mirrors the floor in `fuse_vectors.rs`: catches a truncated download, not drift.
-const MIN_M1_VECTORS: usize = 250;
 
 #[test]
 fn corpus_parses_and_the_two_halves_align() {
@@ -60,8 +57,9 @@ fn corpus_parses_and_the_two_halves_align() {
 
     assert!(!corpus.is_empty(), "the corpus parsed to zero vectors");
     assert!(
-        m1 >= MIN_M1_VECTORS,
-        "only {m1} un-prefixed vectors, expected at least {MIN_M1_VECTORS}"
+        m1 >= vectors::MIN_M1_VECTORS,
+        "only {m1} un-prefixed vectors, expected at least {}",
+        vectors::MIN_M1_VECTORS
     );
     for vector in &corpus {
         assert!(
@@ -304,6 +302,89 @@ fn pairing_rejects_misaligned_halves() -> Result<(), ParseError> {
     Ok(())
 }
 
+/// The state line mixes radices: `I` and `R` are **hex**, every other column is decimal.
+///
+/// This is a trap with a demonstrated victim. A separate corpus checker parsed the whole
+/// line with one decimal radix; `9a` and `1e` failed, were dropped, and every later column
+/// shifted left — so `halted` picked up the T-state budget of `1` and halted the CPU before
+/// it started. Four `ED` vectors reported as failures and one looked as though it had never
+/// executed. The CPU was correct throughout.
+///
+/// The values below are chosen so that a single wrong radix cannot pass: `9a` and `1e` are
+/// unparseable as decimal, and `tstates = 10` means ten — read as hex it would be sixteen.
+#[test]
+fn state_line_parses_i_and_r_as_hex_and_everything_else_as_decimal() -> Result<(), ParseError> {
+    const MIXED_RADIX: &str = concat!(
+        "radix\n",
+        "9a00 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000\n",
+        "9a 1e 1 0 2 1 10\n",
+        "0000 27 -1\n",
+        "-1\n",
+    );
+
+    let setups = vectors::parse_setups("radix.in", MIXED_RADIX)?;
+    let [setup] = &setups[..] else {
+        panic!("expected exactly one block, got {}", setups.len());
+    };
+
+    assert_eq!(0x9a, setup.state.i, "I is hex: 9a is 154");
+    assert_eq!(0x1e, setup.state.r, "R is hex: 1e is 30");
+    assert!(setup.state.iff1, "IFF1");
+    assert!(!setup.state.iff2, "IFF2");
+    assert_eq!(2, setup.state.im, "IM is decimal");
+    assert!(setup.state.halted, "halted");
+    assert_eq!(
+        10, setup.state.t_states,
+        "tstates is DECIMAL — ten, not the sixteen a hex reading would give",
+    );
+    Ok(())
+}
+
+/// An event's data byte is required exactly when its kind moves one.
+///
+/// Left unchecked, a malformed `MR` without its byte would parse as `data: None` and then
+/// vanish from `Expectation::transfers()` — a silently *shorter* expected list, which is
+/// the same failure shape as the radix bug: nothing errors, everything shifts, and the
+/// wrong answer looks entirely reasonable.
+#[test]
+fn event_lines_must_carry_a_data_byte_exactly_when_the_kind_moves_one() {
+    let block = |event: &str| {
+        format!(
+            "ev\n{event}\n0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000\n00 00 0 0 0 0 4\n"
+        )
+    };
+
+    let cases: &[(&str, &str, bool)] = &[
+        ("MR with its byte", "    4 MR 0000 3e", true),
+        ("MW with its byte", "    4 MW 0000 3e", true),
+        ("MC without a byte", "    0 MC 0000", true),
+        ("PC without a byte", "    0 PC 00fe", true),
+        ("MR missing its byte", "    4 MR 0000", false),
+        ("MW missing its byte", "    4 MW 0000", false),
+        ("PR missing its byte", "    4 PR 00fe", false),
+        (
+            "MC carrying a byte it cannot have",
+            "    0 MC 0000 3e",
+            false,
+        ),
+        (
+            "PC carrying a byte it cannot have",
+            "    0 PC 00fe 3e",
+            false,
+        ),
+    ];
+
+    for (description, event, should_parse) in cases {
+        let parsed = vectors::parse_expectations("events.expected", &block(event));
+        assert_eq!(
+            *should_parse,
+            parsed.is_ok(),
+            "{description}: {:?}",
+            parsed.err(),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parser — malformed input
 // ---------------------------------------------------------------------------
@@ -348,6 +429,18 @@ fn parser_rejects_malformed_setup_blocks() {
         (
             "too few state fields",
             GOLDEN_SETUP.replace("00 00 0 0 0 0     1\n", "00 00 0 0 0 0\n"),
+            3,
+        ),
+        (
+            "an I that is not hexadecimal",
+            GOLDEN_SETUP.replace("00 00 0 0 0 0", "gg 00 0 0 0 0"),
+            3,
+        ),
+        (
+            // `ff` parses fine as hex and not at all as decimal, so this row fails only if
+            // tstates is read with the correct radix.
+            "a tstates column read as decimal, not hex",
+            GOLDEN_SETUP.replace("00 00 0 0 0 0     1\n", "00 00 0 0 0 0 ff\n"),
             3,
         ),
         (
@@ -489,6 +582,255 @@ fn transfer_assertion_catches_wrong_missing_and_extra_bytes() {
             "{description}",
         );
     }
+}
+
+/// Direct tests for the *relaxing* transfer comparator.
+///
+/// The strict comparator had five cases and this one had none, which is how both of its
+/// defects survived: extras were filtered to `MemoryRead` before comparison, so a spurious
+/// `MW`/`PW`/`PR` vanished entirely; and because the "DELETE it" guard keyed on all extras
+/// while the comparison keyed on reads only, one non-read extra silenced the rot-guard and
+/// blamed the declaration instead. Rows 4 and 5 are those two bugs.
+#[test]
+fn omission_comparator_permits_only_what_it_declares() {
+    const VECTOR: &str = "c2_2";
+    const ELIDED: &[u16] = &[0x0001, 0x0002];
+    let omission = report::CorpusOmission {
+        vector: VECTOR,
+        elided_reads: ELIDED,
+        disputed_flag_bits: 0,
+        reason: "JP NZ,nn not taken: one documented cycle count (10 T)",
+    };
+
+    let fetch = Transfer {
+        kind: EventKind::MemoryRead,
+        addr: 0x0000,
+        data: 0xc2,
+    };
+    let read = |addr: u16| Transfer {
+        kind: EventKind::MemoryRead,
+        addr,
+        data: 0x00,
+    };
+    let write = |addr: u16| Transfer {
+        kind: EventKind::MemoryWrite,
+        addr,
+        data: 0x00,
+    };
+    let port_write = Transfer {
+        kind: EventKind::PortWrite,
+        addr: 0xfe,
+        data: 0x00,
+    };
+
+    let expected = vec![fetch];
+    let cases: &[(&str, Vec<Transfer>, usize)] = &[
+        (
+            "exactly the declared reads",
+            vec![fetch, read(0x0001), read(0x0002)],
+            0,
+        ),
+        (
+            "a corpus transfer that never happened",
+            vec![read(0x0001), read(0x0002)],
+            1,
+        ),
+        (
+            "an extra read at an address the omission does not declare",
+            vec![fetch, read(0x0001), read(0x0003)],
+            1,
+        ),
+        (
+            "a non-read extra — two invented stack writes (H1)",
+            vec![
+                fetch,
+                read(0x0001),
+                read(0x0002),
+                write(0x7fff),
+                write(0x7ffe),
+            ],
+            1,
+        ),
+        (
+            "a non-read extra — a spurious port write (H1)",
+            vec![fetch, read(0x0001), read(0x0002), port_write],
+            1,
+        ),
+        (
+            "an omission that is no longer needed (the rot-guard)",
+            vec![fetch],
+            1,
+        ),
+    ];
+
+    for (description, actual, want) in cases {
+        assert_eq!(
+            *want,
+            report::compare_transfers_allowing(&expected, actual, &omission).len(),
+            "{description}",
+        );
+    }
+}
+
+/// The rot-guard must stay attributable: a superfluous omission says "DELETE it", and a
+/// wrong set of extras says so instead. H2 was these two keying on different data, so one
+/// non-read extra produced a confident, wrong instruction to delete a correct suppression.
+#[test]
+fn omission_comparator_distinguishes_a_dead_omission_from_a_wrong_one() {
+    let omission = report::CorpusOmission {
+        vector: "c2_2",
+        elided_reads: &[0x0001],
+        disputed_flag_bits: 0,
+        reason: "test fixture",
+    };
+    let fetch = Transfer {
+        kind: EventKind::MemoryRead,
+        addr: 0x0000,
+        data: 0xc2,
+    };
+    let expected = vec![fetch];
+
+    let dead = report::compare_transfers_allowing(&expected, &[fetch], &omission);
+    assert_eq!(1, dead.len());
+    assert!(
+        dead[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("DELETE")),
+        "an unnecessary omission must say so: {dead:?}",
+    );
+
+    let wrong = report::compare_transfers_allowing(
+        &expected,
+        &[
+            fetch,
+            Transfer {
+                kind: EventKind::MemoryWrite,
+                addr: 0x7fff,
+                data: 0x00,
+            },
+        ],
+        &omission,
+    );
+    assert_eq!(1, wrong.len());
+    assert!(
+        !wrong[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("DELETE")),
+        "a wrong extra must NOT be reported as a dead omission: {wrong:?}",
+    );
+}
+
+/// Direct tests for the *other* kind of omission — a disputed flag rule.
+///
+/// A new relaxation mechanism with no direct test is how H1 and H2 got in. This one excuses
+/// named `F` bits for a named vector, so the three things worth pinning are: the excused
+/// bits really are excused, nothing else is, and an excuse that turns out to be unnecessary
+/// says so.
+#[test]
+fn disputed_flag_bits_excuse_exactly_what_they_name() {
+    let omission = report::CorpusOmission {
+        vector: "cb4e",
+        elided_reads: &[],
+        disputed_flag_bits: flags::UNDOCUMENTED,
+        reason: "BIT n,(HL): FUSE takes F3/F5 from the tested value, we take them from MEMPTR",
+    };
+
+    let af = |f: u8| Registers {
+        af: 0x4200 | u16::from(f),
+        ..Registers::default()
+    };
+
+    // Only bits 3 and 5 differ -> excused, no register mismatch.
+    assert!(
+        report::compare_registers(&af(flags::UNDOCUMENTED), &af(0), flags::UNDOCUMENTED).is_empty(),
+        "the named bits must be excused",
+    );
+    // A documented flag differs too -> NOT excused.
+    assert_eq!(
+        1,
+        report::compare_registers(
+            &af(flags::UNDOCUMENTED | flags::Z),
+            &af(0),
+            flags::UNDOCUMENTED,
+        )
+        .len(),
+        "an excuse for bits 3 and 5 must not cover Z",
+    );
+    // The accumulator differs -> NOT excused, even with identical flags.
+    assert_eq!(
+        1,
+        report::compare_registers(
+            &Registers {
+                af: 0x4200,
+                ..Registers::default()
+            },
+            &Registers {
+                af: 0x9900,
+                ..Registers::default()
+            },
+            flags::UNDOCUMENTED,
+        )
+        .len(),
+        "an excuse for flag bits must never cover the accumulator",
+    );
+    // AF' is a different register and is never excused.
+    assert_eq!(
+        1,
+        report::compare_registers(
+            &Registers {
+                af_shadow: u16::from(flags::UNDOCUMENTED),
+                ..Registers::default()
+            },
+            &Registers::default(),
+            flags::UNDOCUMENTED,
+        )
+        .len(),
+        "the excuse applies to AF only, not to AF'",
+    );
+
+    // The rot-guard, which requires EVERY named bit to differ.
+    assert!(
+        report::compare_disputed_flags(&omission, flags::UNDOCUMENTED, 0).is_empty(),
+        "while both declared bits genuinely differ, the declaration is doing work",
+    );
+
+    // Per-bit over-declaration: bit 3 diverges, bit 5 is excused for nothing. Under the
+    // weaker "at least one named bit differs" reading this passed silently — and three of
+    // the four real entries were over-declared in exactly this way.
+    let over = report::compare_disputed_flags(&omission, flags::X, 0);
+    assert_eq!(
+        1,
+        over.len(),
+        "declaring a bit that agrees must be reported"
+    );
+    assert!(
+        over[0].actual.contains("Y(bit5)"),
+        "the report must name the bit excused for nothing: {over:?}",
+    );
+    assert!(
+        !over[0].actual.contains("X(bit3)"),
+        "the genuinely diverging bit must NOT be named as superfluous: {over:?}",
+    );
+    assert!(
+        over[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("NARROW")),
+        "an over-declaration must say to narrow it: {over:?}",
+    );
+
+    // Nothing differs at all -> the whole declaration is dead.
+    let dead = report::compare_disputed_flags(&omission, 0, 0);
+    assert_eq!(1, dead.len());
+    assert!(
+        dead[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("DELETE")),
+        "an entirely unnecessary declaration must say so: {dead:?}",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 8a2792f877f5e83c6639813c49bcab7ed0be80960e966b4ee33246ddb89e60fc # shrinks to a = 26, operand = 2, entry_flags = 0
+cc 4df4666dafa8a89f218d8f0772595685babafb4c55e3abd2ba27737e12123834 # shrinks to value = 0, entry_flags = 16

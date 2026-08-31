@@ -12,7 +12,7 @@
 //! which is noted at each site.
 
 use crate::flags;
-use crate::registers::{PairBase, RegIndex, index};
+use crate::registers::{PairBase, RegIndex, index, pair};
 
 /// The eight encodings of an opcode's 3-bit operand field.
 ///
@@ -80,6 +80,76 @@ impl Operand {
     }
 }
 
+/// Which register pair stands in for `HL` in the instruction being decoded.
+///
+/// A `DD` or `FD` prefix substitutes `IX` or `IY` for `HL`, and that substitution reaches
+/// three different places: the pair operations (`INC HL` becomes `INC IX`), the `H`/`L`
+/// register halves (`H` becomes `IXh`), and the memory operand — where `(HL)` becomes
+/// `(IX+d)` and acquires a displacement byte that must be fetched.
+///
+/// Carrying which index is in play, rather than a bare [`PairBase`], is what lets the same
+/// decode table serve all three: the displacement only exists for the prefixed forms, and
+/// [`Index::is_displaced`] is the one question that distinguishes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Index {
+    /// Un-prefixed: `HL`, and `(HL)` addresses the pair with no displacement.
+    Hl,
+    /// `DD`-prefixed: `IX`, and `(HL)` becomes `(IX+d)`.
+    Ix,
+    /// `FD`-prefixed: `IY`, and `(HL)` becomes `(IY+d)`.
+    Iy,
+}
+
+impl Index {
+    /// The pair standing in for `HL`.
+    pub(crate) const fn base(self) -> PairBase {
+        match self {
+            Self::Hl => pair::HL,
+            Self::Ix => pair::IX,
+            Self::Iy => pair::IY,
+        }
+    }
+
+    /// Whether the memory operand carries a displacement byte.
+    pub(crate) const fn is_displaced(self) -> bool {
+        !matches!(self, Self::Hl)
+    }
+
+    /// The index that applies to the *register* halves of a two-operand `LD`.
+    ///
+    /// This is the asymmetry that makes the prefixes subtle. `DD 44` is `LD B,IXh` — the
+    /// substitution reaches `H`. But `DD 66` is `LD H,(IX+d)`, writing real `H`, and
+    /// `DD 74` is `LD (IX+d),H`, reading real `H`. Corpus vectors `dd66` and `dd74` prove
+    /// it: `dd74` stores `0x01`, which is `H` of `HL = 0x0125`, not `IXh` of `IX = 0x5910`.
+    ///
+    /// So when either operand is the memory operand, the register half is **not**
+    /// substituted — the prefix has already been spent on the address.
+    pub(crate) const fn for_register_half(self, touches_memory: bool) -> Self {
+        if touches_memory { Self::Hl } else { self }
+    }
+}
+
+/// An [`Operand`] resolved to the place its value actually lives.
+///
+/// The distinction matters because resolving is not free and must not be repeated. For
+/// `(HL)` the effective address is just the pair, so recomputing it is idempotent — but for
+/// the `DD`/`FD` form `(IX+d)` resolving means **fetching the displacement byte and adding
+/// it**, and both must happen exactly once per instruction. `INC (IX+d)` reads, waits and
+/// writes back at one address; three independent recomputations would fetch three
+/// displacements and charge the addition three times.
+///
+/// So the effective address is carried here as a *value*, computed once by
+/// [`Cpu::resolve`] and handed to every site that needs it.
+///
+/// [`Cpu::resolve`]: crate::Cpu::resolve
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Target {
+    /// An 8-bit register.
+    Register(RegIndex),
+    /// A byte of memory at an already-computed effective address.
+    Memory(u16),
+}
+
 /// The eight accumulator ALU operations, in the order the opcode field encodes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AluOp {
@@ -125,6 +195,90 @@ impl AluOp {
         // INVARIANT: shifting then masking with 0x07 yields 0..=7.
         ALU_OPS[usize::from((opcode >> 3) & 0x07)]
     }
+}
+
+/// The eight rotate and shift operations of the `CB` set, in field order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShiftOp {
+    /// Rotate left circular.
+    Rlc,
+    /// Rotate right circular.
+    Rrc,
+    /// Rotate left through carry.
+    Rl,
+    /// Rotate right through carry.
+    Rr,
+    /// Shift left arithmetic.
+    Sla,
+    /// Shift right arithmetic, preserving bit 7.
+    Sra,
+    /// Shift left logical — undocumented, shifts a one into bit 0.
+    Sll,
+    /// Shift right logical.
+    Srl,
+}
+
+/// The four groups a `CB` opcode's top two bits select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CbOp {
+    /// `00 ooo rrr` — rotate or shift.
+    Shift(ShiftOp),
+    /// `01 bbb rrr` — test bit `bbb`.
+    Bit(u8),
+    /// `10 bbb rrr` — clear bit `bbb`.
+    Reset(u8),
+    /// `11 bbb rrr` — set bit `bbb`.
+    Set(u8),
+}
+
+/// The shift operations indexed by their 3-bit field.
+const SHIFTS: [ShiftOp; 8] = [
+    ShiftOp::Rlc,
+    ShiftOp::Rrc,
+    ShiftOp::Rl,
+    ShiftOp::Rr,
+    ShiftOp::Sla,
+    ShiftOp::Sra,
+    ShiftOp::Sll,
+    ShiftOp::Srl,
+];
+
+/// Which group each value of the top two bits selects.
+#[derive(Debug, Clone, Copy)]
+enum CbGroup {
+    Shift,
+    Bit,
+    Reset,
+    Set,
+}
+
+/// The groups indexed by the opcode's top two bits.
+const CB_GROUPS: [CbGroup; 4] = [CbGroup::Shift, CbGroup::Bit, CbGroup::Reset, CbGroup::Set];
+
+impl CbOp {
+    /// Decode a `CB` opcode. The whole set is `xx bbb rrr`: the top two bits pick the
+    /// group, the middle three a bit number or a shift, and the low three the operand.
+    pub(crate) fn from_opcode(opcode: u8) -> Self {
+        // INVARIANT: a byte shifted right by six yields 0..=3, always within the table.
+        let group = CB_GROUPS[usize::from(opcode >> 6)];
+        // INVARIANT: masking with 0x07 yields 0..=7.
+        let field = (opcode >> 3) & 0x07;
+        match group {
+            CbGroup::Shift => Self::Shift(SHIFTS[usize::from(field)]),
+            CbGroup::Bit => Self::Bit(field),
+            CbGroup::Reset => Self::Reset(field),
+            CbGroup::Set => Self::Set(field),
+        }
+    }
+}
+
+/// The 16-bit pairs an `ED` opcode's bits 5–4 select.
+const ED_PAIRS: [PairBase; 4] = [pair::BC, pair::DE, pair::HL, pair::SP];
+
+/// The pair named by bits 5–4 of an `ED` opcode — `SBC HL,ss`, `LD (nn),dd` and friends.
+pub(crate) fn ed_pair(opcode: u8) -> PairBase {
+    // INVARIANT: shifting right by four then masking with 0x03 yields 0..=3.
+    ED_PAIRS[usize::from((opcode >> 4) & 0x03)]
 }
 
 /// The eight branch conditions, in the order the opcode field encodes them.

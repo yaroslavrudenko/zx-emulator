@@ -48,10 +48,21 @@ impl Mismatch {
 ///
 /// `AF` and `AF'` are decomposed into accumulator plus named flag bits, because a bare
 /// `5601 != 5600` hides the fact that only the undocumented bit 3 moved.
-pub fn compare_registers(expected: &Registers, actual: &Registers) -> Vec<Mismatch> {
+pub fn compare_registers(
+    expected: &Registers,
+    actual: &Registers,
+    disputed_flag_bits: u8,
+) -> Vec<Mismatch> {
     let mut mismatches = Vec::new();
     for ((name, want), (_, got)) in expected.named().into_iter().zip(actual.named()) {
-        if want == got {
+        // Disputed bits are excused for `AF` only, and only the named bits: the
+        // accumulator and every other flag still have to match exactly.
+        let excused = if name == "AF" {
+            u16::from(disputed_flag_bits)
+        } else {
+            0
+        };
+        if want & !excused == got & !excused {
             continue;
         }
         let mismatch = Mismatch::new(name, format!("{want:04x}"), format!("{got:04x}"));
@@ -194,8 +205,19 @@ pub struct CorpusOmission {
     /// The vector's name in the corpus.
     pub vector: &'static str,
     /// Addresses the corpus contends but records no read for, though the CPU reads them.
+    ///
+    /// Empty when the disagreement is not about transfers at all — see
+    /// [`Self::disputed_flag_bits`].
     pub elided_reads: &'static [u16],
-    /// Why the hardware performs a read the corpus does not record.
+    /// Bits of `F` on which the corpus and the core follow **different rules**.
+    ///
+    /// A different category from [`Self::elided_reads`], and worth keeping distinct: an
+    /// elided read is the corpus declining to *record* something both agree happened, while
+    /// a disputed flag bit is a genuine disagreement about what the hardware does. Only the
+    /// named bits are excused; the accumulator and every other flag must still match
+    /// exactly, and the bits must actually differ or the entry is dead.
+    pub disputed_flag_bits: u8,
+    /// Why the core and the corpus differ, in enough detail to re-litigate later.
     pub reason: &'static str,
 }
 
@@ -231,13 +253,24 @@ pub fn compare_transfers_allowing(
     }
 
     // The extras must be exactly the declared elided reads — no more, no fewer.
-    let mut found: Vec<u16> = extras
+    //
+    // Compared as (kind, address) over EVERY extra, not just the reads. Filtering to
+    // `MemoryRead` first was a hole: a spurious `MW`, `PW` or `PR` on any of the 21
+    // omission vectors was dropped before the comparison and vanished — two invented stack
+    // writes compared equal to nothing. It also split the two guards apart, because the
+    // "DELETE it" check keyed on all extras while the comparison keyed on reads only, so a
+    // single non-read extra suppressed the rot-guard and misattributed the failure to the
+    // declaration. One key for both, and that second bug cannot recur.
+    let mut found: Vec<(EventKind, u16)> = extras
         .iter()
-        .filter(|transfer| transfer.kind == EventKind::MemoryRead)
-        .map(|transfer| transfer.addr)
+        .map(|transfer| (transfer.kind, transfer.addr))
         .collect();
     found.sort_unstable();
-    let mut declared = omission.elided_reads.to_vec();
+    let mut declared: Vec<(EventKind, u16)> = omission
+        .elided_reads
+        .iter()
+        .map(|addr| (EventKind::MemoryRead, *addr))
+        .collect();
     declared.sort_unstable();
 
     if extras.is_empty() {
@@ -257,18 +290,78 @@ pub fn compare_transfers_allowing(
         mismatches.push(
             Mismatch::new(
                 "corpus omission",
-                format!("extra reads at {declared:04x?}"),
-                format!("extra transfers {}", render_transfers(&extras)),
+                render_accesses(&declared),
+                render_accesses(&found),
             )
             .with_note(format!(
-                "the omission for {:?} declares which reads the corpus elides; the core \
-                 performed a different set. Reason on file: {}",
+                "the omission for {:?} declares exactly which accesses the corpus elides, \
+                 and they must all be reads; the core made a different set. Reason on \
+                 file: {}",
                 omission.vector, omission.reason,
             )),
         );
     }
 
     mismatches
+}
+
+/// The rot-guard for [`CorpusOmission::disputed_flag_bits`].
+///
+/// **Every named bit must actually differ — not merely one of them.** The weaker reading
+/// fired only when the whole declaration was dead, so declaring both undocumented bits when
+/// only one diverges was invisible: the other was excused for nothing, permanently, and the
+/// guard reported success. That is the identical "a suppression nobody needs is a
+/// suppression nobody notices" case the guard exists to prevent, one level down — per-bit
+/// rather than per-vector.
+///
+/// Measured on the four `BIT n,(HL)` entries when they all declared both bits: `cb4e` and
+/// `cb76` diverge on bit 3 alone, `cb6e` on bit 5 alone. Three of four were over-declared
+/// and nothing said so.
+pub fn compare_disputed_flags(
+    omission: &CorpusOmission,
+    expected_f: u8,
+    actual_f: u8,
+) -> Vec<Mismatch> {
+    let disputed = omission.disputed_flag_bits;
+    let differing = (expected_f ^ actual_f) & disputed;
+    if disputed == 0 || differing == disputed {
+        return Vec::new();
+    }
+
+    let superfluous = disputed & !differing;
+    vec![
+        Mismatch::new(
+            "disputed flag bits",
+            format!(
+                "every declared bit to differ: {}",
+                flags::describe(disputed)
+            ),
+            format!(
+                "these agree and are excused for nothing: {}",
+                render_mask(superfluous)
+            ),
+        )
+        .with_note(format!(
+            "NARROW the declaration for {:?} to the bits that genuinely diverge, or DELETE it \
+             if none do. An excused bit that already agrees suppresses nothing today and \
+             hides the next real divergence at that opcode. Reason on file: {}",
+            omission.vector, omission.reason,
+        )),
+    ]
+}
+
+/// Name the set bits of a mask: `Y(bit5), X(bit3)`.
+fn render_mask(mask: u8) -> String {
+    let named: Vec<&str> = flags::BITS
+        .iter()
+        .filter(|(_, bit)| mask & bit != 0)
+        .map(|(name, _)| *name)
+        .collect();
+    if named.is_empty() {
+        String::from("(none)")
+    } else {
+        named.join(", ")
+    }
 }
 
 /// Compare the bytes moved, in order, ignoring timestamps.
@@ -309,18 +402,29 @@ pub fn compare(
     omission: Option<&CorpusOmission>,
     read: impl Fn(u16) -> u8,
 ) -> Vec<Mismatch> {
-    let mut mismatches = compare_registers(&expected.registers, actual_registers);
+    let disputed = omission.map_or(0, |omission| omission.disputed_flag_bits);
+    let mut mismatches = compare_registers(&expected.registers, actual_registers, disputed);
+    if let Some(omission) = omission {
+        mismatches.extend(compare_disputed_flags(
+            omission,
+            expected.registers.f(),
+            actual_registers.f(),
+        ));
+    }
     mismatches.extend(compare_state(&expected.state, actual_state));
     mismatches.extend(compare_t_states(
         expected.state.t_states,
         actual_state.t_states,
     ));
     mismatches.extend(compare_memory(&expected.memory, read));
+    // The relaxing comparator is used only when there is something to relax. An omission
+    // that declares no elided reads gets the strict comparison, so its "DELETE it" guard
+    // cannot misfire on a vector whose disagreement was never about transfers.
     mismatches.extend(match omission {
-        Some(omission) => {
+        Some(omission) if !omission.elided_reads.is_empty() => {
             compare_transfers_allowing(&expected.transfers(), actual_transfers, omission)
         }
-        None => compare_transfers(&expected.transfers(), actual_transfers),
+        _ => compare_transfers(&expected.transfers(), actual_transfers),
     });
     // The contention half is never relaxed. An omission concerns whether MREQ is asserted
     // during a cycle; it says nothing about which address is on the bus, and the corpus is
@@ -374,6 +478,18 @@ pub fn render_contention_points(expected: &Expectation) -> String {
     } else {
         points.join(", ")
     }
+}
+
+/// Render `(kind, address)` pairs as `MR 0001, MW 7fff`.
+fn render_accesses(accesses: &[(EventKind, u16)]) -> String {
+    if accesses.is_empty() {
+        return String::from("(none)");
+    }
+    accesses
+        .iter()
+        .map(|(kind, addr)| format!("{} {addr:04x}", kind.token()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Render a transfer list.

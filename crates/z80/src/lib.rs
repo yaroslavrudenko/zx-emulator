@@ -25,10 +25,11 @@
 //!
 //! # Scope
 //!
-//! This is milestone M1: the un-prefixed opcodes, `0x00`–`0xFF` less the four prefix
-//! bytes. The `CB`, `DD`, `ED` and `FD` prefixes neither panic nor silently do nothing —
-//! both of which would turn a missing instruction into a bug that takes a week to find.
-//! They record a [`StepError`] readable through [`Cpu::fault`].
+//! Every opcode decodes: the un-prefixed set, `CB`, `DD`, `FD`, `ED`, and the `DDCB` /
+//! `FDCB` combinations — including the undocumented forms, which real software uses. That
+//! covers `SLL`, the index-register halves `IXh`/`IXl`, and the `DDCB` encodings that write
+//! their result to memory *and* copy it into a register. Unassigned `ED` encodings behave
+//! as two-byte `NOP`s, which is the hardware's own rule rather than a fallback.
 //!
 //! Interrupt acceptance *is* implemented ([`Cpu::interrupt`], [`Cpu::nmi`]), because
 //! leaving `HALT` requires pushing a return address and dispatching through the interrupt
@@ -42,14 +43,29 @@
 //! than transfers are charged explicitly. [`Cpu::step`] returns the total as a
 //! convenience, but the authoritative account is the sequence of `tick` calls.
 //!
+//! **A single step has no upper bound.** A run of `DD`/`FD` prefix bytes is *one*
+//! instruction — each prefix costs its own M1 cycle, and the whole run is uninterruptible,
+//! which is a real technique for protecting a critical section. A machine's frame loop must
+//! therefore treat one step as able to overrun its remaining budget, rather than assuming
+//! any small maximum.
+//!
 //! # Known deviations from real silicon
 //!
 //! - **`SCF`/`CCF` undocumented bits.** They are taken from the accumulator. A real NMOS
 //!   Z80 ORs in the flag latch left by the previous instruction — the latch is recorded
 //!   here as [`CpuState::q`], but the rule that consumes it is not implemented, because
 //!   `zexall` at M4 adjudicates two genuinely contested cases (`POP AF` and `EX AF,AF'`).
-//! - **`MEMPTR`** ([`CpuState::wz`]) is carried through snapshots but never updated; it
-//!   becomes observable only through `BIT n,(HL)` and the `ED` block operations, both M2.
+//! - **`BIT n,(HL)`** takes its undocumented bits from the high byte of `MEMPTR`, which is
+//!   the hardware rule. The FUSE corpus predates the `MEMPTR` work and expects them from
+//!   the tested value instead, so four of its vectors are carried as documented omissions.
+//!   `zexall` settles it at M4.
+//!
+//! # What is modelled that the field names may not suggest
+//!
+//! - **`MEMPTR`/`WZ`** ([`CpuState::wz`]) is *live*, not an inert snapshot field: every
+//!   indexed `(IX+d)`/`(IY+d)` access sets it, and `BIT` reads it back. It is the mechanism
+//!   behind the `BIT n,(IX+d)` flag rule. The un-prefixed instructions that also update it
+//!   on hardware — `LD A,(nn)`, `JP nn`, `EX (SP),HL` and their relatives — do not yet.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(missing_docs)]
@@ -63,6 +79,7 @@ pub(crate) mod flags;
 
 pub use bus::Bus;
 
+use decode::Index;
 use registers::{Registers, index, pair};
 
 /// T-states in an opcode fetch (M1).
@@ -86,28 +103,29 @@ const NMI_VECTOR: u16 = 0x0066;
 /// Where a mode 1 interrupt always vectors — the Spectrum's 50 Hz frame interrupt.
 const MODE_1_VECTOR: u16 = 0x0038;
 
-/// A condition that stopped an instruction short.
+/// The prefix that substitutes `IX` for `HL`.
+const PREFIX_DD: u8 = 0xDD;
+
+/// The prefix that substitutes `IY` for `HL`.
+const PREFIX_FD: u8 = 0xFD;
+
+/// The prefix introducing the rotate, shift and bit operations.
+const PREFIX_CB: u8 = 0xCB;
+
+/// The prefix introducing the extended instruction page.
+const PREFIX_ED: u8 = 0xED;
+
+/// A condition the CPU could not act on.
 ///
-/// This is a permanent diagnostic channel, not M1 scaffolding. The prefix variant
-/// disappears when M2 implements the prefixes, but an `ED` opcode with no defined meaning
-/// can still be reached at any milestone, and a machine wants somewhere to report it other
-/// than a panic.
+/// Every opcode now decodes — including the unassigned `ED` encodings, which the hardware
+/// defines as two-byte `NOP`s rather than errors — so [`Cpu::step`] cannot produce one of
+/// these. The remaining source is [`Cpu::interrupt`]: in mode 0 the interrupting device
+/// puts an instruction on the data bus, and a byte this core cannot execute is a genuine
+/// runtime condition on a general-purpose core, not scaffolding. That one case is why the
+/// type exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum StepError {
-    /// A `CB`, `DD`, `ED` or `FD` prefix was fetched. Those instruction sets land in M2.
-    ///
-    /// The prefix's own opcode fetch has already happened by the time this is recorded:
-    /// four T-states are charged, `PC` has advanced past the prefix byte and `R` has been
-    /// incremented, exactly as on hardware. `address` names the prefix byte itself.
-    #[error("opcode prefix {prefix:#04X} at {address:#06X} is not implemented yet")]
-    UnsupportedPrefix {
-        /// The prefix byte that was fetched.
-        prefix: u8,
-        /// The address the prefix byte was fetched from.
-        address: u16,
-    },
-
     /// A mode 0 interrupt supplied a byte this core cannot execute.
     ///
     /// In mode 0 the interrupting device places an instruction on the data bus. Only the
@@ -290,8 +308,13 @@ struct InterruptState {
 /// Generic over the bus rather than holding a trait object: the core is monomorphised into
 /// its machine, so there is no indirect call on the execute path and the bus accessors
 /// inline.
+///
+/// The `Bus` bound lives on the `impl` blocks, not here. None of the fields need it to be
+/// well-formed, and putting it on the struct would force every downstream type naming a
+/// `Cpu<Ula>` — a machine, a snapshot writer, a debugger — to repeat `where Ula: Bus` in
+/// its own definition for nothing.
 #[derive(Debug, Clone)]
-pub struct Cpu<B: Bus> {
+pub struct Cpu<B> {
     regs: Registers,
     bus: B,
     interrupts: InterruptState,
@@ -301,7 +324,7 @@ pub struct Cpu<B: Bus> {
     /// The flag latch. See [`CpuState::q`].
     q: u8,
     /// T-states charged during the instruction currently executing.
-    t_states: u8,
+    t_states: u32,
     /// What stopped the most recent [`Cpu::step`] short, if anything.
     fault: Option<StepError>,
 }
@@ -354,23 +377,43 @@ impl<B: Bus> Cpu<B> {
     /// the `HALT` opcode and `R` keeps advancing, exactly as the hardware does. Use
     /// [`Cpu::interrupt`] or [`Cpu::nmi`] to resume.
     ///
-    /// An opcode this milestone does not implement is not a panic and not a silent no-op:
-    /// the T-states genuinely consumed are returned and the reason is recorded in
-    /// [`Cpu::fault`], which a caller that cares can check after each step.
+    /// Every opcode decodes, so a step cannot fail. Unassigned `ED` encodings are two-byte
+    /// `NOP`s, which is the hardware's own rule rather than a fallback.
     pub fn step(&mut self) -> u32 {
         self.begin_operation();
 
         if self.halted {
             self.halt_cycle();
-            return u32::from(self.t_states);
+            return self.t_states;
         }
 
-        let opcode = self.fetch_opcode();
-        // `Result::err` keeps the diagnosis and discards the unit success — the error is
-        // recorded for the caller, never dropped.
-        self.fault = self.execute(opcode, pair::HL).err();
+        self.dispatch();
 
-        u32::from(self.t_states)
+        self.t_states
+    }
+
+    /// Fetch one instruction, consuming any `DD`/`FD` prefixes that precede it.
+    ///
+    /// Each prefix is its own M1 cycle — four T-states and its own `R` increment — which is
+    /// why this is a loop rather than a lookahead. `DD FD 00` is three M1 cycles and leaves
+    /// `R` advanced by three; a chain of a hundred `DD` bytes is a hundred instructions'
+    /// worth of refresh, and iterating rather than recursing means such a chain cannot
+    /// exhaust the stack.
+    ///
+    /// Only the last prefix counts: `DD FD 21` loads `IY`, because each prefix overwrites
+    /// the substitution the previous one set up.
+    fn dispatch(&mut self) {
+        let mut index = Index::Hl;
+        loop {
+            let opcode = self.fetch_opcode();
+            match opcode {
+                PREFIX_DD => index = Index::Ix,
+                PREFIX_FD => index = Index::Iy,
+                PREFIX_CB => return self.execute_cb(index),
+                PREFIX_ED => return self.execute_ed(),
+                other => return self.execute(other, index),
+            }
+        }
     }
 
     /// Offer a maskable interrupt, returning the T-states it consumed.
@@ -419,7 +462,7 @@ impl<B: Bus> Cpu<B> {
             }
         }
 
-        u32::from(self.t_states)
+        self.t_states
     }
 
     /// Raise a non-maskable interrupt, returning the T-states it consumed.
@@ -437,15 +480,15 @@ impl<B: Bus> Cpu<B> {
         self.push_word(return_address);
         self.regs.set_pc(NMI_VECTOR);
 
-        u32::from(self.t_states)
+        self.t_states
     }
 
     /// What stopped the most recent operation short, if anything.
     ///
     /// Cleared at the start of every operation the CPU actually performs — a step, an
-    /// accepted interrupt, an NMI — so it always describes the latest one. An interrupt
-    /// offer that is *declined* performs no work and leaves the previous value in place,
-    /// except in mode 0, where the reason for declining is itself recorded here.
+    /// accepted interrupt, an NMI — so it always describes the latest one. In practice only
+    /// a declined mode 0 interrupt ever sets it: no opcode can fail, so a step always
+    /// leaves it clear.
     ///
     /// It is diagnostic, not architectural: [`Cpu::set_state`] does not touch it, because
     /// loading a snapshot is not an operation and no snapshot format carries a fault.
@@ -612,10 +655,11 @@ impl<B: Bus> Cpu<B> {
     /// Advance the clock by one T-state with `address` on the bus.
     #[inline]
     fn tick(&mut self, address: u16) {
-        // INVARIANT: the longest Z80 instruction is 23 T-states and the longest interrupt
-        // acknowledge sequence 19, so a per-instruction accumulator cannot overflow a byte.
-        // `overflow-checks = true` is set in every profile, so a mistake here is a loud
-        // panic rather than a silent wrap.
+        // A single instruction is *not* bounded by the 23 T-states of the longest opcode:
+        // a run of `DD`/`FD` prefix bytes is one instruction, four T-states per prefix, and
+        // guest memory decides how long that run is. A byte-wide accumulator overflowed at
+        // 63 prefixes, and with `overflow-checks = true` in every profile that aborted the
+        // process on a legal instruction stream.
         self.t_states += 1;
         self.bus.tick(address);
     }
@@ -712,15 +756,6 @@ impl<B: Bus> Cpu<B> {
     fn carry_flag(&self) -> bool {
         (self.regs.f() & flags::CARRY) != 0
     }
-
-    /// Build the fault for a prefix byte this milestone does not implement.
-    fn unsupported_prefix(&self, prefix: u8) -> StepError {
-        StepError::UnsupportedPrefix {
-            prefix,
-            // The prefix's own fetch has already advanced PC past it.
-            address: self.regs.pc().wrapping_sub(1),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -791,6 +826,16 @@ mod tests {
         }
     }
 
+    /// A downstream type naming a `Cpu<B>` without repeating the `Bus` bound.
+    ///
+    /// This is a compile-time assertion, not a runtime one: with `Bus` on the struct
+    /// definition it does not compile, so its mere existence is the proof. `spectrum` will
+    /// hold exactly this shape.
+    #[expect(dead_code, reason = "exists to be compiled, not called")]
+    struct DownstreamHolder<B> {
+        cpu: Cpu<B>,
+    }
+
     /// Assemble `program` at address zero and run one instruction from `state`.
     fn run_one(program: &[u8], state: CpuState) -> (u32, Cpu<Ram>) {
         let mut cpu = Cpu::new(Ram::new(program));
@@ -841,6 +886,13 @@ mod tests {
         };
         let counter_one = CpuState {
             bc: 0x0100,
+            ..ready()
+        };
+        // The transfers count all of `BC`; the I/O forms count only `B`. So "one pass
+        // left" is a different register value for each, and `counter_one` (B = 1) already
+        // is the I/O case.
+        let last_transfer_pass = CpuState {
+            bc: 0x0001,
             ..ready()
         };
 
@@ -901,8 +953,50 @@ mod tests {
             ("RLCA", &[0x07], zero, 4),
             ("DI", &[0xF3], zero, 4),
             ("EI", &[0xFB], zero, 4),
-            // A prefix still costs its own opcode fetch, exactly as on hardware.
-            ("CB prefix", &[0xCB], zero, 4),
+            // CB, DD and FD are implemented; each prefix still costs its own M1 cycle.
+            ("RLC B", &[0xCB, 0x00], zero, 8),
+            ("RLC (HL)", &[0xCB, 0x06], zero, 15),
+            ("BIT 0,(HL)", &[0xCB, 0x46], zero, 12),
+            ("LD B,IXh", &[0xDD, 0x44], zero, 8),
+            ("LD IX,nn", &[0xDD, 0x21, 0x34, 0x12], zero, 14),
+            ("INC IX", &[0xDD, 0x23], zero, 10),
+            ("ADD IX,BC", &[0xDD, 0x09], zero, 15),
+            ("JP (IX)", &[0xDD, 0xE9], zero, 8),
+            ("LD SP,IX", &[0xDD, 0xF9], zero, 10),
+            ("PUSH IX", &[0xDD, 0xE5], zero, 15),
+            ("EX (SP),IX", &[0xDD, 0xE3], zero, 23),
+            // The indexed memory forms: five computation T-states, or two when an operand
+            // byte fetched after the displacement has already spent three.
+            ("LD A,(IX+d)", &[0xDD, 0x7E, 0x01], zero, 19),
+            ("LD (IX+d),A", &[0xDD, 0x77, 0x01], zero, 19),
+            ("ADD A,(IX+d)", &[0xDD, 0x86, 0x01], zero, 19),
+            ("LD (IX+d),n", &[0xDD, 0x36, 0x01, 0x42], zero, 19),
+            ("INC (IX+d)", &[0xDD, 0x34, 0x01], zero, 23),
+            ("RLC (IX+d)", &[0xDD, 0xCB, 0x01, 0x06], zero, 23),
+            ("BIT 0,(IX+d)", &[0xDD, 0xCB, 0x01, 0x46], zero, 20),
+            // The ED page. An unassigned encoding is a two-byte NOP, not a fault.
+            ("ED unassigned (NOP)", &[0xED, 0x00], zero, 8),
+            ("NEG", &[0xED, 0x44], zero, 8),
+            ("IM 1", &[0xED, 0x56], zero, 8),
+            ("LD I,A", &[0xED, 0x47], zero, 9),
+            ("LD A,R", &[0xED, 0x5F], zero, 9),
+            ("IN B,(C)", &[0xED, 0x40], zero, 12),
+            ("OUT (C),B", &[0xED, 0x41], zero, 12),
+            ("RETN", &[0xED, 0x45], zero, 14),
+            ("SBC HL,BC", &[0xED, 0x42], zero, 15),
+            ("ADC HL,BC", &[0xED, 0x4A], zero, 15),
+            ("LDI", &[0xED, 0xA0], zero, 16),
+            ("CPI", &[0xED, 0xA1], zero, 16),
+            ("INI", &[0xED, 0xA2], zero, 16),
+            ("OUTI", &[0xED, 0xA3], zero, 16),
+            ("RRD", &[0xED, 0x67], zero, 18),
+            // A repeating pass costs five more than its non-repeating twin.
+            ("LDIR (repeating)", &[0xED, 0xB0], zero, 21),
+            ("LDIR (final pass)", &[0xED, 0xB0], last_transfer_pass, 16),
+            ("OTIR (repeating)", &[0xED, 0xB3], zero, 21),
+            ("OTIR (final pass)", &[0xED, 0xB3], counter_one, 16),
+            ("LD (nn),BC", &[0xED, 0x43, 0x00, 0x40], zero, 20),
+            ("LD BC,(nn)", &[0xED, 0x4B, 0x00, 0x40], zero, 20),
         ];
 
         for (name, program, state, expected) in cases {
@@ -1112,30 +1206,316 @@ mod tests {
             ..ready()
         };
 
-        let mut cpu = Cpu::new(Ram::new(&[0xCB]));
-        cpu.set_state(armed);
-        cpu.step();
-        assert!(cpu.fault().is_some(), "the prefix faulted");
+        let faulted = CpuState {
+            im: InterruptMode::Mode0,
+            ..armed
+        };
+
+        let mut cpu = Cpu::new(Ram::new(&[0x00]));
+        cpu.set_state(faulted);
+        cpu.interrupt(0x00);
+        assert!(cpu.fault().is_some(), "mode 0 rejected the byte");
+        cpu.set_state(armed); // back to mode 1, which accepts
         cpu.interrupt(0xFF);
         assert!(cpu.fault().is_none(), "an accepted interrupt clears it");
 
-        let mut cpu = Cpu::new(Ram::new(&[0xCB]));
-        cpu.set_state(armed);
-        cpu.step();
+        let mut cpu = Cpu::new(Ram::new(&[0x00]));
+        cpu.set_state(faulted);
+        cpu.interrupt(0x00);
         assert!(cpu.fault().is_some());
         cpu.nmi();
         assert!(cpu.fault().is_none(), "and so does an NMI");
     }
 
     #[test]
-    fn every_unprefixed_opcode_is_decoded() {
-        for opcode in 0..=u8::MAX {
-            let (t_states, cpu) = run_one(&[opcode, 0x00, 0x00], ready());
-            let is_prefix = matches!(opcode, 0xCB | 0xDD | 0xED | 0xFD);
+    fn an_index_prefix_reaches_the_register_halves_only_without_a_memory_operand() {
+        // The subtlest thing about `DD`/`FD`. When neither operand is memory the prefix
+        // substitutes `H`/`L`; when either operand *is* memory it has already been spent on
+        // the address, and the register half stays real.
+
+        // `DD 44` — LD B,IXh. Substituted.
+        let state = CpuState {
+            ix: 0x2702,
+            bc: 0x00B0,
+            ..ready()
+        };
+        let (_, cpu) = run_one(&[0xDD, 0x44], state);
+        assert_eq!(cpu.state().bc, 0x27B0, "LD B,IXh takes IX's high byte");
+
+        // `DD 66` — LD H,(IX+d). The byte lands in real `H`; corpus vector `dd66`.
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0x66, 0x02]));
+        cpu.bus_mut().memory[0x1002] = 0x03;
+        cpu.set_state(CpuState {
+            ix: 0x1000,
+            hl: 0xAAA0,
+            ..ready()
+        });
+        cpu.step();
+        assert_eq!(cpu.state().hl, 0x03A0, "into H, leaving L alone");
+        assert_eq!(cpu.state().ix, 0x1000, "IX is not the destination");
+
+        // `DD 74` — LD (IX+d),H. Stores real `H` (0x01), not `IXh` (0x10). Corpus `dd74`.
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0x74, 0x02]));
+        cpu.set_state(CpuState {
+            ix: 0x1000,
+            hl: 0x0125,
+            ..ready()
+        });
+        cpu.step();
+        assert_eq!(cpu.bus().peek(0x1002), 0x01, "H, not IXh");
+
+        // `DD 64` — LD IXh,IXh. Both halves substituted, so a no-op.
+        let state = CpuState {
+            ix: 0xEFC7,
+            ..ready()
+        };
+        let (_, cpu) = run_one(&[0xDD, 0x64], state);
+        assert_eq!(cpu.state().ix, 0xEFC7);
+    }
+
+    #[test]
+    fn an_indexed_cb_writes_memory_and_its_undocumented_forms_also_copy_to_a_register() {
+        // Only the `110` encoding is the documented memory-only form; the other seven copy
+        // the result into a register as well, and they are 7/8 of the `DDCB` corpus.
+
+        // `DD CB d 06` — the documented RLC (IX+d).
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0xCB, 0x02, 0x06]));
+        cpu.bus_mut().memory[0x1002] = 0xA1;
+        cpu.set_state(CpuState {
+            ix: 0x1000,
+            bc: 0xFFFF,
+            ..ready()
+        });
+        cpu.step();
+        assert_eq!(cpu.bus().peek(0x1002), 0x43, "0xA1 rotated left circular");
+        assert_eq!(
+            cpu.state().bc,
+            0xFFFF,
+            "no register copy for the 110 encoding"
+        );
+
+        // `DD CB d 00` — the undocumented RLC (IX+d),B. Corpus vector `ddcb00`.
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0xCB, 0x02, 0x00]));
+        cpu.bus_mut().memory[0x1002] = 0xA1;
+        cpu.set_state(CpuState {
+            ix: 0x1000,
+            bc: 0x00E4,
+            ..ready()
+        });
+        cpu.step();
+        assert_eq!(cpu.bus().peek(0x1002), 0x43, "memory still gets the result");
+        assert_eq!(cpu.state().bc, 0x43E4, "and so does B");
+    }
+
+    #[test]
+    fn each_index_prefix_is_its_own_machine_cycle_and_the_last_one_wins() {
+        // `DD FD 00` — three M1 cycles, three refreshes. Corpus vector `ddfd00`.
+        let (t_states, cpu) = run_one(&[0xDD, 0xFD, 0x00], ready());
+        assert_eq!(t_states, 12, "three opcode fetches");
+        assert_eq!(cpu.state().r, 3, "each prefix refreshes memory");
+        assert_eq!(cpu.state().pc, 0x0003);
+
+        // Each prefix overwrites the previous substitution, so `DD FD 23` is `INC IY`.
+        let state = CpuState {
+            ix: 0x1111,
+            iy: 0x2222,
+            ..ready()
+        };
+        let (_, cpu) = run_one(&[0xDD, 0xFD, 0x23], state);
+        assert_eq!(cpu.state().iy, 0x2223, "the last prefix decides");
+        assert_eq!(cpu.state().ix, 0x1111);
+    }
+
+    #[test]
+    fn an_index_displacement_is_signed_and_bit_reads_the_address_it_formed() {
+        // Corpus `dd7e`: IX = 0x1CF4 with d = 0xBC (-68) addresses 0x1CB0.
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0x7E, 0xBC]));
+        cpu.bus_mut().memory[0x1CB0] = 0x57;
+        cpu.set_state(CpuState {
+            ix: 0x1CF4,
+            ..ready()
+        });
+        cpu.step();
+        assert_eq!(
+            cpu.state().af.to_be_bytes()[0],
+            0x57,
+            "negative displacement"
+        );
+
+        // Corpus `ddcb46`: the tested value 0xD5 carries neither undocumented bit, but the
+        // effective address 0xA381 carries bit 5 — and `F` comes back with it. This is what
+        // separates "bits from the value" from "bits from MEMPTR".
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0xCB, 0xE2, 0x46]));
+        cpu.bus_mut().memory[0xA381] = 0xD5;
+        cpu.set_state(CpuState {
+            ix: 0xA39F,
+            af: 0x0000,
+            ..ready()
+        });
+        cpu.step();
+        let [_, f] = cpu.state().af.to_be_bytes();
+        assert_eq!(f, flags::BIT5 | flags::HALF_CARRY);
+        assert_eq!(cpu.state().wz, 0xA381, "the indexed access recorded MEMPTR");
+    }
+
+    #[test]
+    fn retn_restores_the_flip_flop_a_non_maskable_interrupt_saved() {
+        // An NMI copies `IFF1` into `IFF2` and clears `IFF1`; `RETN` is what puts it back.
+        // Without this, maskable interrupts stay off forever after the first NMI.
+        let mut cpu = Cpu::new(Ram::new(&[0xED, 0x45]));
+        cpu.bus_mut().memory[0xFFFE] = 0x34;
+        cpu.bus_mut().memory[0xFFFF] = 0x12;
+        cpu.set_state(CpuState {
+            sp: 0xFFFE,
+            iff1: false,
+            iff2: true,
+            ..ready()
+        });
+
+        let t_states = cpu.step();
+        assert_eq!(t_states, 14);
+        assert_eq!(cpu.state().pc, 0x1234, "returned through the stack");
+        assert!(cpu.state().iff1, "IFF1 restored from IFF2");
+    }
+
+    #[test]
+    fn loading_a_from_the_interrupt_registers_reports_iff2_in_parity() {
+        // `LD A,I` and `LD A,R` are the only way software can observe the interrupt
+        // flip-flop, and P/V is where it appears — not parity, as everywhere else.
+        for iff2 in [false, true] {
+            let state = CpuState {
+                i: 0x40,
+                iff2,
+                ..ready()
+            };
+            let (a, f) = accumulator_and_flags(&[0xED, 0x57], state); // LD A,I
+            assert_eq!(a, 0x40);
             assert_eq!(
-                cpu.fault().is_some(),
-                is_prefix,
-                "opcode {opcode:#04X} fault state"
+                (f & flags::PARITY_OVERFLOW) != 0,
+                iff2,
+                "P/V carries IFF2, not parity"
+            );
+        }
+    }
+
+    #[test]
+    fn ldi_takes_flag_bit_5_from_bit_1_of_a_plus_the_transferred_byte() {
+        // The block transfers' undocumented bits come from `A + byte`, and bit 5 of `F`
+        // comes from bit **1** of that sum rather than bit 5. A sum of 0x02 has bit 1 set
+        // and bits 3 and 5 clear, so it separates the quirk from the obvious reading.
+        let mut cpu = Cpu::new(Ram::new(&[0xED, 0xA0]));
+        cpu.bus_mut().memory[0x4000] = 0x02;
+        cpu.set_state(CpuState {
+            af: 0x0000,
+            hl: 0x4000,
+            de: 0x5000,
+            bc: 0x0002,
+            ..ready()
+        });
+
+        let t_states = cpu.step();
+        let after = cpu.state();
+        let [_, f] = after.af.to_be_bytes();
+
+        assert_eq!(t_states, 16);
+        assert_eq!(cpu.bus().peek(0x5000), 0x02, "the byte was copied");
+        assert_eq!(after.hl, 0x4001, "pointers walk forward");
+        assert_eq!(after.de, 0x5001);
+        assert_eq!(after.bc, 0x0001);
+        assert_eq!(f & flags::BIT5, flags::BIT5, "from bit 1 of A + byte");
+        assert_eq!(f & flags::BIT3, 0, "bit 3 is genuinely bit 3");
+        assert_eq!(
+            f & flags::PARITY_OVERFLOW,
+            flags::PARITY_OVERFLOW,
+            "P/V reports BC is still non-zero"
+        );
+    }
+
+    #[test]
+    fn the_extended_page_ignores_an_index_prefix() {
+        // `DD ED 44` is just `NEG`: the extended page has no indexed forms, so the prefix
+        // buys nothing but its own M1 cycle and refresh.
+        let state = CpuState {
+            af: 0x0100,
+            ..ready()
+        };
+        let (_, cpu) = run_one(&[0xDD, 0xED, 0x44], state);
+
+        assert_eq!(
+            cpu.state().af.to_be_bytes()[0],
+            0xFF,
+            "NEG of 1 is 0xFF, unaffected by the DD"
+        );
+        assert_eq!(cpu.state().r, 3, "three M1 cycles all the same");
+    }
+
+    #[test]
+    fn a_long_prefix_run_does_not_overflow_the_t_state_count() {
+        // A run of `DD` bytes is one instruction: each prefix is its own M1 cycle and the
+        // whole run is uninterruptible, which is a real technique for protecting a critical
+        // section. It also arises from uninitialised RAM or a corrupt snapshot — so the
+        // length is guest data, not something the core may assume small.
+        //
+        // A byte-wide T-state accumulator overflowed at 63 prefixes, and with
+        // `overflow-checks = true` in every profile that aborted the process on a legal
+        // instruction stream.
+        const PREFIX_RUN: usize = 300;
+        let mut program = vec![0xDD; PREFIX_RUN];
+        program.push(0x00); // the NOP the run finally prefixes
+
+        let mut cpu = Cpu::new(Ram::new(&program));
+        cpu.set_state(ready());
+        let t_states = cpu.step();
+
+        assert_eq!(t_states, 1204, "301 opcode fetches at four T-states each");
+        assert_eq!(cpu.state().pc, 301, "one byte consumed per fetch");
+        // 301 increments of a 7-bit counter from zero: 301 - 256 = 45.
+        assert_eq!(cpu.state().r, 45, "every prefix refreshes memory");
+    }
+
+    #[test]
+    fn the_indexed_cb_copy_lands_in_the_real_register_not_the_index_half() {
+        // `DD CB d 04` is `RLC (IX+d),H`: the copy goes to real `H`, never `IXh`, because
+        // the prefix has already been spent on the address. Substituting the index base
+        // here would still copy *something* — so a test that only checks "the copy
+        // happened" cannot see the difference. This one pins where it lands.
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0xCB, 0x02, 0x04]));
+        cpu.bus_mut().memory[0x1002] = 0xA1;
+        cpu.set_state(CpuState {
+            ix: 0x1000,
+            hl: 0x5566,
+            ..ready()
+        });
+        cpu.step();
+
+        assert_eq!(cpu.bus().peek(0x1002), 0x43, "memory took the result");
+        assert_eq!(cpu.state().hl, 0x4366, "and so did real H, leaving L alone");
+        assert_eq!(cpu.state().ix, 0x1000, "IXh is untouched");
+
+        // The `L` encoding, for the other half of the same asymmetry.
+        let mut cpu = Cpu::new(Ram::new(&[0xDD, 0xCB, 0x02, 0x05]));
+        cpu.bus_mut().memory[0x1002] = 0xA1;
+        cpu.set_state(CpuState {
+            ix: 0x1000,
+            hl: 0x5566,
+            ..ready()
+        });
+        cpu.step();
+
+        assert_eq!(cpu.state().hl, 0x5543, "real L, not IXl");
+        assert_eq!(cpu.state().ix, 0x1000);
+    }
+
+    #[test]
+    fn every_opcode_is_decoded_or_reports_a_fault() {
+        for opcode in 0..=u8::MAX {
+            let (t_states, cpu) = run_one(&[opcode, 0x00, 0x00, 0x00], ready());
+            // Every prefix now decodes. `ED 00` is an unassigned encoding, which the
+            // hardware defines as a two-byte NOP rather than an error.
+            assert!(
+                cpu.fault().is_none(),
+                "opcode {opcode:#04X} faulted: {:?}",
+                cpu.fault()
             );
             // Even the shortest instruction spends its opcode fetch, so a zero total would
             // mean an arm that silently did nothing.
@@ -1147,36 +1527,92 @@ mod tests {
     }
 
     #[test]
-    fn prefixes_report_the_byte_and_its_address() {
-        for prefix in [0xCB_u8, 0xDD, 0xED, 0xFD] {
-            let state = CpuState {
-                pc: 0x1234,
-                ..ready()
-            };
-            let mut cpu = Cpu::new(Ram::new(&[]));
-            cpu.bus_mut().memory[0x1234] = prefix;
-            cpu.set_state(state);
-            cpu.step();
+    fn a_repeating_block_instruction_rewinds_onto_itself_one_pass_at_a_time() {
+        // The Z80 has no internal loop: it steps `PC` back onto its own two opcode bytes,
+        // so one `step()` is one iteration and the instruction stays interruptible
+        // throughout. That is what lets a 64 KB `LDIR` coexist with a 50 Hz frame
+        // interrupt — and it is why the harness's step cap is never under pressure.
+        let mut cpu = Cpu::new(Ram::new(&[0xED, 0xB0]));
+        cpu.bus_mut().memory[0x4000] = 0xAA;
+        cpu.bus_mut().memory[0x4001] = 0xBB;
+        cpu.bus_mut().memory[0x4002] = 0xCC;
+        cpu.set_state(CpuState {
+            hl: 0x4000,
+            de: 0x5000,
+            bc: 0x0003,
+            ..ready()
+        });
 
-            assert_eq!(
-                cpu.fault(),
-                Some(StepError::UnsupportedPrefix {
-                    prefix,
-                    address: 0x1234,
-                })
-            );
-        }
+        let first = cpu.step();
+        assert_eq!(first, 21, "a repeating pass costs 21 T-states");
+        assert_eq!(cpu.state().pc, 0x0000, "PC rewound onto the ED byte");
+        assert_eq!(cpu.state().bc, 0x0002);
+        assert_eq!(cpu.state().r, 2, "two M1 cycles per pass");
+
+        cpu.step();
+        assert_eq!(cpu.state().pc, 0x0000);
+        assert_eq!(cpu.state().r, 4, "and two more");
+
+        let last = cpu.step();
+        assert_eq!(last, 16, "the final pass does not rewind");
+        assert_eq!(cpu.state().pc, 0x0002, "so execution moves on");
+        assert_eq!(cpu.state().bc, 0x0000);
+
+        assert_eq!(cpu.bus().peek(0x5000), 0xAA);
+        assert_eq!(cpu.bus().peek(0x5001), 0xBB);
+        assert_eq!(cpu.bus().peek(0x5002), 0xCC);
+    }
+
+    #[test]
+    fn cpir_stops_on_a_match_as_well_as_on_the_counter() {
+        // The searching forms have a two-termed exit — `BC != 0` *and* no match — and both
+        // terms need to hold or the loop either runs off the end or stops too early.
+        // Corpus `edb1` exits on the match, `edb9` on the counter.
+
+        // A match on the second byte, with the counter still non-zero.
+        let mut cpu = Cpu::new(Ram::new(&[0xED, 0xB1]));
+        cpu.bus_mut().memory[0x4001] = 0x42;
+        cpu.set_state(CpuState {
+            af: 0x4200,
+            hl: 0x4000,
+            bc: 0x0004,
+            ..ready()
+        });
+        cpu.step();
+        assert_eq!(cpu.state().pc, 0x0000, "no match yet, so it rewinds");
+        cpu.step();
+        assert_eq!(cpu.state().pc, 0x0002, "match found, the loop exits");
+        assert_eq!(cpu.state().bc, 0x0002, "with the counter still non-zero");
+
+        // No match anywhere: it runs until the counter is exhausted.
+        let mut cpu = Cpu::new(Ram::new(&[0xED, 0xB1]));
+        cpu.set_state(CpuState {
+            af: 0xFF00,
+            hl: 0x4000,
+            bc: 0x0002,
+            ..ready()
+        });
+        cpu.step();
+        assert_eq!(cpu.state().pc, 0x0000);
+        cpu.step();
+        assert_eq!(cpu.state().pc, 0x0002, "counter exhausted");
+        assert_eq!(cpu.state().bc, 0x0000);
     }
 
     #[test]
     fn a_fault_is_cleared_by_the_next_successful_step() {
-        let mut cpu = Cpu::new(Ram::new(&[0xCB, 0x00]));
-        cpu.set_state(ready());
+        let mut cpu = Cpu::new(Ram::new(&[0x00]));
+        cpu.set_state(CpuState {
+            iff1: true,
+            im: InterruptMode::Mode0,
+            sp: 0xFF00,
+            ..ready()
+        });
 
+        cpu.interrupt(0x00); // not an RST
+        assert!(cpu.fault().is_some(), "the mode 0 byte was rejected");
         cpu.step();
-        assert!(cpu.fault().is_some(), "prefix should fault");
-        cpu.step();
-        assert!(cpu.fault().is_none(), "NOP should clear the fault");
+        assert!(cpu.fault().is_none(), "the next step clears it");
     }
 
     #[test]
