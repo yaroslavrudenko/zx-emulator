@@ -7,6 +7,84 @@ open. Updated as work lands, not once at the start.
 
 ---
 
+## Milestone M4 — `zexall`, and what a green oracle is worth
+
+M4 was written as *"undocumented flags — `zexall` passes"*. It already passed, on the first
+run it was ever given. So the milestone became an **evidence** task rather than an
+implementation one: make it a committed gate, and state precisely what its green does and
+does not prove.
+
+**Both exercisers now report 67/67**, and they are asserted to execute the *same instruction
+stream* — 5,764,169,610 instructions and 46,734,977,142 T-states each, **identical to the
+single instruction**. That is not a coincidence to note in passing, it is a pinned constant
+(`EXERCISER_SCALE`): `zexdoc` and `zexall` are the same program differing in 190 bytes, all of
+them flag masks and expected CRCs, so a divergence would mean something moved underneath both.
+`libtest` runs the pair concurrently, so together they still cost ~43 s.
+
+Pinning the total also gives the `zex` path a **coarse timing assertion** it did not have —
+an aggregate T-state count over 5.8 billion instructions. It would catch a systematic cycle
+error; it cannot catch a per-instruction one that cancels out.
+
+### What `zexall`'s green proves — three claims that must not blur into one
+
+1. **It does grade the undocumented `F3`/`F5` bits.** Not read off its source — established by
+   controlled mutation *with a control*. Forcing those bits to a constant `0` or `0x28` fails
+   `<daa,cpl,scf,ccf>` under `zexall` while `zexdoc` stays 67/67; a control mutation of a
+   **documented** bit (`SCF` not setting carry) fails **both**, which is what proves the group
+   is executed and graded rather than skipped. Confirmed structurally too: all 67 of `zexdoc`'s
+   masks (`0xc7`/`0xd7`/`0x53`) have bits 3 and 5 clear, and all 67 of `zexall`'s are `0xff`.
+
+2. **It cannot separate the Q rule from `A & 0x28`.** Its 67/67 has been observed under
+   **three different implementations** — `A & 0x28`, the Q rule, and a core whose latch was
+   stuck at zero. **A verdict identical under three rules is evidence for none of them.**
+
+   The reason is *not* the one this document gave for a while. `zexall` does **not** keep
+   `Q == F`; it reaches `Q ≠ F` in 98.4 % of `SCF`/`CCF` executions. It reaches the *shape*
+   constantly and never the *bit pattern* — the rules differ iff `((Q ^ F) & ~A) & 0x28 ≠ 0`,
+   which held zero times in ~32,000 executions. **The counts and the full account live in
+   *Reaching for proof where you have measurement*, below, and only there** — this is a
+   summary that defers to it, because two copies of one measurement is how this document's
+   own recorded failure started.
+
+   Claims 1 and 2 must be held apart: `zexall` **is** sensitive to `F3`/`F5`, and it **cannot**
+   separate two rules that agree everywhere it looks. The first does not make the second false.
+
+3. **The entry latch is graded only by FUSE**, by exactly two vectors, and **mid-sequence `Q`
+   has no oracle at all.**
+
+### Coverage — what each oracle sees, and what nothing sees
+
+The last column is the useful one.
+
+| Property | FUSE | `zexdoc` | `zexall` | Covered by |
+|---|---|---|---|---|
+| Documented flags & results, per instruction | ✅ 1335 vectors | ✅ | ✅ | all three |
+| Instruction semantics in **long sequences** | ❌ one instruction per vector | ✅ 5.8 × 10⁹ | ✅ | `zex` only |
+| Undocumented `F3`/`F5` on ordinary results | ✅ | ❌ masked off in all 67 groups | ✅ | FUSE + `zexall` |
+| `SCF`/`CCF` undocumented bits, **entry latch** (`Q == F`) | ⚠️ `37_1` and `3f` **only** | ❌ masked | ❌ never varies `A`/`F` enough to separate the rules | **two vectors** |
+| `SCF`/`CCF` where the **Q rule and `A & 0x28` disagree** | ❌ | ❌ | ❌ reaches `Q ≠ F` 98.4 % of the time, but `((Q ^ F) & ~A) & 0x28 ≠ 0` **zero** times | **nothing** |
+| Per-instruction T-state totals | ✅ | ❌ | ❌ | FUSE only |
+| Aggregate T-state total over 5.8 × 10⁹ instructions | — | ✅ pinned | ✅ pinned | `zex` only |
+| Ordered bus transfers (`MR`/`MW`/`PR`/`PW`) | ✅ | ❌ | ❌ | FUSE only |
+| **Per-T-state bus addresses — contention** | ✅ 166 points | ❌ `tick` is a no-op | ❌ | **FUSE only** |
+| Interrupt acceptance, `IM 0/1/2`, `NMI`, `RETN` | ❌ no vector injects one | ❌ | ❌ | **nothing** |
+
+### Two gaps worth naming before they are rediscovered
+
+**Contention is not covered on the `zex` path, and that is deliberate.**
+`cpm::FlatBus::tick` is an empty function. `machine::TestBus` pushes one `u16` per T-state,
+which is right for a 30-T-state vector and impossible here: at 46.7 billion T-states that log
+alone would be ~93 GB. So the two harnesses share no bus on purpose. The consequence is
+precise: **the 5.8-billion-instruction path verifies instruction semantics and nothing about
+timing except the aggregate total.** FUSE remains the only per-T-state, per-address oracle,
+and it covers 1335 single instructions. **M7's contention work cannot lean on the `zex`
+gates at all** — writing this down now is cheaper than rediscovering it then.
+
+**Interrupts have no oracle.** No FUSE vector injects one and no exerciser generates one, so
+`Cpu::interrupt`, `Cpu::nmi`, the three interrupt modes, `RETN`, and the `EI` one-instruction
+deferral are verified by unit tests in `crates/z80/src` and by nothing external. That is a
+different class of evidence from everything above, and M5 is where it starts to matter.
+
 ## Milestone M3 — `zexdoc`
 
 **All 67 test groups report `OK`, first run, with no change to `crates/z80/src`.**
@@ -113,16 +191,23 @@ have the two `SCF`/`CCF` call sites read `q_prev`. Proven in a scratch copy: 290
 **`zexall` did not catch this.** It passes 67/67 against a core whose latch is stuck at zero
 *and* against a correct one — and it also passed against pre-Q `a & 0x28`. Three different
 rules, one verdict. Yet `zexall` is not blind to these bits in general: forcing them to a
-constant `0` or `0x28` does make it fail. The likeliest reading is that `F`'s bits 3 and 5 are
-clear in the sequences it exercises, which makes `(f | a) & 0x28` and `a & 0x28` agree there —
-and it is exactly where FUSE's `37_1` (`F=ff`) and `3f` (`F=5b`) differ. That is inference
-from the measurements, not a verified claim about `zexall`'s internals.
+constant `0` or `0x28` does make it fail.
 
-So as of M3 the position is: **two FUSE vectors are the only gate in this project that can see
-the flag latch at all.** An instrument that would settle the rule itself needs a third sequence
-shape — a flag-setter, then an instruction writing **no** flags (clearing the latch while `F`
-persists), then `SCF`. Neither corpus generates it. A hardware trace or a third-party exerciser
-with that shape would settle both the rule and the `POP AF` fork in one run.
+> **Superseded by measurement at M4, and the correction is worth keeping visible.** This
+> paragraph originally guessed that `F`'s bits 3 and 5 must be *clear* in the sequences
+> `zexall` exercises, and a companion claim guessed that `Q == F` throughout. Instrumenting
+> the core disproved the second outright — `Q ≠ F` in 98.4 % of `SCF`/`CCF` executions — and
+> replaced the first with the exact condition: the rules differ iff `((Q ^ F) & ~A) & 0x28 ≠ 0`,
+> which held **zero times** in ~32,000 executions. See the M4 section. Two guesses that
+> *predicted the right verdict for the wrong reason* is precisely the failure this document
+> keeps cataloguing, so the guess is left here with its correction attached rather than
+> quietly overwritten.
+
+So as of M4 the position is: **two FUSE vectors are the only gate in this project that can see
+the flag latch at all.** And the search for a better instrument is narrower than it looked: it
+does **not** need an exotic instruction sequence — per the measurement, `Q ≠ F` is everywhere.
+It needs a corpus that **varies `A` and `F` so bits 3 and 5 actually diverge**. That is a much
+easier thing to find, which is the useful half of this finding.
 
 ### The gate runs nowhere unless CI runs it
 
@@ -371,6 +456,43 @@ The comment also said the remaining flag bits were *"covered"* by the proptest. 
 **sampled** — 256 draws over a 2²⁴ joint space. That is the same pattern this document already
 records twice: prose asserting a protection the mechanism does not provide, this time inside the
 file whose entire claim is exhaustiveness.
+
+### Reaching for proof where you have measurement
+
+The M3 justification for shipping an unverifiable rule claimed `zexall` cannot distinguish the Q
+rule from `A & 0x28` **provably**: it restores `F` before each test, so `Q == F`, so the expression
+collapses. The algebra was verified exhaustively over all 65,536 `(a, f)` pairs and is correct.
+
+**The premise was false.** A cold review instrumented the core and counted every `SCF`/`CCF` across
+a full run:
+
+```
+SCF: executed=16000  q!=f=15750  rule-would-differ=0
+CCF: executed=16000  q!=f=15750  rule-would-differ=0
+```
+
+`Q ≠ F` in **98.4 %** of executions. `zexall` does not run inside the collapse region at all.
+
+The conclusion survives — three full runs, including one with the rule deleted and one with the
+latch stuck at zero, all report 67/67 — but for a different reason. The rules differ iff
+`((Q ^ F) & ~A) & 0x28 ≠ 0`: a bit of `Q ^ F` set in position 3 or 5 **where `A` has it clear**.
+Over ~32,000 executions that held zero times. The exerciser reaches the *shape* constantly and
+never the *bit pattern*.
+
+**Three consequences, and the third is the expensive one:**
+
+1. The claim that no corpus generates the required sequence shape is also false. `q=00, f=04` is
+   that shape, 15,750 times.
+2. The measurement is **stronger than the proof it replaced** — 32,000 executions with zero
+   observable divergence, plus the exact condition that would change the answer. A reader can act on
+   that; nobody can act on a proof whose premise is wrong.
+3. **It misdirected the search.** An instrument that would decide the rule does not need a special
+   sequence — it needs one that **varies `A` and `F` so bits 3 and 5 diverge**. A much easier thing
+   to find, and the old wording sent the next person after the wrong one.
+
+The general rule: **an algebraic argument is exactly as strong as its weakest premise**, and the
+premise here was a plausible claim about another program's internals, asserted rather than measured.
+Where a measurement is available, it outranks a proof about someone else's code.
 
 ## How this project is verified
 
