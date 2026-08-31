@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/z80", "crates/spectrum", "crates/frontend"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yaroslavrudenko/zx-emulator"
+
+# Only latest stable releases. Verified against crates.io on 2026-08-31.
+[workspace.dependencies]
+z80 = { path = "crates/z80" }
+spectrum = { path = "crates/spectrum" }
+
+thiserror = "2.0.20"
+anyhow = "1.0.104"
+bitflags = "2.13.1"
+macroquad = "0.4.16"
+
+proptest = "1.11.0"
+divan = "0.1.21"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+# The Z80 is *meant* to wrap. Every wrap in this codebase is written as an
+# explicit wrapping_* call, so debug and release must agree.
+overflow-checks = true
+
+[profile.bench]
+inherits = "release"
+debug = true

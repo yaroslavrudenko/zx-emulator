@@ -1,0 +1,20 @@
+[package]
+name = "spectrum"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ZX Spectrum 48K and 128 machine: paged memory, ULA, contention, keyboard, tape, AY."
+
+[dependencies]
+z80.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

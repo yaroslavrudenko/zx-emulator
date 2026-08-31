@@ -1,0 +1,20 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "macroquad frontend, native and WASM."
+
+[dependencies]
+spectrum.workspace = true
+z80.workspace = true
+macroquad.workspace = true
+anyhow.workspace = true
+
+[[bin]]
+name = "zx"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
