@@ -85,15 +85,15 @@ instruction. With named fields that is a branch in every HL-touching handler; wi
 array it is a **constant index offset** — one `hl_base: usize`, and the entire HL
 instruction set operates on IX with no `if` at all.
 
-> **Status — read this before trusting the paragraph above.** The *layout* landed in M1;
-> the *indirection* did not. Two independent reviewers found `grep hl_base` returning zero
-> hits while this document described it as the decision "everything hangs on". At M1 the
-> crate therefore paid the layout's cost — pairs are stored high-byte-first, so `pair()`
-> compiles to `ldrh` + `rev` + `lsr` where a native `u16` field would be one `ldrh` — and
-> collected none of its benefit, because the mechanism it exists for is M2 work. Threading
-> `base` through the decoder is tracked as an open item below.
+> **How this landed, and why the note stays.** The *layout* arrived first and the *indirection*
+> did not: two independent reviewers found `grep hl_base` returning zero hits while this
+> document described it as the decision "everything hangs on". For a while the crate therefore
+> paid the layout's cost — pairs are stored high-byte-first, so `pair()` compiles to `ldrh` +
+> `rev` + `lsr` where a native `u16` field would be one `ldrh` — and collected none of the
+> benefit. `base` is now threaded through the decoder, and `add_pair(base, base)` makes
+> `DD 29` into `ADD IX,IX` with no new code.
 >
-> Two things to know before implementing it. The substitution is **asymmetric**: `H` and `L`
+> Two things to know when extending it. The substitution is **asymmetric**: `H` and `L`
 > shift, but `B`/`C`/`D`/`E`/`A` must not — `DD 44` is `LD B,IXh`, not `LD IXh,IXh`. And
 > `0x29` (`ADD IX,IX`) needs the base substituted in **two** positions. Separately, the
 > operand-field→array-index mapping is already an 11-instruction branch cascade before any
@@ -194,10 +194,19 @@ Everything in this section is a measurement or an assembly inspection, not an es
 Host: Apple M3 Max, rustc 1.98.0, `[profile.release]` as shipped. Re-run after M2 — it
 quadruples the opcode count on exactly the paths measured here.
 
-| | Result |
+| | Batched tick (before C1) | Per-T-state tick (shipped) |
+|---|---|---|
+| Throughput, flat 64K bus | 507× real-time | **329× real-time** |
+| Throughput, M7-shaped paged + contended bus | 294× real-time | **145× real-time** — 138 µs of a 20,000 µs frame, **0.7 % of the budget** |
+
+**The drop is C1's price, and it is the right trade.** Ticking once per T-state instead of once
+per batch is roughly 3× more calls, each doing contention arithmetic. It buys the 88 contention
+points that batching discarded — without which M5 and M7 cannot be correct at all. 145× still
+leaves two orders of magnitude of headroom over the 1× requirement, which is precisely why the
+benchmark is gated: so the next person can see what a change costs instead of guessing.
+
+| Other measurements | |
 |---|---|
-| Throughput, flat 64K bus | **507× real-time** — 39 µs of a 20,000 µs frame budget |
-| Throughput, M7-shaped paged + contended bus | **294× real-time** — 68 µs, i.e. **0.34 % of the frame** |
 | Cost of `overflow-checks = true` | **5 %** on the core. One `cmp`/`b.hi` guarding the T-state accumulator — the only panic path in the whole `step` function |
 | Unproven bank index at M7 | **6.6 %**, avoidable for free by masking or a newtype |
 
@@ -217,15 +226,10 @@ per-access timing is the property M7 exists to deliver.
 
 ## Open items
 
-Tracked here so they are found by plan rather than by symptom.
-
-| Id | Item | Consequence if deferred |
-|---|---|---|
-| `hl_base` | Decision 2's indirection is unbuilt; `base` must be threaded through the decoder | M2 begins by paying a cost this document called paid |
-| `Q` latch | `SCF`/`CCF` use `F3/F5 = A & 0x28` and do not model the NMOS Q latch | `zexall` at M4 is the first real adjudicator — FUSE's single-instruction vectors structurally cannot decide it, since Q is defined by an instruction *sequence*. The plumbing (record F writes, clear per step) is ~12 lines and belongs in M1; the rule itself waits for the oracle |
-| `WZ` / MEMPTR | Not carried in `CpuState` | Needed at M4. `#[non_exhaustive]` is not an escape — it forbids the `..CpuState::default()` idiom this crate's own doctest teaches, so the field must exist before there are consumers |
-| `StepError` / `fault()` | M1 scaffolding that the docs promise to delete at M2 | A written plan to break our own public API. Either keep and re-scope, or make `pub(crate)` now |
-| `register_index` cascade | The operand-field→array-index permutation is 11 instructions | Not a defect. Both proposed rewrites trade compile-time exhaustiveness for ~10 instructions against 500× headroom — a bad trade. Re-measure after M2 |
+**The register lives in [`STATUS.md`](STATUS.md), and only there.** This document describes the
+design; `STATUS.md` records what is currently true. They were briefly duplicated, and within one
+session they disagreed about four facts — the exact defect class that let the `tick` contract
+survive unchallenged. One register, one owner.
 
 ## Licensing note
 

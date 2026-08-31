@@ -36,15 +36,56 @@ See *Measured* in [`ARCHITECTURE.md`](ARCHITECTURE.md). Headline: **507× real-t
 bus, **294×** on a bus shaped the way M7 will be — 0.34 % of a frame budget. The performance
 policy stays "optimise nothing", now backed by a number rather than an assumption.
 
-### Open — being addressed
+### Hardening round — what a cold review found after the oracle was green
 
-| Item | Why it matters |
-|---|---|
-| `Bus::tick` batched machine cycles and carried no address | Batching loses **88 of the corpus's 166** internal contention points. Contract corrected to one tick per T-state, with the address — the harness now asserts the event trace, so this cannot regress silently |
-| No way to accept an interrupt | `interrupt()` / `nmi()` did not exist and `set_state` cannot write memory or tick the bus, so there was no route out of `HALT`. M5 cannot boot without them |
-| `set_state` left `ei_pending` stale | A snapshot loaded just after `EI` dropped that frame's interrupt |
-| `hl_base` unbuilt | See the status note in `ARCHITECTURE.md` Decision 2 |
-| `WZ` / `Q` absent from `CpuState` | Adding public fields is free now and breaking later; zero consumers today |
+290/290 said the arithmetic was right. It said nothing about four decisions frozen in the public
+API, which is what a reviewer is for. All are now implemented; the trace gate is what proves the
+first one stays fixed.
+
+| Item | Why it mattered | State |
+|---|---|---|
+| `Bus::tick` batched machine cycles and carried no address | Batching discards **88 of the corpus's 166** internal contention points. And the machine can track its own transfers but can never learn `IR` — which is what sits on the bus during the internal cycles of `ADD HL,ss`, `JR`, `DJNZ`, `CALL`, `PUSH` | fixed; trace asserted |
+| No way to accept an interrupt | `interrupt()` / `nmi()` did not exist, and `set_state` cannot write memory or tick the bus, so there was no route out of `HALT`. M5 could not have booted | fixed; `halted` now drives `step()` and the acceptance rule lives in one place |
+| `set_state` left `ei_pending` stale | A snapshot loaded just after `EI` dropped that frame's interrupt | fixed |
+| `WZ` / `Q` absent from `CpuState` | Adding public fields is free with zero consumers and breaking with one | fixed; the `Q` plumbing landed, the rule waits for `zexall` |
+| `hl_base` unbuilt | Decision 2's central mechanism | fixed; `base` threaded, so `DD 29` becomes `ADD IX,IX` with no new code |
+
+Three findings the corpus produced that no amount of reading the spec would have: `RST`'s
+internal cycle sits on `IR` while `CALL`'s sits on the last operand address, though both share
+one handler; and `DJNZ` uses two different addresses in one instruction.
+
+### Open — the authoritative register
+
+This table is the single source for what is open. `ARCHITECTURE.md` links here and does not
+duplicate it: the two were briefly kept in parallel and disagreed about four facts within one
+session, which is the same failure mode that let the `tick` contract survive unchallenged.
+
+| Item | State | Settled by |
+|---|---|---|
+| `Q` latch | Plumbing landed — `write_flags` is the single F writer, `q` cleared per step. The **rule** is not implemented; `SCF`/`CCF` use `F3/F5 = A & 0x28` | **M4, `zexall`.** FUSE's single-instruction vectors structurally cannot decide it: Q is defined by an instruction *sequence*. The two contested cases are `POP AF` and `EX AF,AF'` |
+| `WZ` / MEMPTR | Carried in `CpuState`, never written | M4, when `BIT n,(HL)` first makes it observable |
+| Resolved-target refactor | `read_operand`, `write_operand` and `tick_read_modify_delay` each recompute `pair(base)` independently. Free for `(HL)`; for `(IX+d)` the displacement must be fetched once and the addition charged once | **M2's opening move.** Needs a `Register(RegIndex) \| Memory(u16)` computed once and threaded |
+| `Cpu<B: Bus>` struct-level bound | Downstream types naming `Cpu<Ula>` must carry `where Ula: Bus`; the fields need no bound to be well-formed | Removable at any time — non-breaking, but touches every signature written meanwhile |
+| M1 fetch vs operand read | The machine cannot tell an M1 opcode fetch from an operand read; both arrive as `Bus::read` | Not blocking. Contention depends on address and `t mod 8`, both of which the machine has. A defaulted `fn fetch(&mut self, addr) -> u8 { self.read(addr) }` is non-breaking whenever a debugger or a precise floating-bus model wants it |
+| Contention within a cycle | Only cycle *starts* are pinned; nothing asserts the address holds constant across a cycle's remaining T-states. It does — but by implementation, not by gate | One assertion over `tick_addresses` between consecutive transfers, if it earns its place |
+
+### Where the corpus is not an oracle
+
+FUSE elides the operand read on a not-taken `JP cc` / `JR cc` / `DJNZ`. The core reads them, and
+the harness carries a **documented exception list** naming each vector.
+
+The core is right, on five independent grounds: Zilog documents `JP cc,nn` with a **single** cycle
+count (10 T) where `CALL cc` and `RET cc` have two, and a machine cycle that does not happen
+changes the count; `PC` still advances by 3, and on the Z80 `PC` increments as part of the
+operand-fetch cycle; MEMPTR sets `WZ = nn` regardless of the condition, which is a hardware
+measurement from `BIT n,(HL)` experiments rather than documentation, and `WZ` cannot be loaded
+from bytes never read; the corpus treats `CALL cc` — where the machine cycles genuinely differ —
+identically to `JP cc`, where they do not, which is the signature of a bookkeeping convention; and
+this crate's own doc comment on `jump_conditional` said so before the code did.
+
+The general rule this establishes: **the core models the Z80, the harness models the corpus,
+including its limitations.** Bending the core to match an emulator's bookkeeping would be fitting,
+not fixing.
 
 ### Deliberately not changed
 
