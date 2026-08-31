@@ -137,6 +137,23 @@ pub fn compare_memory(expected: &[MemoryBlock], read: impl Fn(u16) -> u8) -> Vec
 /// Only the T-states the corpus actually names are asserted. An `MC` at the start of a
 /// four-T-state fetch says nothing about that fetch's remaining three T-states, and this
 /// comparison invents no claim the corpus does not make.
+///
+/// # Do not "close" that gap by asserting the address holds constant across a cycle
+///
+/// It is tempting, since roughly two thirds of T-states go unpinned, to add an assertion
+/// that the address stays put between consecutive transfers. It would pass today. **It
+/// must not be added**, and the reason is not caution but correctness:
+///
+/// A real Z80 drives `PC` for T1–T2 of an opcode fetch and the **refresh address for
+/// T3–T4** — the address bus changes mid-cycle. This core currently drives `PC` for all
+/// four. The corpus does not adjudicate that, because it contends only at the cycle start.
+/// So such an assertion would not be testing the Z80; it would be freezing our present
+/// simplification into the gate, and would fire as a *false failure* the day somebody makes
+/// M1 hardware-accurate.
+///
+/// The rule this is an instance of: **the gate asserts the chip, never our convenience.**
+/// The same principle, applied in the other direction, is why `CORPUS_OMISSIONS` exists —
+/// there the corpus was wrong about the chip, and the harness bent rather than the core.
 pub fn compare_contention(expected: &Expectation, tick_addresses: &[u16]) -> Vec<Mismatch> {
     expected
         .contention_points()

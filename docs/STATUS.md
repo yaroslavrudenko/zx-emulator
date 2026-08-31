@@ -118,9 +118,36 @@ known-demanding software. That is observation, and it is labelled as observation
 
 ---
 
-## Next
+## Next — M2, costed
 
-**M2 — the four prefixes**, and the 1045 vectors they unlock. The known traps are catalogued in
-[`Z80-REFERENCE.md`](Z80-REFERENCE.md): `DDCB`/`FDCB` put the displacement byte *before* the
-opcode, prefix chains each cost their own M1 fetch and `R` increment, and the `HL`→`IX`/`IY`
-substitution is asymmetric.
+The 1045 prefixed vectors were run once as reconnaissance. **1043 fail**, and the shape of the
+failures turns "implement four prefixes" into a sequence:
+
+| Category | CB | DD | ED | FD | Total |
+|---|---|---|---|---|---|
+| decode (fault) | 264 | 341 | 89 | 341 | 1035 |
+| registers / timing / contention / transfers | 264 | 341 | 97 | 341 | 1043 |
+| flags | 139 | 179 | 57 | 179 | 554 |
+| memory | 14 | 150 | 20 | 144 | 328 |
+
+Three things decide the order of work:
+
+1. **`DD`/`FD` are 684 vectors — 65% of M2 — and carry 294 of the 328 memory failures.** That
+   concentration *is* the `(IX+d)` displacement path. The resolved-target refactor is therefore
+   not housekeeping: it pays for two thirds of the corpus, and it goes first.
+2. **Two `DD` vectors already pass** — `dd00` and `ddfd00`, both prefix-chain cases. The rule that
+   each prefix is its own instruction with its own `R` increment is already correct.
+3. **Eight `ED` vectors fail with no fault recorded** — `edb0`–`edb3`, `edb8`–`edbb`, i.e.
+   `LDIR`/`CPIR`/`INIR`/`OTIR` and their decrementing twins. They are the only `ED` work that is
+   not uniform decode, because they repeat. The harness's `MAX_STEPS_PER_VECTOR = 64` is
+   comfortable at M1 (the longest is 17) and must be re-derived when they land, rather than
+   discovered as a spurious step-limit failure.
+
+The traps themselves are catalogued in [`Z80-REFERENCE.md`](Z80-REFERENCE.md): `DDCB`/`FDCB` put
+the displacement byte *before* the opcode, prefix chains each cost their own M1 fetch and `R`
+increment, and the `HL`→`IX`/`IY` substitution is asymmetric.
+
+**One gap to close first: the harness has never been reviewed by anyone but its author.** The cold
+review deliberately scoped `crates/z80/tests/` out, so the code that decides whether the core is
+correct has had no independent eye. That is the wrong asymmetry to carry into M2, where the
+harness grows a repeat mechanism and a new step cap.
