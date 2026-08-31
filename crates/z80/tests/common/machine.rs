@@ -294,10 +294,33 @@ fn cpu_state(registers: &Registers, state: &State) -> CpuState {
         im: InterruptMode::try_from(state.im)
             .expect("the corpus parser accepts only interrupt modes 0, 1 and 2"),
         halted: state.halted,
-        // `wz` (MEMPTR) and `q` (the SCF/CCF flag latch) have no column in the corpus —
-        // FUSE's format predates both being understood. Defaulting them is the honest
-        // reading: the vectors neither set nor check them, so the harness must not invent
-        // values. Their real oracle is zexall at M4.
+        // `wz` (MEMPTR) has no column in the corpus — FUSE's format predates it being
+        // understood — and the vectors neither set nor check it. Defaulting it is the
+        // honest reading: the harness must not invent a value it has no source for.
+        //
+        // **`q` is not like `wz`, and defaulting it to zero was affirmatively wrong.**
+        // The latch holds whatever last wrote `F`, and loading a state *is* a write to
+        // `F` — a snapshot load is a `POP AF`. Zero is the one value that makes a
+        // positive false claim: that the preceding instruction wrote no flags at all.
+        //
+        // The corpus settles this arithmetically rather than by preference. Under the Q
+        // rule `SCF`/`CCF` compute `((q ^ f) | a) & 0x28`, and two vectors can tell the
+        // two initialisations apart:
+        //
+        // | vector | A  | F  | `q = 0` | `q = F` | corpus expects |
+        // |--------|----|----|---------|---------|----------------|
+        // | `37_1` | 00 | ff | `28`    | `00`    | **`00`**       |
+        // | `3f`   | 00 | 5b | `08`    | `00`    | **`00`**       |
+        //
+        // So the corpus does **not** contradict the Q rule — it contradicts *initialising
+        // the latch to zero*. Setting it from `F` is independently correct, and the two
+        // vectors agreeing is a consequence rather than the reason.
+        //
+        // These two vectors are also, as of M3, the **only** gate that catches the latch
+        // being wrong: `zexdoc` masks bits 3 and 5 off for this group, and `zexall` was
+        // measured passing 67/67 against both a correct core and one whose latch is stuck
+        // at zero. See `docs/STATUS.md`.
+        q: registers.af.to_be_bytes()[1],
         ..CpuState::default()
     }
 }

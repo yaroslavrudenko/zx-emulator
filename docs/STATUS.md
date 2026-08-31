@@ -3,7 +3,155 @@
 A living record of where the project actually is — what is proven, what is measured, what is
 open. Updated as work lands, not once at the start.
 
-**Last updated:** 2026-08-31, during M2.
+**Last updated:** 2026-09-01, during M3.
+
+---
+
+## Milestone M3 — `zexdoc`
+
+**All 67 test groups report `OK`, first run, with no change to `crates/z80/src`.**
+
+`zexdoc` is a different shape of oracle from FUSE and that is the point of it. FUSE sets up a
+state, runs one instruction and compares; `zexdoc` runs **5,764,169,610 instructions**, folds
+every result into CRCs, and compares them against values built into its own image. It proves
+the instructions still hold up in *sequences* billions deep, where a wrong flag bit poisons a
+checksum thousands of instructions after the mistake that caused it.
+
+| | |
+|---|---|
+| Groups reporting `OK` | **67 / 67** |
+| Instructions / T-states | 5,764,169,610 / 46,734,977,142 |
+| Wall clock, release | **43.1 s** — ~308x real time at 3.5 MHz, within 7 % of `benches/step.rs`'s 329x |
+| Wall clock, `dev` profile | **~20 minutes** — 27x slower, which is why the gate is `#[ignore]`d and release-only |
+| Port accesses | 0, asserted — a CP/M exerciser performs none, so any would mean an `IN`/`OUT` misdecode |
+
+### The gate had to be proven able to fail, and one attempt to prove it did not work
+
+A green run proves nothing until the run is proven. Two things were caught by taking that
+seriously rather than by being careful:
+
+- **The group count was nearly wrong in the harness's favour.** A first derivation scanned the
+  binary for printable strings and found **65**; it missed two names padded with fewer than
+  four dots. The count now comes from walking `zexdoc`'s own descriptor table — 67 entries at a
+  0x60 stride, following the `JP 0` in its start routine. **A gate pinned at 65 would have
+  failed a correct core**, and it would have looked like a CPU defect.
+- **The obvious way to prove the `ERROR` path did not work.** Running `zexall`, expecting it to
+  fail, returned 67/67 — so it proved nothing. What *did* work was corrupting one expected CRC
+  inside a copy of `zexdoc.com` itself: the gate went red with
+  `CRC expected deadbeef, found f8b4eaa9`, and the `found` value being the *correct* CRC is
+  what shows the core was right and only the expectation was poisoned. Restored byte-identical
+  afterwards, verified by SHA-256, and green returned.
+
+### The `zexall` question — the experiment, and what it does and does not settle
+
+`zexall` also reports 67/67 today. That is surprising, because this document has said since M1
+that the Q latch is unimplemented and `SCF`/`CCF` take `F3/F5 = A & 0x28`. The question worth
+answering is not "is this `zexall` build genuine" but **does `zexall` grade those bits at all** —
+so the rule was mutated in a scratch copy of `src/` and both exercisers re-run against each
+mutation. Every mutation was verified present in the file before its verdict was trusted.
+
+| Mutation to `flags::scf`/`ccf` | `zexdoc` | `zexall` |
+|---|---|---|
+| **A** — `F3/F5` always `0` | 67/67 OK | **FAIL** `<daa,cpl,scf,ccf>`: expected `6d2dd213`, found `c4ab71f0` |
+| **B** — `F3/F5` always `0x28` | 67/67 OK | **FAIL** same group, found `f14add2d` |
+| **C** — control: `SCF` does not set carry | **FAIL** expected `9b4ba675`, found `d99ebf0e` | **FAIL** found `2ff8cb68` |
+
+Three facts follow, and the control is what makes them facts rather than inferences. **C** is a
+*documented* bit, and it fails under both — so the group really is executed, really is graded by
+both binaries, and the mutation mechanism genuinely reaches live code. Against that baseline:
+
+1. **`zexall` grades the undocumented `F3`/`F5` bits of `SCF`/`CCF`.** Two different wrong
+   values are both caught, with different CRCs.
+2. **`zexdoc` does not grade them** — its mask for this group is `0xd7`, which has bits 3 and 5
+   clear. A and B are invisible to it, exactly as the masks predict.
+3. **So the current rule passes `zexall` on merit**, not by not being looked at.
+
+**What this does *not* settle, and the distinction matters.** That `zexall` grades the bits is
+not the same as `zexall` discriminating the *Q rule* from the simpler `A & 0x28` rule. The
+earlier hypothesis — that `zexall`'s harness restores flags with `POP AF` / `EX AF,AF'`
+immediately before each tested instruction, which are precisely the two cases this document
+already names as contested, so `Q` would be zero and both rules would agree — remains
+**unverified**. It is consistent with every number above, and it would explain passing on merit
+without the rule being implemented.
+
+**The practical consequence for M4 is immediate:** its stated premise — that `zexall` fails
+until `Q` lands — is false for this build. `<daa,cpl,scf,ccf>` passes today.
+
+### The Q rule then landed, and FUSE caught a defect no other gate sees
+
+The rule shipped as `((q ^ f) | a) & 0x28`, which collapses to `a & 0x28` whenever `q == f` —
+so it should have been invisible to every existing gate. It was not. **FUSE went from 290/290
+to 288/290**, and the two failures are `37_1` and `3f`, the only vectors that can see the
+latch at all.
+
+The harness was half the cause and is fixed here: `cpu_state()` defaulted `q` to zero, but
+**loading a state is a `POP AF`** — the load is the last thing that wrote `F`, so the latch
+must equal it. Zero is the one value that makes a positive false claim. `q` is now set from
+`F`; `wz` stays defaulted, because the corpus genuinely carries no MEMPTR column.
+
+That alone did not fix it, and the reason is a **defect in the core**. `begin_operation()`
+runs `self.q = 0` at the start of every `step()`, and `SCF`/`CCF` read that same field — so
+the latch they see is always zero, whatever was loaded or whatever the previous instruction
+wrote. The shipped rule therefore evaluates `(f | a) & 0x28`, which is neither the Q rule nor
+the `a & 0x28` it replaced.
+
+Measured, each mutation verified present in the file before its verdict was trusted:
+
+| Core | FUSE | `zexdoc` | `zexall` |
+|---|---|---|---|
+| Pre-Q (`a & 0x28`) | 290/290 | 67/67 | 67/67 |
+| **As shipped** (latch stuck at 0) | **288/290** | 67/67 | 67/67 |
+| Shipped **+ `q_prev`** (below) | **290/290** | 67/67 | 67/67 |
+
+The fix is to keep the previous instruction's latch instead of destroying it — add a
+`q_prev: u8`, make `begin_operation` do `self.q_prev = self.q;` *before* `self.q = 0;`, and
+have the two `SCF`/`CCF` call sites read `q_prev`. Proven in a scratch copy: 290/290 and
+1045/1045. **`crates/z80/src` is owned elsewhere and was not modified.**
+
+### The instrument problem, which the table above makes concrete
+
+**`zexall` did not catch this.** It passes 67/67 against a core whose latch is stuck at zero
+*and* against a correct one — and it also passed against pre-Q `a & 0x28`. Three different
+rules, one verdict. Yet `zexall` is not blind to these bits in general: forcing them to a
+constant `0` or `0x28` does make it fail. The likeliest reading is that `F`'s bits 3 and 5 are
+clear in the sequences it exercises, which makes `(f | a) & 0x28` and `a & 0x28` agree there —
+and it is exactly where FUSE's `37_1` (`F=ff`) and `3f` (`F=5b`) differ. That is inference
+from the measurements, not a verified claim about `zexall`'s internals.
+
+So as of M3 the position is: **two FUSE vectors are the only gate in this project that can see
+the flag latch at all.** An instrument that would settle the rule itself needs a third sequence
+shape — a flag-setter, then an instruction writing **no** flags (clearing the latch while `F`
+persists), then `SCF`. Neither corpus generates it. A hardware trace or a third-party exerciser
+with that shape would settle both the rule and the `POP AF` fork in one run.
+
+### The gate runs nowhere unless CI runs it
+
+An `#[ignore]`d gate that no pipeline executes is not a gate. It is the same defect as
+`Z80_FUSE_REQUIRED`, which this document already records as having "appeared only in its own
+definition and a README example" — a guard that exists solely in a file nobody runs.
+
+`.github/workflows/ci.yml` therefore gained a `zexdoc` job, and `guard-must-be-armed` gained a
+matching corpus-absent check. **`--ignored` is load-bearing in both**, and this was measured
+rather than assumed: with `testdata/zex` moved aside, `cargo test -p z80 --test zex_oracle`
+exits **0 with 16 passing tests**, never looking for the exerciser — while the same command
+with `--ignored` exits 101. A CI step written without the flag would assert nothing and look
+identical to one that asserts everything.
+
+> **This has not shipped.** The workflow file is written and correct, but the session token
+> lacks `workflow` scope, so `.github/` cannot be pushed. Until someone with that scope pushes
+> it, **the M3 gate is verified locally and enforced nowhere.**
+
+### What the harness learned from the M2 review
+
+The verdict is a pure function over a parsed report rather than a chain of inline `assert!`s.
+The reason generalises beyond this file: an inline assertion inside a 43-second run can only be
+proven to bite by a manual mutation nobody repeats, whereas the same rules as a function have
+**one failing case each, running in microseconds on every `cargo test`**, corpus or no corpus.
+
+Six tests cover the verdict rules and ten cover the CP/M shell and the report parser — sixteen
+in all, none of them `#[ignore]`d, none of them needing `testdata/`. The one that matters most
+is `a_run_that_stopped_early_is_a_fault_even_though_every_line_said_ok`, because a truncated run
+prints nothing but `OK` lines and "did any line say ERROR?" passes it.
 
 ---
 
@@ -98,7 +246,9 @@ session, which is the same failure mode that let the `tick` contract survive unc
 
 | Item | State | Settled by |
 |---|---|---|
-| `Q` latch | Plumbing landed — `write_flags` is the single F writer, `q` cleared per step. The **rule** is not implemented; `SCF`/`CCF` use `F3/F5 = A & 0x28` | **M4, `zexall`.** FUSE's single-instruction vectors structurally cannot decide it: Q is defined by an instruction *sequence*. The two contested cases are `POP AF` and `EX AF,AF'` |
+| `Q` latch — **rule implemented, latch lifecycle BROKEN** | `((q ^ f) \| a) & 0x28` has landed, but `begin_operation()` zeroes `q` before `SCF`/`CCF` read it, so the effective rule is `(f \| a) & 0x28`. **FUSE is red: 288/290.** The harness half is fixed (`q` loaded from `F`); the core half is not | A `q_prev` field carrying the previous instruction's latch — three lines, proven in scratch to restore 290/290 and 1045/1045. **Blocks M3.** `crates/z80/src` is owned elsewhere. See the M3 section |
+| The flag latch has almost no instrument | Two FUSE vectors (`37_1`, `3f`) are the **only** gate that can see it. `zexdoc` masks the bits off; `zexall` passes against three different rules including a stuck-at-zero latch | A corpus with a flag-setter → no-flag instruction → `SCF` sequence. Neither existing corpus has one |
+| CI does not run the M3 gate | `.github/workflows/ci.yml` has the `zexdoc` job written, but `.github/` cannot be pushed from the session that wrote it — the token lacks `workflow` scope | Someone with `workflow` scope pushing it. Until then the gate is verified locally and enforced nowhere, which is the `Z80_FUSE_REQUIRED` defect again |
 | `WZ` / MEMPTR | Carried in `CpuState`, never written | M4, when `BIT n,(HL)` first makes it observable |
 | Resolved-target refactor | `read_operand`, `write_operand` and `tick_read_modify_delay` each recompute `pair(base)` independently. Free for `(HL)`; for `(IX+d)` the displacement must be fetched once and the addition charged once | **M2's opening move.** Needs a `Register(RegIndex) \| Memory(u16)` computed once and threaded |
 | `Cpu<B: Bus>` struct-level bound | Downstream types naming `Cpu<Ula>` must carry `where Ula: Bus`; the fields need no bound to be well-formed | Removable at any time — non-breaking, but touches every signature written meanwhile |

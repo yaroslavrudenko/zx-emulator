@@ -394,13 +394,20 @@ impl Vector {
 // Loading
 // ---------------------------------------------------------------------------
 
-/// The directory the corpus is expected in: `<workspace>/testdata/fuse`.
-pub fn corpus_dir() -> PathBuf {
+/// `<workspace>/testdata` — the root every fetched-on-demand corpus lives under.
+///
+/// One computation of the workspace-relative path, so the FUSE vectors and the `zex`
+/// binaries cannot end up disagreeing about where `testdata` is.
+pub fn testdata_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("testdata")
-        .join("fuse")
+}
+
+/// The directory the corpus is expected in: `<workspace>/testdata/fuse`.
+pub fn corpus_dir() -> PathBuf {
+    testdata_dir().join("fuse")
 }
 
 /// Load and pair the whole corpus.
@@ -487,26 +494,46 @@ fn boolean_env(name: &str) -> bool {
 /// * absent                  -> **panic**, naming the fetch instructions
 /// * absent, with [`ALLOW_MISSING_CORPUS_ENV`] set -> `None`, and the caller skips
 pub fn corpus_or_skip() -> Option<Vec<Vector>> {
+    reject_obsolete_env();
+
+    let dir = corpus_dir();
+    let loaded = load_corpus(&dir).unwrap_or_else(|err| panic!("malformed FUSE corpus.\n{err}"));
+    if loaded.is_some() {
+        return loaded;
+    }
+
+    skip_absent_corpus("the FUSE corpus", &dir);
+    None
+}
+
+/// The obsolete variable is an error in **every** gate, not only the FUSE one.
+///
+/// Split out of [`corpus_or_skip`] when the `zex` gate arrived, so that a CI file which
+/// still sets it cannot be silently ignored by whichever gate happens not to check.
+pub fn reject_obsolete_env() {
     assert!(
         std::env::var_os(OBSOLETE_REQUIRE_ENV).is_none(),
         "{OBSOLETE_REQUIRE_ENV} is obsolete and no longer read. The corpus is now required \
          by default, so nothing needs to set it; to allow a run without the corpus, set \
          {ALLOW_MISSING_CORPUS_ENV}=1 instead.",
     );
+}
 
-    let dir = corpus_dir();
-    let loaded = load_corpus(&dir).unwrap_or_else(|err| panic!("malformed FUSE corpus.\n{err}"));
-    if let Some(vectors) = loaded {
-        return Some(vectors);
-    }
-
+/// The shared policy for "the corpus this gate needs is not there".
+///
+/// **Panics unless the absence has been explicitly declared**, and refuses the declaration
+/// under CI. `what` names the corpus in the failure message and `location` says where it
+/// was looked for; everything else is identical for every gate, which is the point — one
+/// implementation, so the FUSE gate and the `zex` gate cannot drift apart on the one
+/// question that decides whether a green run means anything.
+pub fn skip_absent_corpus(what: &str, location: &Path) {
     assert!(
         boolean_env(ALLOW_MISSING_CORPUS_ENV),
-        "FUSE corpus not found in {}.\n\
-         The vectors are gitignored and fetched on demand — see testdata/README.md.\n\
-         If you genuinely mean to run without them, set {ALLOW_MISSING_CORPUS_ENV}=1; that \
+        "{what} was not found in {}.\n\
+         It is gitignored and fetched on demand — see testdata/README.md.\n\
+         If you genuinely mean to run without it, set {ALLOW_MISSING_CORPUS_ENV}=1; that \
          turns every corpus-backed assertion off, so it is refused under CI.",
-        dir.display(),
+        location.display(),
     );
 
     // The opt-out is for humans on a fresh clone, and for nobody else.
@@ -527,8 +554,7 @@ pub fn corpus_or_skip() -> Option<Vec<Vector>> {
          verifies. Fetch the corpus in CI — see testdata/README.md.",
     );
 
-    println!("SKIPPING conformance run: no corpus, and {ALLOW_MISSING_CORPUS_ENV} is set.");
-    None
+    println!("SKIPPING {what}: not present, and {ALLOW_MISSING_CORPUS_ENV} is set.");
 }
 
 /// Zip the two halves, insisting they describe the same vectors in the same order.

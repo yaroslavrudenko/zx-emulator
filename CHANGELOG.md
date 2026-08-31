@@ -4,6 +4,30 @@ Notable changes to the published surface of `crates/z80`. Milestones are recorde
 the first release, because the crate's API is being frozen decision by decision and the moment
 each one stopped being free is worth knowing.
 
+## Unreleased — M3, `zexdoc`
+
+### The published surface did not change, and that is the result
+
+M3 added no types, no methods, no variants, no fields. The milestone was a **gate**, not a
+feature: `zexdoc` — a self-checking CP/M binary that runs 5,764,169,610 instructions and
+compares CRCs it computes itself against values built into its own image — reports `OK` for
+**all 67 test groups**, first run, with no change to `crates/z80/src`.
+
+That is the strongest statement this crate has been able to make so far. FUSE proves each
+instruction in isolation; `zexdoc` proves they still hold up in *sequences*, billions deep,
+where a wrong flag bit poisons a CRC thousands of instructions after the mistake.
+
+### Note for machine authors
+
+**Throughput at scale is now measured rather than extrapolated.** 46,734,977,142 T-states in
+43.1 s on an Apple M3 Max — **~308x real time** for a 3.5 MHz Z80, on a flat 64K bus with a
+no-op `tick`. That is within 7 % of `benches/step.rs`'s 329x, so the benchmark's figure holds
+over a real instruction mix and not just its own sample.
+
+The number that matters for a frame loop is the other one in that pair: a `dev`-profile build
+runs the same work at ~4.9 M instructions/s, **27x slower**. Anything scheduling `Cpu::step`
+against a wall clock must be built in release.
+
 ## Unreleased — M2, the four prefixes
 
 ### Breaking
