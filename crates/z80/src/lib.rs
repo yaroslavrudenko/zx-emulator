@@ -53,12 +53,12 @@
 //!
 //! - **`SCF`/`CCF` undocumented bits** are derived from the flag latch ([`CpuState::q`])
 //!   as `((Q ^ F) | A) & 0x28`, which is the NMOS rule. It is **implemented and only
-//!   partly verified.** `zexall` provably cannot see it — whenever `Q == F` the expression
-//!   collapses to `A & 0x28`, and `zexall` restores `F` before every tested instruction, so
-//!   it scores 67/67 under either rule. FUSE *does* constrain the latch's **entry** value:
-//!   two of its vectors fail unless a loaded state's latch matches its `F`. The
-//!   mid-sequence behaviour has no oracle. See `flags::scf` for the algebra and for the
-//!   sequence shape an instrument would need.
+//!   partly verified.** `zexall` does not distinguish it from the `A & 0x28` it replaced —
+//!   measured across ~32,000 `SCF`/`CCF` executions, the condition under which the two
+//!   differ never once held, even though `Q != F` in 98% of them. FUSE constrains the
+//!   latch's **entry** value through two vectors, which are the only gate here able to see
+//!   the latch at all. Everything else about it is unverified. See `flags::scf` for the
+//!   algebra, the measurement, and what an instrument would actually need.
 //! - **`BIT n,(HL)`** takes its undocumented bits from the high byte of `MEMPTR`, which is
 //!   the hardware rule. The FUSE corpus predates the `MEMPTR` work and expects them from
 //!   the tested value instead, so four of its vectors are carried as documented omissions.
@@ -1552,6 +1552,44 @@ mod tests {
         cpu.step(); // SCF
         let [_, f] = cpu.state().af.to_be_bytes();
         assert_eq!(f, 0x81, "a latch stuck at zero would give 0xA9");
+    }
+
+    #[test]
+    fn the_entry_latch_is_read_by_the_first_instruction_after_a_state_load() {
+        // ⚠ THIS TEST ENCODES A BELIEF, NOT A VERIFIED FACT.
+        //
+        // Until now the entry latch was covered *only* by two FUSE vectors — the sole gate
+        // in this project able to see the latch at all — which is thin for something that
+        // silently changes every `SCF`. This is the unit-level equivalent.
+        //
+        // Loading a state is physically a `POP AF`: the last thing that touched `F` was the
+        // load, so a harness sets `Q` to the loaded `F`. With `Q == F` the rule collapses
+        // and the undocumented bits come from `A` alone.
+        //
+        // Two different entry latches are asserted rather than one, because a single
+        // expected value cannot tell "the entry latch was read" from "some default
+        // happened to match".
+        let load_and_run_scf = |entry_latch: u8| {
+            let mut cpu = Cpu::new(Ram::new(&[0x37])); // SCF
+            cpu.set_state(CpuState {
+                af: 0x00BB, // A = 0x00, F = 0xBB
+                q: entry_latch,
+                ..ready()
+            });
+            cpu.step();
+            cpu.state().af.to_be_bytes()[1]
+        };
+
+        assert_eq!(
+            load_and_run_scf(0xBB),
+            0x81,
+            "Q == F collapses the rule to the accumulator, whose bits 3 and 5 are clear"
+        );
+        assert_eq!(
+            load_and_run_scf(0x00),
+            0xA9,
+            "a zeroed entry latch instead exposes F's bits 3 and 5"
+        );
     }
 
     #[test]

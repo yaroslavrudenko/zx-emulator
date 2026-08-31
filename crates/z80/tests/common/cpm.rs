@@ -176,8 +176,21 @@ pub enum Outcome {
     /// The instruction budget ran out. The program is looping, so the run is a failure
     /// with a diagnosis rather than a hung suite with none.
     InstructionLimit,
-    /// The core recorded a fault. Unreachable here — nothing offers this CPU an interrupt,
-    /// and that is the only condition that sets one — but checked rather than assumed.
+    /// The core had a fault recorded when the program warm-booted.
+    ///
+    /// # This is a formality, not a guard, and the distinction is the point
+    ///
+    /// `Cpu::begin_operation` clears the fault at the start of **every** `step`, so a check
+    /// made after the loop can only ever observe a fault left by the *final* instruction.
+    /// It is not a sweep of the run, and calling it one would be this project's recurring
+    /// defect: a comment claiming a protection the code does not provide.
+    ///
+    /// It is kept anyway, and not moved into the loop, for two reasons that point the same
+    /// way. Nothing here can set a fault at all — the only condition that does is an accepted
+    /// mode-0 interrupt, and this harness never offers one — so an in-loop check would cost
+    /// 5.8 billion branches to catch a condition that cannot arise. And an outcome type with
+    /// no way to say "the core complained" is how a complaint gets silently dropped if that
+    /// ever changes.
     Fault(StepError),
 }
 
@@ -269,6 +282,7 @@ impl CpmMachine {
         &self.bdos_calls
     }
 
+    /// The verdict at warm boot. See [`Outcome::Fault`] for what this can and cannot see.
     fn finished(&self) -> Outcome {
         match self.cpu.fault() {
             Some(fault) => Outcome::Fault(fault),

@@ -64,15 +64,46 @@ const ZEXDOC: Exerciser = Exerciser {
     groups: 67,
 };
 
-// M4 turns this on. `zexall` has the same 67 groups and the same output format; it differs
-// only in the flag masks it applies, which is why it can decide the Q latch and `zexdoc`
-// cannot.
-//
-// const ZEXALL: Exerciser = Exerciser {
-//     file: "zexall.com",
-//     description: "the zexall exerciser",
-//     groups: 67,
-// };
+/// The undocumented-behaviour exerciser — the M4 gate.
+///
+/// The **same program** as [`ZEXDOC`]: same 67 groups, same names, same order, same
+/// instruction stream. The two binaries differ in 190 bytes — all 67 flag-mask bytes
+/// (`0xc7`/`0xd7`/`0x53` become `0xff`) and 31 of the expected CRCs. That is why both runs
+/// are asserted against one [`EXERCISER_SCALE`], and why `zexall` grades bits `zexdoc`
+/// throws away — all 67 `zexdoc` masks have bits 3 and 5 clear.
+///
+/// It does **not** follow that `zexall` decides the Q latch. It does not; see claim 2.
+///
+/// # What its green proves, and the three claims must not blur into one
+///
+/// 1. **It does grade the undocumented `F3`/`F5` bits.** Established by controlled mutation
+///    with a control, not by reading its source: forcing those bits to a constant `0` or
+///    `0x28` makes `zexall` fail `<daa,cpl,scf,ccf>` while `zexdoc` stays 67/67, and a
+///    control mutation of a *documented* bit (`SCF` not setting carry) fails **both** —
+///    which is what proves the group is executed and graded rather than skipped.
+///
+/// 2. **It cannot separate the Q rule from `A & 0x28` — and the obvious explanation for why
+///    is wrong.** The tempting story is that `zexall` restores `F` before each test, so
+///    `Q == F` and `((Q ^ F) | A) & 0x28` collapses to `A & 0x28`. **Measured, that is
+///    false:** instrumenting the core counted `SCF` and `CCF` executed 16,000 times each
+///    with `Q != F` in **15,750 of them — 98.4 %**. It reaches the *shape* constantly.
+///
+///    What it never reaches is the *bit pattern*. The two rules differ exactly when
+///    `((Q ^ F) & !A) & 0x28 != 0`, and across ~32,000 executions that condition held
+///    **zero times**. Its 67/67 has accordingly been observed under three implementations —
+///    `A & 0x28`, the Q rule, and a core whose latch was stuck at zero. **A verdict
+///    identical under three rules is evidence for none of them.**
+///
+/// 3. **The entry latch is graded only by FUSE**, by exactly two vectors (`37_1`, `3f`),
+///    and **mid-sequence `Q` behaviour has no oracle at all**. What would decide it is not
+///    an exotic instruction sequence — per claim 2 that shape is everywhere — but a corpus
+///    that varies `A` and `F` so bits 3 and 5 actually diverge. See `docs/STATUS.md` for
+///    what an instrument would have to look like.
+const ZEXALL: Exerciser = Exerciser {
+    file: "zexall.com",
+    description: "the zexall exerciser",
+    groups: 67,
+};
 
 /// The instruction budget for one exerciser run.
 ///
@@ -87,35 +118,81 @@ const ZEXDOC: Exerciser = Exerciser {
 /// console attached, and the console names the last group the program reached.
 const MAX_INSTRUCTIONS: u64 = 8_000_000_000;
 
+/// The exact size of one exerciser run: `step()` calls and T-states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunScale {
+    instructions: u64,
+    t_states: u64,
+}
+
+/// What **both** exercisers execute, to the single instruction.
+///
+/// `zexdoc` and `zexall` are the same program with different flag masks and expected CRCs,
+/// so the instruction stream is identical by construction — the masks change what is folded
+/// into a checksum, never what runs. Pinning one constant and asserting both runs against it
+/// enforces that identity without a third run, and catches the case where the two drift
+/// *together*, which comparing them to each other would not.
+///
+/// **A mismatch is a finding, not a stale constant to bump.** Two things can move it, and
+/// they mean opposite things:
+///
+/// * The **T-state** total is a pure property of the program plus the core's cycle
+///   accounting. It changing means the core's timing changed.
+/// * The **instruction** total is `step()` calls, which is *also* a property of how this
+///   core groups work into one step — a `DD`/`FD` prefix run is one `step`, so a change in
+///   prefix handling legitimately moves it. That is worth knowing about either way.
+///
+/// Measured on this core; both exercisers reproduce it.
+const EXERCISER_SCALE: RunScale = RunScale {
+    instructions: 5_764_169_610,
+    t_states: 46_734_977_142,
+};
+
 // ---------------------------------------------------------------------------
 // The gate
 // ---------------------------------------------------------------------------
 
-/// The M3 gate.
+/// The M3 gate — documented behaviour.
 ///
-/// # Why this one test is `#[ignore]`d when the FUSE gates are not
+/// # Why both gates are `#[ignore]`d when the FUSE gates are not
 ///
-/// Measured on an Apple M3 Max: **43 s in release, and 20 minutes in the `dev` profile
-/// `cargo test` uses by default** — 5.76 billion instructions at 133 M/s optimised and
-/// 4.9 M/s unoptimised. The FUSE corpus is 1335 single instructions and finishes in
-/// milliseconds either way; this is nine orders of magnitude more work, and putting twenty
+/// Measured on an Apple M3 Max: **~43 s each in release, and ~20 minutes each in the `dev`
+/// profile `cargo test` uses by default** — 5.76 billion instructions at 133 M/s optimised
+/// and 4.9 M/s unoptimised. The FUSE corpus is 1335 single instructions and finishes in
+/// milliseconds either way; this is nine orders of magnitude more work, and putting forty
 /// minutes into the default `cargo test -p z80` would make the fast gates unusable.
 ///
 /// **An ignored gate that nothing runs is not a gate** — that is this project's own
 /// recorded failure (`Z80_FUSE_REQUIRED` "appeared only in its own definition and a README
-/// example"). So the obligation moves to CI, in release, where it costs 43 s:
+/// example"). So the obligation moves to CI, in release, where the pair costs ~90 s:
 ///
 /// ```sh
 /// cargo test --release -p z80 --test zex_oracle -- --ignored --nocapture
 /// ```
 ///
-/// Run it locally the same way. The ten harness tests around it are **not** ignored, so
-/// `cargo test -p z80` still proves the CP/M shell and the report parser work on every run.
+/// Run them locally the same way. The harness tests around them are **not** ignored, so
+/// `cargo test -p z80` still proves the CP/M shell, the report parser and every gate rule
+/// on each run, without needing `testdata/` at all.
 #[test]
-#[ignore = "5.8 billion instructions: 43 s in release, ~20 min in dev. Run with --release \
+#[ignore = "5.8 billion instructions: ~43 s in release, ~20 min in dev. Run with --release \
             -- --ignored; CI runs it that way."]
 fn zexdoc_conformance() {
     run_exerciser(&ZEXDOC);
+}
+
+/// The M4 gate — undocumented behaviour.
+///
+/// M4 was written as *"undocumented flags — `zexall` passes"*. It already did, on the first
+/// run, which turned the milestone from an implementation task into an evidence one: make it
+/// a committed gate and state precisely what its green does and does not prove. Those three
+/// claims are on [`ZEXALL`], and they are deliberately kept apart, because the tempting
+/// summary — "`zexall` passes, so the undocumented flags are right" — is true of the first
+/// claim and false of the second.
+#[test]
+#[ignore = "5.8 billion instructions: ~43 s in release, ~20 min in dev. Run with --release \
+            -- --ignored; CI runs it that way."]
+fn zexall_conformance() {
+    run_exerciser(&ZEXALL);
 }
 
 fn run_exerciser(exerciser: &Exerciser) {
@@ -146,7 +223,13 @@ fn run_exerciser(exerciser: &Exerciser) {
     let report = parse_console(machine.console());
     report_run(exerciser, &machine, outcome, elapsed, &report);
 
-    let faults = faults(exerciser, outcome, &report, machine.port_accesses());
+    let scale = RunScale {
+        instructions: machine.instructions(),
+        t_states: machine.t_states(),
+    };
+
+    let mut faults = faults(exerciser, outcome, &report, machine.port_accesses());
+    faults.extend(scale_fault(scale));
     assert!(
         faults.is_empty(),
         "{} did not pass the gate:\n{}\n{}",
@@ -154,6 +237,25 @@ fn run_exerciser(exerciser: &Exerciser) {
         faults.join("\n"),
         diagnostics(&machine),
     );
+}
+
+/// Whether this run executed the instruction stream both exercisers are pinned to.
+///
+/// Separate from [`faults`] because it is not a property of the printed report — it is a
+/// cross-run invariant, and it is what makes "`zexall` runs the same stream as `zexdoc`" an
+/// asserted fact rather than a claim in a comment.
+fn scale_fault(scale: RunScale) -> Option<String> {
+    (scale != EXERCISER_SCALE).then(|| {
+        format!(
+            "the run executed {} instructions / {} T-states, but both exercisers are pinned \
+             to {} / {}. See EXERCISER_SCALE — this is a finding about the core or the \
+             artifact, not a constant to bump.",
+            scale.instructions,
+            scale.t_states,
+            EXERCISER_SCALE.instructions,
+            EXERCISER_SCALE.t_states,
+        )
+    })
 }
 
 /// Every reason this run fails the gate, or an empty list.
@@ -552,6 +654,35 @@ fn clean_report(count: usize) -> ConsoleReport {
             .collect(),
         complete: true,
     }
+}
+
+#[test]
+fn the_pinned_instruction_stream_is_accepted() {
+    assert_eq!(None, scale_fault(EXERCISER_SCALE));
+}
+
+#[test]
+fn a_diverging_instruction_stream_is_a_fault() {
+    // One instruction out is enough. The two exercisers are the same program, so any
+    // divergence at all means something moved underneath them.
+    let drifted = RunScale {
+        instructions: EXERCISER_SCALE.instructions + 1,
+        ..EXERCISER_SCALE
+    };
+
+    let fault = scale_fault(drifted).expect("a divergent stream must be a fault");
+
+    assert!(fault.contains("not a constant to bump"), "{fault}");
+}
+
+#[test]
+fn a_diverging_t_state_total_is_a_fault() {
+    let drifted = RunScale {
+        t_states: EXERCISER_SCALE.t_states - 1,
+        ..EXERCISER_SCALE
+    };
+
+    assert!(scale_fault(drifted).is_some());
 }
 
 #[test]

@@ -286,32 +286,59 @@ pub(crate) fn daa(a: u8, f: u8) -> (u8, u8) {
 /// accumulator both reach these two bits; `A` alone is the simplification this core used
 /// through M1–M3.
 ///
-/// **This rule is implemented and only partly verified.** The two claims below are
-/// different, and an earlier version of this comment ran them together:
+/// **This rule is implemented and only partly verified.** Four separate claims follow,
+/// kept apart because an earlier version of this comment ran them together and asserted a
+/// premise that measurement later falsified.
 ///
-/// **`zexall` cannot distinguish it from the old `A & 0x28`**, and that is provable rather
-/// than observed. Whenever `Q == F` the expression collapses:
+/// ## The collapse identity
+///
+/// Whenever `Q == F` the expression reduces to the accumulator-only rule this replaced:
 ///
 /// ```text
 /// ((Q ^ F) | A) & 0x28   with Q == F   ->   ((0) | A) & 0x28   ->   A & 0x28
 /// ```
 ///
-/// `zexall` restores `F` immediately before each tested instruction, so it runs entirely
-/// inside the region where the two rules are algebraically identical. It scores 67/67 under
+/// More generally, since the `OR` can only add bits, the two rules differ exactly when
+///
+/// ```text
+/// ((Q ^ F) & !A) & 0x28 != 0
+/// ```
+///
+/// — a bit of `Q ^ F` set in position 3 or 5 **where `A` has it clear**.
+///
+/// ## `zexall` does not distinguish them — measured, not proved
+///
+/// An earlier note here claimed `zexall` restores `F` before each test, so `Q == F` always
+/// holds and the collapse applies. **That premise is false.** Instrumenting the core over a
+/// full run counts `Q != F` in 15,750 of 16,000 `SCF` executions, and the same for `CCF`:
+/// the exerciser reaches that *shape* constantly.
+///
+/// What it never reaches, in roughly 32,000 executions, is the *bit pattern*. The
+/// divergence condition above held **zero** times. `zexall` therefore scores 67/67 under
 /// this rule, under `A & 0x28`, and under either answer to the `POP AF` fork — which is
 /// evidence for none of them.
 ///
-/// **FUSE does constrain one thing: the latch's *entry* value.** The collapse argument
-/// covers `Q == F` *within a running sequence*; it says nothing about what `Q` holds when a
-/// sequence begins. FUSE's vectors are single instructions, so `SCF`/`CCF` read the entry
-/// latch directly, and vectors `37_1` and `3f` fail unless it equals the loaded `F` —
-/// which is the physically right model, since loading a state is a `POP AF`. Those two
-/// vectors are currently the **only** gate in this project that can see the latch at all.
+/// ## FUSE constrains the latch's entry value
 ///
-/// What remains unverified is the mid-sequence behaviour, which needs a third shape: a
-/// flag-setting instruction, then an instruction that writes **no** flags (clearing `Q`
-/// while `F` persists), then `SCF`. Nothing in either corpus has it. A hardware trace or
-/// exerciser with that shape would decide this rule and the `POP AF` fork in one run.
+/// Its vectors are single instructions, so `SCF`/`CCF` read whatever the state load left.
+/// Vectors `37_1` and `3f` fail unless that equals the loaded `F` — the physically right
+/// model, since loading a state is a `POP AF`. Those two vectors are the **only** gate in
+/// this project that can see the latch at all.
+///
+/// ## What an instrument would actually need
+///
+/// Not a new instruction *shape*: `zexall` already produces `Q != F` in almost every
+/// execution. What is missing is an `(A, Q ^ F)` pair that makes the difference **visible**
+/// — bits 3 or 5 set in `Q ^ F` while clear in `A`. An exerciser that varies `A` and `F`
+/// independently across those two bit positions would settle this rule and the `POP AF`
+/// fork in one run. That is a far easier thing to look for than a novel instruction
+/// sequence, which is what an earlier version of this paragraph sent readers hunting for.
+///
+/// ## What the unit tests do and do not prove
+///
+/// Deleting this rule outright is caught only by tests that observe the latch *through*
+/// `SCF`'s own output — our model asserted as an expectation, not an oracle. They pin the
+/// behaviour against silent drift. They cannot tell us it is right.
 pub(crate) fn scf(a: u8, f: u8, q: u8) -> u8 {
     (f & (SIGN | ZERO | PARITY_OVERFLOW)) | (((q ^ f) | a) & UNDOCUMENTED) | CARRY
 }
