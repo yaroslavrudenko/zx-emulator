@@ -25,7 +25,7 @@ arithmetic — with an external oracle instead of self-assessment.
 
 | Milestone | Goal | Gate | State |
 |---|---|---|---|
-| **M1** | Registers, flags, un-prefixed opcodes | FUSE vectors green for un-prefixed | in progress |
+| **M1** | Registers, flags, un-prefixed opcodes | FUSE vectors green for un-prefixed | **290/290 vectors pass**; hardening the bus contract — see [`docs/STATUS.md`](docs/STATUS.md) |
 | M2 | `CB` / `ED` / `DD` / `FD` prefixes | FUSE vectors green in full | — |
 | M3 | Documented behaviour | `zexdoc` passes | — |
 | M4 | Undocumented flags | **`zexall` passes** — CPU complete | — |

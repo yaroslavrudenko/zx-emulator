@@ -24,7 +24,7 @@ crates/frontend/    macroquad, native + WASM.
 
 The CPU does not own memory. That is the decision everything else hangs on.
 
-## Decision 1 — the bus is a consumer-defined trait
+## Decision 1 — the bus is a consumer-defined trait, ticked once per T-state, with the address
 
 ```rust
 pub trait Bus {
@@ -32,18 +32,47 @@ pub trait Bus {
     fn write(&mut self, addr: u16, val: u8);
     fn in_port(&mut self, port: u16) -> u8;
     fn out_port(&mut self, port: u16, val: u8);
-    fn tick(&mut self, t_states: u8);
+
+    /// One T-state elapses with `addr` on the bus. Called once per T-state, never batched.
+    fn tick(&mut self, addr: u16);
 }
 
 pub struct Cpu<B: Bus> { /* ... */ }
 ```
 
-`tick` is called **inside** an instruction, at each memory/IO access, not summed at the
-end. Without that, cycle accuracy is unreachable: Spectrum contention depends on *when
-in the frame* an access happens, not on the instruction's total.
+Two properties, and the first revision of this document got both wrong. They were corrected
+after a review checked the signature against the corpus rather than against the prose.
+
+**One call per T-state, never a batch.** Spectrum contention is a function of `t mod 8`, so
+N separate one-T-state contentions starting at T do **not** sum to one N-T-state block
+starting at T. The machine cannot recover the difference afterwards. Corpus vector `09`
+(`ADD HL,BC`) shows seven separate `MC` events, and a batched `tick(7)` loses six of them.
+Across the un-prefixed set, batching loses **88 of the corpus's 166 internal contention
+points** — more than half.
+
+**The address travels with the tick.** The machine can track the address of the last
+transfer itself, since it sees every `read`/`write`. What it cannot learn is `IR` — the
+refresh address the Z80 drives during the second half of M1, which is what sits on the bus
+for the internal cycles of `ADD HL,ss`, `INC ss`, `JR`, `DJNZ`, `CALL`, `PUSH` and `RET cc`.
+`I` and `R` are reachable only through `Cpu::state()`, which the bus cannot call because the
+CPU owns it. On a 48K, program code normally lives in contended RAM `0x4000–0x7FFF`, so `IR`
+points into contended memory for most of a game's runtime — this is the difference between
+multicolour demos working and tearing.
 
 Generic over `B`, never `Box<dyn Bus>` — monomorphised, no indirect call on the hot path.
-`read`/`write` carry `#[inline]`; cross-crate inlining does not happen otherwise.
+`read`/`write` carry `#[inline]`; cross-crate inlining does not happen otherwise. Both
+properties are verified in emitted assembly, not assumed — see *Measured*, below.
+
+### Timestamp convention
+
+The corpus distinguishes two event kinds, and they are asserted differently:
+
+- **`MC` / `PC` timestamps are plain T-state indices, no offset.** `MC` at T=4 means that
+  address was on the bus during T-state 4, and `tick` call #4 *is* T-state 4. One-to-one.
+- **`MR` / `MW` timestamps are cycle-ends**, so they are asserted on (kind, address, byte)
+  **in order, without timestamps**. Matching their stamps would assert whether the core calls
+  `read()` before or after that cycle's ticks — an internal ordering choice, not a hardware
+  fact. Timing is covered by the contention stream, which is strictly stronger.
 
 ## Decision 2 — registers as an array, not fields
 
@@ -55,6 +84,21 @@ This is the key to the DD/FD prefixes. They substitute IX or IY for HL in the *n
 instruction. With named fields that is a branch in every HL-touching handler; with an
 array it is a **constant index offset** — one `hl_base: usize`, and the entire HL
 instruction set operates on IX with no `if` at all.
+
+> **Status — read this before trusting the paragraph above.** The *layout* landed in M1;
+> the *indirection* did not. Two independent reviewers found `grep hl_base` returning zero
+> hits while this document described it as the decision "everything hangs on". At M1 the
+> crate therefore paid the layout's cost — pairs are stored high-byte-first, so `pair()`
+> compiles to `ldrh` + `rev` + `lsr` where a native `u16` field would be one `ldrh` — and
+> collected none of its benefit, because the mechanism it exists for is M2 work. Threading
+> `base` through the decoder is tracked as an open item below.
+>
+> Two things to know before implementing it. The substitution is **asymmetric**: `H` and `L`
+> shift, but `B`/`C`/`D`/`E`/`A` must not — `DD 44` is `LD B,IXh`, not `LD IXh,IXh`. And
+> `0x29` (`ADD IX,IX`) needs the base substituted in **two** positions. Separately, the
+> operand-field→array-index mapping is already an 11-instruction branch cascade before any
+> offset is added, because the two orderings differ by a permutation that LLVM cannot fold;
+> `hl_base` will sit on top of that, not replace it.
 
 ## Decision 3 — decode with `match`, not a function-pointer table
 
@@ -143,6 +187,45 @@ multicolour effects). That is observation, not a green check.
 
 Performance is a non-goal. 3.5 MHz × 50 Hz ≈ 70,000 T-states per frame; a modern machine
 does that thousands of times faster than real time. Optimise nothing until measured.
+
+## Measured
+
+Everything in this section is a measurement or an assembly inspection, not an estimate.
+Host: Apple M3 Max, rustc 1.98.0, `[profile.release]` as shipped. Re-run after M2 — it
+quadruples the opcode count on exactly the paths measured here.
+
+| | Result |
+|---|---|
+| Throughput, flat 64K bus | **507× real-time** — 39 µs of a 20,000 µs frame budget |
+| Throughput, M7-shaped paged + contended bus | **294× real-time** — 68 µs, i.e. **0.34 % of the frame** |
+| Cost of `overflow-checks = true` | **5 %** on the core. One `cmp`/`b.hi` guarding the T-state accumulator — the only panic path in the whole `step` function |
+| Unproven bank index at M7 | **6.6 %**, avoidable for free by masking or a newtype |
+
+Design claims, each verified in the emitted assembly rather than assumed:
+
+| Claim | Evidence |
+|---|---|
+| Monomorphised, no `dyn` on the execute path | 0 hits for `dyn`/`Box`/`Rc`/`Arc`; indirect-branch (`blr`) count **0** |
+| `#[inline]` makes cross-crate inlining happen | `Bus::read` compiles to **one instruction** inside `step`; no call to any bus method |
+| Decode lowers to a jump table, not a compare chain | Two real tables (119 + 64 entries); the `LD r,r'` and `ALU A,r` blocks need none — `ubfx` extracts the field directly |
+| The execute path allocates nothing | 0 allocation sites outside `#[cfg(test)]`; Rust has no escape analysis, so this is certain, not probabilistic |
+| Register indexing is in-range | `panic_bounds_check` count in `step`: **0**. The `// INVARIANT:` comments are facts the compiler proves |
+
+The `spectrum` crate's contention arithmetic is the one cost worth watching — it is the
+largest term (−21.5 points of the M7 decomposition) and it is irreducible, because
+per-access timing is the property M7 exists to deliver.
+
+## Open items
+
+Tracked here so they are found by plan rather than by symptom.
+
+| Id | Item | Consequence if deferred |
+|---|---|---|
+| `hl_base` | Decision 2's indirection is unbuilt; `base` must be threaded through the decoder | M2 begins by paying a cost this document called paid |
+| `Q` latch | `SCF`/`CCF` use `F3/F5 = A & 0x28` and do not model the NMOS Q latch | `zexall` at M4 is the first real adjudicator — FUSE's single-instruction vectors structurally cannot decide it, since Q is defined by an instruction *sequence*. The plumbing (record F writes, clear per step) is ~12 lines and belongs in M1; the rule itself waits for the oracle |
+| `WZ` / MEMPTR | Not carried in `CpuState` | Needed at M4. `#[non_exhaustive]` is not an escape — it forbids the `..CpuState::default()` idiom this crate's own doctest teaches, so the field must exist before there are consumers |
+| `StepError` / `fault()` | M1 scaffolding that the docs promise to delete at M2 | A written plan to break our own public API. Either keep and re-scope, or make `pub(crate)` now |
+| `register_index` cascade | The operand-field→array-index permutation is 11 instructions | Not a defect. Both proposed rewrites trade compile-time exhaustiveness for ~10 instructions against 500× headroom — a bad trade. Re-measure after M2 |
 
 ## Licensing note
 
