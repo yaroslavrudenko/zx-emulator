@@ -27,8 +27,8 @@ arithmetic — with an external oracle instead of self-assessment.
 |---|---|---|---|
 | M1 | Registers, flags, un-prefixed opcodes | FUSE vectors green for un-prefixed | **290/290** — merged |
 | M2 | `CB` / `ED` / `DD` / `FD` prefixes | FUSE vectors green in full | **1045/1045** — merged |
-| **M3** | Documented behaviour | `zexdoc` passes | in progress — the first oracle that grades the processor rather than an instruction |
-| M4 | Undocumented flags | **`zexall` passes** — CPU complete | — |
+| M3 | Documented behaviour | `zexdoc` passes | **67/67 first run** — merged |
+| **M4** | Undocumented flags | **`zexall` passes** — CPU complete | already passing; being made a gate with its limits stated |
 | M5 | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | — |
 | M6 | Snapshots (`.z80` / `.sna`) and tape (`.tap`) | a real game runs | — |
 | M7 | 128: paging, second ROM, AY-3-8912, per-bank contention | 128-only software runs | — |
