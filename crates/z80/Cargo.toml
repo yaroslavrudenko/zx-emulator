@@ -7,10 +7,16 @@ license.workspace = true
 description = "Cycle-accurate Zilog Z80 CPU core. No I/O, no memory, no allocations."
 
 [dependencies]
+# Typed errors with a derived Display; already a workspace dependency, used by `spectrum`.
+thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 divan.workspace = true
+
+[[bench]]
+name = "step"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -3,3 +3,4 @@
 testdata/**
 !testdata/.gitkeep
 .DS_Store
+!testdata/README.md
