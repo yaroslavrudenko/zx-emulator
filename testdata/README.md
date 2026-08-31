@@ -54,17 +54,73 @@ Every executed vector asserts:
 - every memory location the vector lists, one finding per address
 - the **T-state total**, accumulated from the core's own `Bus::tick` calls
 
-### Making absence a failure in CI
-
-Absence is a skip locally and must be a failure in CI, or the conformance gate becomes a
-green tick that proves nothing:
-
-```sh
-Z80_FUSE_REQUIRED=1 cargo test -p z80
-```
-
 ### Licensing
 
 FUSE is distributed under the GNU GPL. The vectors are not redistributed in this
 repository — they are downloaded by whoever runs the tests, which is why this file exists
 instead of a checked-in copy.
+
+---
+
+## `testdata/zex/` — the `zex` CP/M instruction exercisers
+
+`zexdoc.com` is the **M3** oracle and `zexall.com` is **M4**'s. They are CP/M `.COM`
+programs rather than data: each runs millions of instruction sequences, folds the results
+into a CRC, and prints `OK` or `ERROR` per test group against a CRC built into the binary.
+The verdict is the program's, not ours.
+
+The two are the *same program* with different flag masks — every one of `zexdoc`'s 67
+descriptors masks the undocumented `F` bits off (`0xc7` / `0xd7` / `0x53`) where `zexall`
+uses `0xff`, and 31 of the 67 expected CRCs differ as a result. That is why they execute an
+identical instruction stream and take an identical number of T-states.
+
+### Fetching
+
+```sh
+mkdir -p testdata/zex
+base=https://raw.githubusercontent.com/anotherlin/z80emu/master/testfiles
+curl -fSL -o testdata/zex/zexdoc.com "$base/zexdoc.com"
+curl -fSL -o testdata/zex/zexall.com "$base/zexall.com"
+```
+
+Both files are 8704 bytes. As with the FUSE vectors, any genuine copy works: the harness
+validates the image's structure on load — it must contain the four report literals the
+report parser reads — rather than pinning a checksum.
+
+### Running the gate
+
+`zexdoc` is 5.76 billion instructions, so it is `#[ignore]`d: 43 s in release and about
+20 minutes in the `dev` profile `cargo test` uses by default. It is run explicitly:
+
+```sh
+cargo test --release -p z80 --test zex_oracle -- --ignored --nocapture
+```
+
+The sixteen tests around it — the CP/M shell, the report parser, and one failing case per
+gate rule — are **not** ignored and run on every `cargo test -p z80` without needing the
+corpus at all.
+
+`zexall` is deliberately **not** wired up as a gate at M3. See `docs/STATUS.md`.
+
+### Making absence a failure
+
+Absence is a skip only when it has been declared, and the declaration is refused under CI —
+otherwise a conformance gate becomes a green tick that proves nothing. This applies to both
+corpora, through one shared decision point in `crates/z80/tests/common/vectors.rs`:
+
+| | |
+|---|---|
+| corpus present | it runs |
+| corpus absent | **the gate fails**, naming the fetch instructions |
+| corpus absent, `Z80_FUSE_ALLOW_MISSING=1` | the gate skips, printing why |
+| corpus absent, `Z80_FUSE_ALLOW_MISSING=1`, `CI` set | **refused** — the opt-out must never decide what a pipeline verifies |
+| `Z80_FUSE_REQUIRED` set at all | **refused** — it is obsolete, and a variable that is set but no longer read is how a CI author believes a guard is armed when it is not |
+
+`Z80_FUSE_ALLOW_MISSING` is accepted as any of `1`/`true`/`yes`/`on`, case-insensitively;
+anything unrecognised is an error rather than a silent `false`.
+
+### Licensing
+
+The `zex` exercisers are Frank Cringle's `zexlax`/`zexall` work, redistributed widely under
+permissive terms. As with the FUSE vectors they are fetched rather than committed, so this
+repository redistributes nothing.
