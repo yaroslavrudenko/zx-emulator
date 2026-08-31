@@ -279,21 +279,51 @@ pub(crate) fn daa(a: u8, f: u8) -> (u8, u8) {
 
 /// `SCF` — set the carry flag.
 ///
-/// Bits 3 and 5 come from the accumulator rather than from any result, since there is no
-/// result. A real NMOS Z80 additionally ORs in the internal flag latch left by the
-/// preceding instruction, so the two bits can be set by a value this rule never sees;
-/// that refinement is not modelled here. See the crate-level documentation.
-pub(crate) fn scf(a: u8, f: u8) -> u8 {
-    (f & (SIGN | ZERO | PARITY_OVERFLOW)) | undocumented(a) | CARRY
+/// # The Q latch
+///
+/// Bits 3 and 5 come from `((Q ^ F) | A)`, where `Q` is the flag latch: the value the last
+/// instruction wrote to `F`, or zero if it wrote none. On an NMOS Z80 the latch and the
+/// accumulator both reach these two bits; `A` alone is the simplification this core used
+/// through M1–M3.
+///
+/// **This rule is implemented and only partly verified.** The two claims below are
+/// different, and an earlier version of this comment ran them together:
+///
+/// **`zexall` cannot distinguish it from the old `A & 0x28`**, and that is provable rather
+/// than observed. Whenever `Q == F` the expression collapses:
+///
+/// ```text
+/// ((Q ^ F) | A) & 0x28   with Q == F   ->   ((0) | A) & 0x28   ->   A & 0x28
+/// ```
+///
+/// `zexall` restores `F` immediately before each tested instruction, so it runs entirely
+/// inside the region where the two rules are algebraically identical. It scores 67/67 under
+/// this rule, under `A & 0x28`, and under either answer to the `POP AF` fork — which is
+/// evidence for none of them.
+///
+/// **FUSE does constrain one thing: the latch's *entry* value.** The collapse argument
+/// covers `Q == F` *within a running sequence*; it says nothing about what `Q` holds when a
+/// sequence begins. FUSE's vectors are single instructions, so `SCF`/`CCF` read the entry
+/// latch directly, and vectors `37_1` and `3f` fail unless it equals the loaded `F` —
+/// which is the physically right model, since loading a state is a `POP AF`. Those two
+/// vectors are currently the **only** gate in this project that can see the latch at all.
+///
+/// What remains unverified is the mid-sequence behaviour, which needs a third shape: a
+/// flag-setting instruction, then an instruction that writes **no** flags (clearing `Q`
+/// while `F` persists), then `SCF`. Nothing in either corpus has it. A hardware trace or
+/// exerciser with that shape would decide this rule and the `POP AF` fork in one run.
+pub(crate) fn scf(a: u8, f: u8, q: u8) -> u8 {
+    (f & (SIGN | ZERO | PARITY_OVERFLOW)) | (((q ^ f) | a) & UNDOCUMENTED) | CARRY
 }
 
 /// `CCF` — complement the carry flag, moving its old value into the half-carry.
 ///
-/// Bits 3 and 5 follow the same accumulator rule as [`scf`], with the same caveat.
-pub(crate) fn ccf(a: u8, f: u8) -> u8 {
+/// Bits 3 and 5 follow the same Q-latch rule as [`scf`], with the same caveat about it
+/// being unverifiable by any oracle we have.
+pub(crate) fn ccf(a: u8, f: u8, q: u8) -> u8 {
     let carry_was_set = (f & CARRY) != 0;
     (f & (SIGN | ZERO | PARITY_OVERFLOW))
-        | undocumented(a)
+        | (((q ^ f) | a) & UNDOCUMENTED)
         | flag(HALF_CARRY, carry_was_set)
         | flag(CARRY, !carry_was_set)
 }

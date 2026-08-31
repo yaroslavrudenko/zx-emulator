@@ -829,6 +829,22 @@ impl<B: Bus> Cpu<B> {
     /// `POP AF` reaches the flags register through this same path, which is why it can
     /// restore the undocumented bits 3 and 5 that no arithmetic instruction would
     /// produce — the pair is written as two raw bytes with no flag rule involved.
+    ///
+    /// # The Q fork — a choice, not a finding
+    ///
+    /// It writes `F` without going through [`Cpu::write_flags`], so it does **not** set the
+    /// flag latch. Whether real silicon latches here is genuinely contested, and the same
+    /// question applies to `EX AF,AF'`:
+    ///
+    /// - **Variant A (implemented):** neither latches, so `Q` is left clear and a following
+    ///   `SCF` sees `Q != F`.
+    /// - **Variant B:** both latch, making `Q == F`, at which point `SCF`'s rule collapses
+    ///   to the accumulator-only form.
+    ///
+    /// Both were implemented and measured: `zexall` scores 67/67 under either, and no FUSE
+    /// vector can reach the fork because each is a single instruction. **Nothing available
+    /// to this project decides it.** Variant A is chosen for being the more commonly
+    /// documented model — that is the whole justification. See [`crate::flags::scf`].
     fn pop_into(&mut self, base: PairBase) {
         let value = self.pop_word();
         self.regs.set_pair(base, value);
@@ -940,13 +956,13 @@ impl<B: Bus> Cpu<B> {
 
     /// `SCF`.
     fn set_carry_flag(&mut self) {
-        let flags = flags::scf(self.regs.a(), self.regs.f());
+        let flags = flags::scf(self.regs.a(), self.regs.f(), self.q_prev);
         self.write_flags(flags);
     }
 
     /// `CCF`.
     fn complement_carry_flag(&mut self) {
-        let flags = flags::ccf(self.regs.a(), self.regs.f());
+        let flags = flags::ccf(self.regs.a(), self.regs.f(), self.q_prev);
         self.write_flags(flags);
     }
 

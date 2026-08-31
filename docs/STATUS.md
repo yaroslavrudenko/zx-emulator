@@ -74,14 +74,55 @@ already names as contested, so `Q` would be zero and both rules would agree — 
 **unverified**. It is consistent with every number above, and it would explain passing on merit
 without the rule being implemented.
 
-The decisive follow-up is the inverse mutation: **implement the Q rule properly and see whether
-`zexall` goes red.** If it does, `zexall`'s sequences hold `Q` at zero, the two rules are
-indistinguishable to it, and `zexall` is *not* the adjudicator this document has assumed since
-M1 — which would leave the Q latch with no oracle at all. That experiment belongs to M4 and to
-whoever owns `src/`.
-
 **The practical consequence for M4 is immediate:** its stated premise — that `zexall` fails
 until `Q` lands — is false for this build. `<daa,cpl,scf,ccf>` passes today.
+
+### The Q rule then landed, and FUSE caught a defect no other gate sees
+
+The rule shipped as `((q ^ f) | a) & 0x28`, which collapses to `a & 0x28` whenever `q == f` —
+so it should have been invisible to every existing gate. It was not. **FUSE went from 290/290
+to 288/290**, and the two failures are `37_1` and `3f`, the only vectors that can see the
+latch at all.
+
+The harness was half the cause and is fixed here: `cpu_state()` defaulted `q` to zero, but
+**loading a state is a `POP AF`** — the load is the last thing that wrote `F`, so the latch
+must equal it. Zero is the one value that makes a positive false claim. `q` is now set from
+`F`; `wz` stays defaulted, because the corpus genuinely carries no MEMPTR column.
+
+That alone did not fix it, and the reason is a **defect in the core**. `begin_operation()`
+runs `self.q = 0` at the start of every `step()`, and `SCF`/`CCF` read that same field — so
+the latch they see is always zero, whatever was loaded or whatever the previous instruction
+wrote. The shipped rule therefore evaluates `(f | a) & 0x28`, which is neither the Q rule nor
+the `a & 0x28` it replaced.
+
+Measured, each mutation verified present in the file before its verdict was trusted:
+
+| Core | FUSE | `zexdoc` | `zexall` |
+|---|---|---|---|
+| Pre-Q (`a & 0x28`) | 290/290 | 67/67 | 67/67 |
+| **As shipped** (latch stuck at 0) | **288/290** | 67/67 | 67/67 |
+| Shipped **+ `q_prev`** (below) | **290/290** | 67/67 | 67/67 |
+
+The fix is to keep the previous instruction's latch instead of destroying it — add a
+`q_prev: u8`, make `begin_operation` do `self.q_prev = self.q;` *before* `self.q = 0;`, and
+have the two `SCF`/`CCF` call sites read `q_prev`. Proven in a scratch copy: 290/290 and
+1045/1045. **`crates/z80/src` is owned elsewhere and was not modified.**
+
+### The instrument problem, which the table above makes concrete
+
+**`zexall` did not catch this.** It passes 67/67 against a core whose latch is stuck at zero
+*and* against a correct one — and it also passed against pre-Q `a & 0x28`. Three different
+rules, one verdict. Yet `zexall` is not blind to these bits in general: forcing them to a
+constant `0` or `0x28` does make it fail. The likeliest reading is that `F`'s bits 3 and 5 are
+clear in the sequences it exercises, which makes `(f | a) & 0x28` and `a & 0x28` agree there —
+and it is exactly where FUSE's `37_1` (`F=ff`) and `3f` (`F=5b`) differ. That is inference
+from the measurements, not a verified claim about `zexall`'s internals.
+
+So as of M3 the position is: **two FUSE vectors are the only gate in this project that can see
+the flag latch at all.** An instrument that would settle the rule itself needs a third sequence
+shape — a flag-setter, then an instruction writing **no** flags (clearing the latch while `F`
+persists), then `SCF`. Neither corpus generates it. A hardware trace or a third-party exerciser
+with that shape would settle both the rule and the `POP AF` fork in one run.
 
 ### The gate runs nowhere unless CI runs it
 
@@ -205,7 +246,8 @@ session, which is the same failure mode that let the `tick` contract survive unc
 
 | Item | State | Settled by |
 |---|---|---|
-| `Q` latch | Plumbing landed — `write_flags` is the single F writer, `q` cleared per step. The **rule** is not implemented; `SCF`/`CCF` use `F3/F5 = A & 0x28` | **Was "M4, `zexall`". M3 undermined that.** `zexall` *does* grade these bits (proven by mutation) and the current rule **passes on merit** — so `zexall` cannot be assumed to fail until `Q` lands, and may not distinguish the two rules at all. Next step is the inverse mutation: implement `Q` and see whether `zexall` goes **red**. If it does, this item has **no oracle**. See the M3 section |
+| `Q` latch — **rule implemented, latch lifecycle BROKEN** | `((q ^ f) \| a) & 0x28` has landed, but `begin_operation()` zeroes `q` before `SCF`/`CCF` read it, so the effective rule is `(f \| a) & 0x28`. **FUSE is red: 288/290.** The harness half is fixed (`q` loaded from `F`); the core half is not | A `q_prev` field carrying the previous instruction's latch — three lines, proven in scratch to restore 290/290 and 1045/1045. **Blocks M3.** `crates/z80/src` is owned elsewhere. See the M3 section |
+| The flag latch has almost no instrument | Two FUSE vectors (`37_1`, `3f`) are the **only** gate that can see it. `zexdoc` masks the bits off; `zexall` passes against three different rules including a stuck-at-zero latch | A corpus with a flag-setter → no-flag instruction → `SCF` sequence. Neither existing corpus has one |
 | CI does not run the M3 gate | `.github/workflows/ci.yml` has the `zexdoc` job written, but `.github/` cannot be pushed from the session that wrote it — the token lacks `workflow` scope | Someone with `workflow` scope pushing it. Until then the gate is verified locally and enforced nowhere, which is the `Z80_FUSE_REQUIRED` defect again |
 | `WZ` / MEMPTR | Carried in `CpuState`, never written | M4, when `BIT n,(HL)` first makes it observable |
 | Resolved-target refactor | `read_operand`, `write_operand` and `tick_read_modify_delay` each recompute `pair(base)` independently. Free for `(HL)`; for `(IX+d)` the displacement must be fetched once and the addition charged once | **M2's opening move.** Needs a `Register(RegIndex) \| Memory(u16)` computed once and threaded |

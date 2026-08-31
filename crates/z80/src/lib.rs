@@ -51,10 +51,14 @@
 //!
 //! # Known deviations from real silicon
 //!
-//! - **`SCF`/`CCF` undocumented bits.** They are taken from the accumulator. A real NMOS
-//!   Z80 ORs in the flag latch left by the previous instruction — the latch is recorded
-//!   here as [`CpuState::q`], but the rule that consumes it is not implemented, because
-//!   `zexall` at M4 adjudicates two genuinely contested cases (`POP AF` and `EX AF,AF'`).
+//! - **`SCF`/`CCF` undocumented bits** are derived from the flag latch ([`CpuState::q`])
+//!   as `((Q ^ F) | A) & 0x28`, which is the NMOS rule. It is **implemented and only
+//!   partly verified.** `zexall` provably cannot see it — whenever `Q == F` the expression
+//!   collapses to `A & 0x28`, and `zexall` restores `F` before every tested instruction, so
+//!   it scores 67/67 under either rule. FUSE *does* constrain the latch's **entry** value:
+//!   two of its vectors fail unless a loaded state's latch matches its `F`. The
+//!   mid-sequence behaviour has no oracle. See `flags::scf` for the algebra and for the
+//!   sequence shape an instrument would need.
 //! - **`BIT n,(HL)`** takes its undocumented bits from the high byte of `MEMPTR`, which is
 //!   the hardware rule. The FUSE corpus predates the `MEMPTR` work and expects them from
 //!   the tested value instead, so four of its vectors are carried as documented omissions.
@@ -244,17 +248,17 @@ pub struct CpuState {
     /// `MEMPTR` (often written `WZ`) — an internal address latch with no instruction that
     /// reads it directly.
     ///
-    /// It leaks into observable behaviour through the undocumented flag bits of
-    /// `BIT n,(HL)` and the `ED` block operations, which is why `zexall` can see it and
-    /// why a snapshot must carry it. Nothing in the un-prefixed set updates it, so it stays
-    /// zero until M2.
+    /// It leaks into observable behaviour through the undocumented flag bits of `BIT`,
+    /// which is why a snapshot must carry it. Every indexed `(IX+d)`/`(IY+d)` access sets
+    /// it and `BIT` reads it back; the un-prefixed instructions that also update it on
+    /// hardware — `LD A,(nn)`, `JP nn`, `EX (SP),HL` and their relatives — do not yet.
     pub wz: u16,
     /// The flag latch — the value most recently written to `F`, or zero if the last
     /// instruction wrote no flags.
     ///
-    /// A real NMOS Z80 ORs this into the undocumented bits of `SCF` and `CCF`. The latch is
-    /// maintained here so the rule is a two-line change when `zexall` settles it at M4; the
-    /// rule itself is deliberately not implemented yet.
+    /// `SCF` and `CCF` derive their undocumented bits from it, as `((Q ^ F) | A) & 0x28`.
+    /// The rule is documented at `flags::scf`, which also explains why no oracle available
+    /// to this project can verify it — and why a green `zexall` is not evidence for it.
     pub q: u8,
 }
 
@@ -323,6 +327,12 @@ pub struct Cpu<B> {
     wz: u16,
     /// The flag latch. See [`CpuState::q`].
     q: u8,
+    /// The latch as the *previous* instruction left it — what `SCF`/`CCF` actually read.
+    ///
+    /// Two fields, not one, because `q` is being rebuilt during the very instruction that
+    /// needs to see the old value. Reading `q` directly gives whatever `begin_operation`
+    /// just cleared it to, which is always zero.
+    q_prev: u8,
     /// T-states charged during the instruction currently executing.
     t_states: u32,
     /// What stopped the most recent [`Cpu::step`] short, if anything.
@@ -360,6 +370,7 @@ impl<B: Bus> Cpu<B> {
             halted: false,
             wz: 0,
             q: 0,
+            q_prev: 0,
             t_states: 0,
             fault: None,
         };
@@ -588,6 +599,10 @@ impl<B: Bus> Cpu<B> {
     fn begin_operation(&mut self) {
         self.t_states = 0;
         self.interrupts.ei_pending = false;
+        // Hand the outgoing latch to `q_prev` before clearing it: `SCF`/`CCF` in *this*
+        // instruction must see what the *previous* one left, while `write_flags` rebuilds
+        // `q` for the next.
+        self.q_prev = self.q;
         self.q = 0;
         self.fault = None;
     }
@@ -1504,6 +1519,95 @@ mod tests {
 
         assert_eq!(cpu.state().hl, 0x5543, "real L, not IXl");
         assert_eq!(cpu.state().ix, 0x1000);
+    }
+
+    #[test]
+    fn scf_reads_the_latch_the_previous_instruction_left() {
+        // ⚠ THIS TEST ENCODES A BELIEF, NOT A VERIFIED FACT. No oracle validates the Q
+        // rule; its purpose is to stop the behaviour drifting silently.
+        //
+        // This is the *discriminating* case: `Q` must be NON-ZERO when `SCF` runs, so a
+        // latch that is merely always-zero fails it.
+        //
+        //   CP 0x28   -> A stays 0x00; F = 0xBB, whose bits 3 and 5 come from the operand
+        //   SCF       -> Q(0xBB) ^ F(0xBB) = 0, OR A(0x00) -> both bits CLEAR, F = 0x81
+        //
+        // A latch stuck at zero would instead give (0 ^ 0xBB) | 0x00 = 0xBB -> F = 0xA9.
+        //
+        // An earlier version of this test used `OR 0x28 / LD A,0 / SCF`, where `Q` is
+        // *supposed* to be zero at the `SCF` — so it passed against an implementation whose
+        // latch was always zero, and let that defect ship. It asserted the value `Q` should
+        // hold, never the mechanism that carries it across the instruction boundary. The
+        // lesson generalises: a probe for a stateful rule has to exercise the state being
+        // non-trivial, or it only tests the default.
+        let mut cpu = Cpu::new(Ram::new(&[0xFE, 0x28, 0x37]));
+        cpu.set_state(ready());
+
+        cpu.step(); // CP 0x28
+        let [a, f] = cpu.state().af.to_be_bytes();
+        assert_eq!(a, 0x00, "CP discards its result");
+        assert_eq!(f, 0xBB, "bits 3 and 5 come from the operand");
+        assert_eq!(cpu.state().q, 0xBB, "and the comparison latched them");
+
+        cpu.step(); // SCF
+        let [_, f] = cpu.state().af.to_be_bytes();
+        assert_eq!(f, 0x81, "a latch stuck at zero would give 0xA9");
+    }
+
+    #[test]
+    fn an_instruction_that_writes_no_flags_clears_the_latch() {
+        // The other half of the lifecycle. On its own this is NOT discriminating — a latch
+        // that is always zero also passes it — which is exactly how the defect above
+        // survived. It is kept because together with the test above it pins both
+        // directions: the latch carries forward, and it is cleared when it should be.
+        //
+        //   OR 0x28   -> A = 0x28, F = 0x2C, latch takes 0x2C
+        //   LD A,0x00 -> writes no flags, so the latch clears
+        //   SCF       -> Q(0) ^ F(0x2C) = 0x2C, OR A(0) -> both bits set, F = 0x2D
+        let mut cpu = Cpu::new(Ram::new(&[0xF6, 0x28, 0x3E, 0x00, 0x37]));
+        cpu.set_state(ready());
+
+        cpu.step(); // OR 0x28
+        assert_eq!(cpu.state().q, 0x2C, "an ALU op latches the flags it wrote");
+        cpu.step(); // LD A,0x00
+        assert_eq!(
+            cpu.state().q,
+            0x00,
+            "an instruction writing no flags clears it"
+        );
+        cpu.step(); // SCF
+
+        let [_, f] = cpu.state().af.to_be_bytes();
+        assert_eq!(f, 0x2D);
+    }
+
+    #[test]
+    fn pop_af_does_not_set_the_flag_latch() {
+        // ⚠ THIS TEST ENCODES A CHOICE, NOT A VERIFIED FACT.
+        //
+        // Whether `POP AF` and `EX AF,AF'` latch is genuinely contested. Variant A — they
+        // do not — is implemented here because it is the more commonly documented model.
+        // Variant B was built and measured too: `zexall` is 67/67 under both, and no FUSE
+        // vector can reach the fork because each is a single instruction. Nothing available
+        // to this project decides it.
+        //
+        //   POP AF (F = 0x28, A = 0x00), then SCF
+        //     variant A: Q = 0     -> (0 ^ 0x28) | 0 = 0x28 -> F = 0x29
+        //     variant B: Q = 0x28  -> (0x28 ^ 0x28) | 0 = 0 -> F = 0x01
+        let mut cpu = Cpu::new(Ram::new(&[0xF1, 0x37]));
+        cpu.bus_mut().memory[0x8000] = 0x28; // F
+        cpu.bus_mut().memory[0x8001] = 0x00; // A
+        cpu.set_state(CpuState {
+            sp: 0x8000,
+            ..ready()
+        });
+
+        cpu.step(); // POP AF
+        assert_eq!(cpu.state().q, 0x00, "variant A: the load does not latch");
+        cpu.step(); // SCF
+
+        let [_, f] = cpu.state().af.to_be_bytes();
+        assert_eq!(f, 0x29, "variant B would give 0x01");
     }
 
     #[test]
