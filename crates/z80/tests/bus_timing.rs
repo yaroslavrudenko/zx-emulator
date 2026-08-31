@@ -25,6 +25,7 @@
 
 mod common;
 
+use common::flags;
 use common::machine::Machine;
 use common::vectors::{MemoryBlock, Registers, Setup, State};
 
@@ -137,6 +138,148 @@ fn djnz_not_taken_still_reads_the_displacement() {
     );
 }
 
+#[test]
+fn push_spends_its_internal_t_state_on_ir() {
+    // `PUSH BC` — 11 T: a 5-T M1 (4 + 1 extra), then two stack writes.
+    assert_eq!(
+        cycles(&[
+            (PROGRAM_START, OPCODE_FETCH),
+            (REFRESH_ADDRESS, 1),
+            (STACK_HIGH, MEMORY_CYCLE),
+            (STACK_LOW, MEMORY_CYCLE),
+        ]),
+        run(&[0xC5], registers()),
+        "PUSH's extra M1 T-state sits on IR",
+    );
+}
+
+#[test]
+fn inc_ss_spends_its_two_internal_t_states_on_ir() {
+    // `INC BC` — 6 T: a 4-T fetch, then a 2-T internal increment of the pair.
+    assert_eq!(
+        cycles(&[(PROGRAM_START, OPCODE_FETCH), (REFRESH_ADDRESS, 2)]),
+        run(&[0x03], registers()),
+        "the 16-bit increment's two internal T-states sit on IR",
+    );
+}
+
+#[test]
+fn jr_spends_its_five_internal_t_states_on_the_displacement_address() {
+    // `JR +0` — 12 T: fetch, a 3-T displacement read, then a 5-T internal add. Like DJNZ
+    // and unlike everything above, the add is charged to the displacement byte's address.
+    assert_eq!(
+        cycles(&[
+            (PROGRAM_START, OPCODE_FETCH),
+            (FIRST_OPERAND, MEMORY_CYCLE),
+            (FIRST_OPERAND, 5),
+        ]),
+        run(&[0x18, 0x00], registers()),
+        "JR's internal add is charged to the displacement address, not to IR",
+    );
+}
+
+/// `RET cc` in both directions — the taken path pops, the not-taken path stops after the
+/// M1 extra T-state, and both charge that extra T-state to `IR`.
+#[test]
+fn ret_cc_spends_its_internal_t_state_on_ir_whether_or_not_it_returns() {
+    // `RET NZ` taken (Z clear) — 11 T: 5-T M1, then two stack reads.
+    assert_eq!(
+        cycles(&[
+            (PROGRAM_START, OPCODE_FETCH),
+            (REFRESH_ADDRESS, 1),
+            (STACK_TOP, MEMORY_CYCLE),
+            (STACK_TOP + 1, MEMORY_CYCLE),
+        ]),
+        run(&[0xC0], with_flags(0x00)),
+        "RET NZ taken: the extra M1 T-state is on IR, then it pops",
+    );
+
+    // `RET NZ` not taken (Z set) — 5 T, and nothing is popped.
+    assert_eq!(
+        cycles(&[(PROGRAM_START, OPCODE_FETCH), (REFRESH_ADDRESS, 1)]),
+        run(&[0xC0], with_flags(flags::Z)),
+        "RET NZ not taken: 5 T-states and no stack access at all",
+    );
+}
+
+/// `EX (SP),HL` — the only instruction that drives **stack** addresses during its internal
+/// cycles, and it drives two different ones.
+#[test]
+fn ex_sp_hl_drives_the_stack_addresses_through_its_internal_cycles() {
+    // 19 T: fetch, two stack reads, 1 internal on SP+1, two stack writes, 2 internal on SP.
+    // Corpus vector `e3` with SP = 0x0373 shows the shape: the single internal T-state
+    // belongs to the high half just read, the trailing pair to the low half just written.
+    assert_eq!(
+        cycles(&[
+            (PROGRAM_START, OPCODE_FETCH),
+            (STACK_TOP, MEMORY_CYCLE),
+            (STACK_TOP + 1, MEMORY_CYCLE),
+            (STACK_TOP + 1, 1),
+            (STACK_TOP + 1, MEMORY_CYCLE),
+            (STACK_TOP, MEMORY_CYCLE),
+            (STACK_TOP, 2),
+        ]),
+        run(&[0xE3], registers()),
+        "EX (SP),HL: one internal T-state on SP+1, two on SP",
+    );
+}
+
+/// `LDIR` mid-run — the repeat mechanism, and the newest code in the core.
+///
+/// M2 added six block-instruction internal-cycle sites and the corpus is the only thing
+/// that touched any of them. These two tests are the corpus-independent floor for the most
+/// distinctive of them: the five extra T-states that make the instruction repeat.
+#[test]
+fn ldir_charges_its_repeat_cycles_to_the_destination_address() {
+    // 21 T while BC != 0 after the copy: ED fetch, B0 fetch, read (HL), write (DE), then
+    // seven internal T-states — two for the copy, five for the repeat — all on DE.
+    assert_eq!(
+        cycles(&[
+            (PROGRAM_START, OPCODE_FETCH),
+            (PROGRAM_START + 1, OPCODE_FETCH),
+            (BLOCK_SOURCE, MEMORY_CYCLE),
+            (BLOCK_DESTINATION, MEMORY_CYCLE),
+            (BLOCK_DESTINATION, 7),
+        ]),
+        run(&[0xED, 0xB0], block_copy(2)),
+        "a repeating LDIR spends all seven internal T-states on DE",
+    );
+}
+
+#[test]
+fn ldir_on_its_final_iteration_drops_the_five_repeat_cycles() {
+    // 16 T when BC reaches zero: the same shape with only the copy's two internal T-states.
+    // This is the difference the repeat mechanism has to get right.
+    assert_eq!(
+        cycles(&[
+            (PROGRAM_START, OPCODE_FETCH),
+            (PROGRAM_START + 1, OPCODE_FETCH),
+            (BLOCK_SOURCE, MEMORY_CYCLE),
+            (BLOCK_DESTINATION, MEMORY_CYCLE),
+            (BLOCK_DESTINATION, 2),
+        ]),
+        run(&[0xED, 0xB0], block_copy(1)),
+        "the last LDIR iteration is 16 T, not 21 — no repeat cycles",
+    );
+}
+
+#[test]
+fn lddr_matches_ldir_cycle_for_cycle() {
+    // LDDR differs from LDIR only in which way HL and DE move afterwards; the machine
+    // cycles of a single iteration are identical, so the floor is too.
+    assert_eq!(
+        cycles(&[
+            (PROGRAM_START, OPCODE_FETCH),
+            (PROGRAM_START + 1, OPCODE_FETCH),
+            (BLOCK_SOURCE, MEMORY_CYCLE),
+            (BLOCK_DESTINATION, MEMORY_CYCLE),
+            (BLOCK_DESTINATION, 7),
+        ]),
+        run(&[0xED, 0xB8], block_copy(2)),
+        "a repeating LDDR has the same cycle shape as LDIR",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -168,6 +311,29 @@ fn counting_down_from(b: u8) -> Registers {
     }
 }
 
+/// Source and destination for the block-copy tests, well away from the program and the
+/// stack so a wrong address cannot coincide with a right one.
+const BLOCK_SOURCE: u16 = 0x5000;
+const BLOCK_DESTINATION: u16 = 0x6000;
+
+/// `HL` -> `DE`, `BC` bytes to go. `BC == 1` makes the next copy the last one.
+fn block_copy(remaining: u16) -> Registers {
+    Registers {
+        hl: BLOCK_SOURCE,
+        de: BLOCK_DESTINATION,
+        bc: remaining,
+        ..registers()
+    }
+}
+
+/// `F` is the low byte of `AF`, and it is what the conditional instructions branch on.
+fn with_flags(f: u8) -> Registers {
+    Registers {
+        af: u16::from(f),
+        ..registers()
+    }
+}
+
 /// Execute exactly one instruction and return the address the bus saw at each T-state.
 fn run(bytes: &[u8], registers: Registers) -> Vec<u16> {
     let setup = Setup {
@@ -185,5 +351,14 @@ fn run(bytes: &[u8], registers: Registers) -> Vec<u16> {
     };
     let mut machine = Machine::load(&setup);
     machine.step();
+    // Every test in this file rests on the instruction actually having executed. A core
+    // that recorded an unimplemented-opcode fault would still produce a tick log, and a
+    // short one could coincidentally match a short expectation — so the fault is checked
+    // here, once, rather than assumed nine times.
+    assert_eq!(
+        None,
+        machine.fault(),
+        "the core faulted instead of executing {bytes:02x?}",
+    );
     machine.tick_addresses().to_vec()
 }

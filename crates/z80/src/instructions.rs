@@ -31,10 +31,55 @@
 //! least obvious part of the code and the easiest to get wrong.
 
 use crate::bus::Bus;
-use crate::decode::{AluOp, Condition, Operand};
+use crate::decode::{AluOp, CbOp, Condition, Index, Operand, ShiftOp, Target, ed_pair};
 use crate::flags;
-use crate::registers::{PairBase, index, pair};
-use crate::{Cpu, StepError};
+use crate::registers::{PairBase, RegIndex, index, pair};
+use crate::{Cpu, InterruptMode, PREFIX_CB, PREFIX_DD, PREFIX_ED, PREFIX_FD};
+
+/// T-states the Z80 spends adding a displacement to an index register.
+const INDEX_COMPUTATION: u8 = 5;
+
+/// The same computation when an operand byte fetched after the displacement has already
+/// spent three of its T-states.
+const INDEX_COMPUTATION_AFTER_FETCH: u8 = 2;
+
+/// T-states the 16-bit `ADC`/`SBC` pair arithmetic spends after its opcode fetch.
+const PAIR_ARITHMETIC: u8 = 7;
+
+/// T-states `RRD`/`RLD` spend shuffling nibbles between memory and the accumulator.
+const DIGIT_ROTATE: u8 = 4;
+
+/// T-states a repeating block instruction spends before re-running itself.
+const BLOCK_REPEAT: u8 = 5;
+
+/// What a block instruction leaves behind for the repeat machinery.
+///
+/// `last_address` is the address that was last on the bus, which is where the repeat's
+/// internal cycles are driven — and it differs per family: `DE` for the transfers (the
+/// write), `HL` for the compares (the read) and the inputs (the write), but the **port**
+/// for the outputs. Corpus vectors `edb0`, `edb1`, `edb2` and `edb3` each show a different
+/// address for the same five cycles, which is why this travels with the outcome rather than
+/// being recomputed from registers that have since moved.
+struct BlockOutcome {
+    /// Whether the loop condition still holds.
+    repeat: bool,
+    /// The address last driven on the bus.
+    last_address: u16,
+}
+
+/// Whether a block instruction walks its pointers up or down.
+///
+/// The increment/decrement bit is 3 of the opcode: `LDI` is `A0` and `LDD` is `A8`.
+fn block_step(opcode: u8) -> i8 {
+    if opcode & 0x08 == 0 { 1 } else { -1 }
+}
+
+/// Whether this encoding is one of the repeating forms.
+///
+/// Bit 4 separates `LDI` (`A0`) from `LDIR` (`B0`), uniformly across all four families.
+const fn repeats(opcode: u8) -> bool {
+    opcode & 0x10 != 0
+}
 
 impl<B: Bus> Cpu<B> {
     /// Execute one already-fetched opcode.
@@ -42,10 +87,8 @@ impl<B: Bus> Cpu<B> {
     /// `base` is the pair standing in for `HL`, which is always [`pair::HL`] for the
     /// un-prefixed set.
     ///
-    /// The `CB`, `DD`, `ED` and `FD` prefixes are reported as
-    /// [`StepError::UnsupportedPrefix`] rather than panicking; their instruction sets
-    /// arrive in M2.
-    pub(crate) fn execute(&mut self, opcode: u8, base: PairBase) -> Result<(), StepError> {
+    /// The prefix bytes never reach here: [`Cpu::dispatch`] consumes them first.
+    pub(crate) fn execute(&mut self, opcode: u8, index: Index) {
         match opcode {
             // ---- 0x00–0x3F ----------------------------------------------------------
             0x00 => {} // NOP — the opcode fetch is the whole instruction
@@ -58,43 +101,43 @@ impl<B: Bus> Cpu<B> {
 
             0x01 => self.load_pair_immediate(pair::BC), // LD BC,nn
             0x11 => self.load_pair_immediate(pair::DE), // LD DE,nn
-            0x21 => self.load_pair_immediate(base),     // LD HL,nn
+            0x21 => self.load_pair_immediate(index.base()), // LD HL,nn
             0x31 => self.load_pair_immediate(pair::SP), // LD SP,nn
 
             // `ADD HL,ss` takes the base twice: `DD 29` is `ADD IX,IX`, so both the
             // destination and the operand follow the prefix.
-            0x09 => self.add_pair(base, pair::BC), // ADD HL,BC
-            0x19 => self.add_pair(base, pair::DE), // ADD HL,DE
-            0x29 => self.add_pair(base, base),     // ADD HL,HL
-            0x39 => self.add_pair(base, pair::SP), // ADD HL,SP
+            0x09 => self.add_pair(index.base(), pair::BC), // ADD HL,BC
+            0x19 => self.add_pair(index.base(), pair::DE), // ADD HL,DE
+            0x29 => self.add_pair(index.base(), index.base()), // ADD HL,HL
+            0x39 => self.add_pair(index.base(), pair::SP), // ADD HL,SP
 
             0x02 => self.store_a_indirect(pair::BC), // LD (BC),A
             0x12 => self.store_a_indirect(pair::DE), // LD (DE),A
             0x0A => self.load_a_indirect(pair::BC),  // LD A,(BC)
             0x1A => self.load_a_indirect(pair::DE),  // LD A,(DE)
 
-            0x22 => self.store_pair_absolute(base), // LD (nn),HL
-            0x2A => self.load_pair_absolute(base),  // LD HL,(nn)
-            0x32 => self.store_a_absolute(),        // LD (nn),A
-            0x3A => self.load_a_absolute(),         // LD A,(nn)
+            0x22 => self.store_pair_absolute(index.base()), // LD (nn),HL
+            0x2A => self.load_pair_absolute(index.base()),  // LD HL,(nn)
+            0x32 => self.store_a_absolute(),                // LD (nn),A
+            0x3A => self.load_a_absolute(),                 // LD A,(nn)
 
             0x03 => self.increment_pair(pair::BC), // INC BC
             0x13 => self.increment_pair(pair::DE), // INC DE
-            0x23 => self.increment_pair(base),     // INC HL
+            0x23 => self.increment_pair(index.base()), // INC HL
             0x33 => self.increment_pair(pair::SP), // INC SP
             0x0B => self.decrement_pair(pair::BC), // DEC BC
             0x1B => self.decrement_pair(pair::DE), // DEC DE
-            0x2B => self.decrement_pair(base),     // DEC HL
+            0x2B => self.decrement_pair(index.base()), // DEC HL
             0x3B => self.decrement_pair(pair::SP), // DEC SP
 
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
-                self.increment_operand(Operand::destination(opcode), base);
+                self.increment_operand(Operand::destination(opcode), index);
             } // INC r / INC (HL)
             0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
-                self.decrement_operand(Operand::destination(opcode), base);
+                self.decrement_operand(Operand::destination(opcode), index);
             } // DEC r / DEC (HL)
             0x06 | 0x0E | 0x16 | 0x1E | 0x26 | 0x2E | 0x36 | 0x3E => {
-                self.load_operand_immediate(Operand::destination(opcode), base);
+                self.load_operand_immediate(Operand::destination(opcode), index);
             } // LD r,n / LD (HL),n
 
             0x07 => self.rotate_a(flags::rlca),   // RLCA
@@ -115,13 +158,13 @@ impl<B: Bus> Cpu<B> {
                 self.load_operand_operand(
                     Operand::destination(opcode),
                     Operand::source(opcode),
-                    base,
+                    index,
                 );
             }
 
             // ---- 0x80–0xBF: ALU A,r -------------------------------------------------
             0x80..=0xBF => {
-                self.alu_with_operand(AluOp::from_opcode(opcode), Operand::source(opcode), base);
+                self.alu_with_operand(AluOp::from_opcode(opcode), Operand::source(opcode), index);
             }
 
             // ---- 0xC0–0xFF ----------------------------------------------------------
@@ -139,14 +182,14 @@ impl<B: Bus> Cpu<B> {
             } // ALU A,n
             0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => self.restart(opcode), // RST p
 
-            0xC1 => self.pop_into(pair::BC),  // POP BC
-            0xD1 => self.pop_into(pair::DE),  // POP DE
-            0xE1 => self.pop_into(base),      // POP HL
-            0xF1 => self.pop_into(pair::AF),  // POP AF
-            0xC5 => self.push_pair(pair::BC), // PUSH BC
-            0xD5 => self.push_pair(pair::DE), // PUSH DE
-            0xE5 => self.push_pair(base),     // PUSH HL
-            0xF5 => self.push_pair(pair::AF), // PUSH AF
+            0xC1 => self.pop_into(pair::BC),      // POP BC
+            0xD1 => self.pop_into(pair::DE),      // POP DE
+            0xE1 => self.pop_into(index.base()),  // POP HL
+            0xF1 => self.pop_into(pair::AF),      // POP AF
+            0xC5 => self.push_pair(pair::BC),     // PUSH BC
+            0xD5 => self.push_pair(pair::DE),     // PUSH DE
+            0xE5 => self.push_pair(index.base()), // PUSH HL
+            0xF5 => self.push_pair(pair::AF),     // PUSH AF
 
             0xC3 => self.jump_unconditional(),       // JP nn
             0xC9 => self.return_unconditional(),     // RET
@@ -154,53 +197,512 @@ impl<B: Bus> Cpu<B> {
             0xD3 => self.output_immediate(),         // OUT (n),A
             0xDB => self.input_immediate(),          // IN A,(n)
             0xD9 => self.regs.exchange_shadow_set(), // EXX
-            0xE3 => self.exchange_stack_pair(base),  // EX (SP),HL
-            0xE9 => self.jump_to_pair(base),         // JP (HL)
+            0xE3 => self.exchange_stack_pair(index.base()), // EX (SP),HL
+            0xE9 => self.jump_to_pair(index.base()), // JP (HL)
             0xEB => self.regs.exchange_de_hl(),      // EX DE,HL — never an index register
             0xF3 => self.disable_interrupts(),       // DI
-            0xF9 => self.load_sp_from_pair(base),    // LD SP,HL
+            0xF9 => self.load_sp_from_pair(index.base()), // LD SP,HL
             0xFB => self.enable_interrupts(),        // EI
 
-            0xCB | 0xDD | 0xED | 0xFD => return Err(self.unsupported_prefix(opcode)),
+            // Unreachable by construction: `Cpu::dispatch` consumes all four prefix bytes
+            // before calling here. The arm exists because the match is exhaustive over all
+            // 256 encodings — which is what stops an opcode being silently forgotten — and
+            // there is no error left to report now that every prefix decodes.
+            PREFIX_CB | PREFIX_DD | PREFIX_ED | PREFIX_FD => {}
         }
-        Ok(())
+    }
+
+    /// Execute an `ED`-prefixed instruction.
+    ///
+    /// The `ED` page is sparse: about a quarter of it is assigned and the rest decodes as a
+    /// two-byte `NOP`. Unlike `DD`/`FD`, `ED` ignores any index prefix that preceded it —
+    /// `DD ED 44` is just `NEG`.
+    pub(crate) fn execute_ed(&mut self) {
+        let opcode = self.fetch_opcode();
+        match opcode {
+            0x40 | 0x48 | 0x50 | 0x58 | 0x60 | 0x68 | 0x70 | 0x78 => self.input_from_c(opcode),
+            0x41 | 0x49 | 0x51 | 0x59 | 0x61 | 0x69 | 0x71 | 0x79 => self.output_to_c(opcode),
+            0x42 | 0x52 | 0x62 | 0x72 => self.subtract_pair_with_carry(ed_pair(opcode)),
+            0x4A | 0x5A | 0x6A | 0x7A => self.add_pair_with_carry(ed_pair(opcode)),
+            0x43 | 0x53 | 0x63 | 0x73 => self.store_pair_absolute(ed_pair(opcode)),
+            0x4B | 0x5B | 0x6B | 0x7B => self.load_pair_absolute(ed_pair(opcode)),
+            0x44 | 0x4C | 0x54 | 0x5C | 0x64 | 0x6C | 0x74 | 0x7C => self.negate_a(),
+            0x45 | 0x4D | 0x55 | 0x5D | 0x65 | 0x6D | 0x75 | 0x7D => self.return_from_interrupt(),
+            0x46 | 0x4E | 0x66 | 0x6E => self.select_interrupt_mode(InterruptMode::Mode0),
+            0x56 | 0x76 => self.select_interrupt_mode(InterruptMode::Mode1),
+            0x5E | 0x7E => self.select_interrupt_mode(InterruptMode::Mode2),
+            0x47 => self.load_special_from_a(index::I),
+            0x4F => self.load_special_from_a(index::R),
+            0x57 => self.load_a_from_special(index::I),
+            0x5F => self.load_a_from_special(index::R),
+            0x67 => self.rotate_digit_right(),
+            0x6F => self.rotate_digit_left(),
+
+            0xA0 | 0xA8 | 0xB0 | 0xB8 => {
+                let outcome = self.block_transfer(opcode);
+                self.repeat_block(opcode, outcome);
+            }
+            0xA1 | 0xA9 | 0xB1 | 0xB9 => {
+                let outcome = self.block_compare(opcode);
+                self.repeat_block(opcode, outcome);
+            }
+            0xA2 | 0xAA | 0xB2 | 0xBA => {
+                let outcome = self.block_input(opcode);
+                self.repeat_block(opcode, outcome);
+            }
+            0xA3 | 0xAB | 0xB3 | 0xBB => {
+                let outcome = self.block_output(opcode);
+                self.repeat_block(opcode, outcome);
+            }
+
+            // Every other `ED` encoding is unassigned and behaves as a two-byte `NOP`.
+            // That is the hardware's own rule rather than a fallback: the Z80 decodes these
+            // and deliberately does nothing, in eight T-states.
+            _unassigned => {}
+        }
+    }
+
+    /// `IN r,(C)` — read the port named by the whole of `BC`.
+    ///
+    /// Encoding `110` names no register: the byte is read, the flags are set from it, and
+    /// the value is discarded. That form is written `IN (C)` or `IN F,(C)`.
+    fn input_from_c(&mut self, opcode: u8) {
+        let port = self.regs.pair(pair::BC);
+        let value = self.read_port(port);
+        if let Some(register) = Operand::destination(opcode).register_index(pair::HL) {
+            self.regs.set(register, value);
+        }
+        let flags = flags::prefixed::reported_byte(value, self.regs.f());
+        self.write_flags(flags);
+    }
+
+    /// `OUT (C),r`. Encoding `110` names no register and outputs zero.
+    fn output_to_c(&mut self, opcode: u8) {
+        let value = match Operand::destination(opcode).register_index(pair::HL) {
+            Some(register) => self.regs.get(register),
+            None => 0,
+        };
+        let port = self.regs.pair(pair::BC);
+        self.write_port(port, value);
+    }
+
+    /// `ADC HL,ss`.
+    fn add_pair_with_carry(&mut self, operand: PairBase) {
+        let addend = self.regs.pair(operand);
+        let carry = self.carry_flag();
+        let refresh = self.regs.refresh_address();
+        self.internal_cycles(refresh, PAIR_ARITHMETIC);
+        let (result, flags) = flags::prefixed::adc16(self.regs.pair(pair::HL), addend, carry);
+        self.regs.set_pair(pair::HL, result);
+        self.write_flags(flags);
+    }
+
+    /// `SBC HL,ss`.
+    fn subtract_pair_with_carry(&mut self, operand: PairBase) {
+        let subtrahend = self.regs.pair(operand);
+        let carry = self.carry_flag();
+        let refresh = self.regs.refresh_address();
+        self.internal_cycles(refresh, PAIR_ARITHMETIC);
+        let (result, flags) = flags::prefixed::sbc16(self.regs.pair(pair::HL), subtrahend, carry);
+        self.regs.set_pair(pair::HL, result);
+        self.write_flags(flags);
+    }
+
+    /// `NEG` — subtract the accumulator from zero.
+    fn negate_a(&mut self) {
+        let (result, flags) = flags::prefixed::neg(self.regs.a());
+        self.regs.set_a(result);
+        self.write_flags(flags);
+    }
+
+    /// `RETN` and `RETI`.
+    ///
+    /// Both restore `IFF1` from `IFF2` — the copy a non-maskable interrupt made on its way
+    /// in — which is how interrupts resume after an NMI handler. `RETI` differs only in
+    /// signalling the daisy chain, which this core has no bus for.
+    fn return_from_interrupt(&mut self) {
+        self.interrupts.iff1 = self.interrupts.iff2;
+        let target = self.pop_word();
+        self.regs.set_pc(target);
+    }
+
+    /// `IM 0`, `IM 1`, `IM 2`.
+    fn select_interrupt_mode(&mut self, mode: InterruptMode) {
+        self.interrupts.mode = mode;
+    }
+
+    /// `LD I,A` and `LD R,A`. Neither affects the flags.
+    fn load_special_from_a(&mut self, register: RegIndex) {
+        let refresh = self.regs.refresh_address();
+        self.internal_cycles(refresh, 1);
+        let value = self.regs.a();
+        self.regs.set(register, value);
+    }
+
+    /// `LD A,I` and `LD A,R` — the only way software can read `IFF2`.
+    fn load_a_from_special(&mut self, register: RegIndex) {
+        let refresh = self.regs.refresh_address();
+        self.internal_cycles(refresh, 1);
+        let value = self.regs.get(register);
+        self.regs.set_a(value);
+        let flags = flags::prefixed::load_a_from_interrupt_register(
+            value,
+            self.interrupts.iff2,
+            self.regs.f(),
+        );
+        self.write_flags(flags);
+    }
+
+    /// `RRD` — rotate one BCD digit right through `A` and `(HL)`.
+    fn rotate_digit_right(&mut self) {
+        self.rotate_digit(|a, memory| {
+            let stored = (a << 4) | (memory >> 4);
+            let accumulator = (a & 0xF0) | (memory & 0x0F);
+            (accumulator, stored)
+        });
+    }
+
+    /// `RLD` — rotate one BCD digit left through `A` and `(HL)`.
+    fn rotate_digit_left(&mut self) {
+        self.rotate_digit(|a, memory| {
+            let stored = (memory << 4) | (a & 0x0F);
+            let accumulator = (a & 0xF0) | (memory >> 4);
+            (accumulator, stored)
+        });
+    }
+
+    /// The shared body of `RRD` and `RLD`: read `(HL)`, shuffle nibbles between it and the
+    /// accumulator, write it back. Four internal T-states pay for the shuffle.
+    fn rotate_digit(&mut self, shuffle: fn(u8, u8) -> (u8, u8)) {
+        let address = self.regs.pair(pair::HL);
+        let memory = self.read_byte(address);
+        self.internal_cycles(address, DIGIT_ROTATE);
+        let (accumulator, stored) = shuffle(self.regs.a(), memory);
+        self.write_byte(address, stored);
+        self.regs.set_a(accumulator);
+        let flags = flags::prefixed::reported_byte(accumulator, self.regs.f());
+        self.write_flags(flags);
+    }
+
+    /// `LDI` and `LDD` — copy one byte from `(HL)` to `(DE)`.
+    fn block_transfer(&mut self, opcode: u8) -> BlockOutcome {
+        let step = block_step(opcode);
+        let source = self.regs.pair(pair::HL);
+        let value = self.read_byte(source);
+        let destination = self.regs.pair(pair::DE);
+        self.write_byte(destination, value);
+        self.internal_cycles(destination, 2);
+
+        self.regs
+            .set_pair(pair::HL, source.wrapping_add_signed(i16::from(step)));
+        self.regs
+            .set_pair(pair::DE, destination.wrapping_add_signed(i16::from(step)));
+        let remaining = self.decrement_byte_counter();
+        let flags =
+            flags::prefixed::block_transfer(self.regs.a(), value, remaining != 0, self.regs.f());
+        self.write_flags(flags);
+
+        BlockOutcome {
+            repeat: remaining != 0,
+            last_address: destination,
+        }
+    }
+
+    /// `CPI` and `CPD` — compare `A` against `(HL)` without storing the difference.
+    fn block_compare(&mut self, opcode: u8) -> BlockOutcome {
+        let step = block_step(opcode);
+        let source = self.regs.pair(pair::HL);
+        let value = self.read_byte(source);
+        self.internal_cycles(source, 5);
+
+        self.regs
+            .set_pair(pair::HL, source.wrapping_add_signed(i16::from(step)));
+        let remaining = self.decrement_byte_counter();
+        let flags =
+            flags::prefixed::block_compare(self.regs.a(), value, remaining != 0, self.regs.f());
+        self.write_flags(flags);
+
+        BlockOutcome {
+            // The searching forms stop on *either* term — the counter running out, or a
+            // match. Corpus `edb9` exits on the counter, `edb1` on the match.
+            repeat: remaining != 0 && (flags & crate::flags::ZERO) == 0,
+            last_address: source,
+        }
+    }
+
+    /// `INI` and `IND` — read a port into `(HL)`.
+    ///
+    /// The port is addressed with `B` still at its old value; the decrement happens after.
+    fn block_input(&mut self, opcode: u8) -> BlockOutcome {
+        let step = block_step(opcode);
+        let refresh = self.regs.refresh_address();
+        self.internal_cycles(refresh, 1);
+
+        let port = self.regs.pair(pair::BC);
+        let value = self.read_port(port);
+        let destination = self.regs.pair(pair::HL);
+        self.write_byte(destination, value);
+
+        self.regs
+            .set_pair(pair::HL, destination.wrapping_add_signed(i16::from(step)));
+        let counter = self.decrement_b();
+        // `INI` derives its carry from `C + 1`, `IND` from `C - 1`.
+        let index = self.regs.get(index::C).wrapping_add_signed(step);
+        let flags = flags::prefixed::block_io(counter, value, index);
+        self.write_flags(flags);
+
+        BlockOutcome {
+            repeat: counter != 0,
+            last_address: destination,
+        }
+    }
+
+    /// `OUTI` and `OUTD` — write `(HL)` to a port.
+    ///
+    /// Here `B` is decremented *before* the transfer, so the port carries the new value.
+    fn block_output(&mut self, opcode: u8) -> BlockOutcome {
+        let step = block_step(opcode);
+        let refresh = self.regs.refresh_address();
+        self.internal_cycles(refresh, 1);
+
+        let source = self.regs.pair(pair::HL);
+        let value = self.read_byte(source);
+        let counter = self.decrement_b();
+        let port = self.regs.pair(pair::BC);
+        self.write_port(port, value);
+
+        self.regs
+            .set_pair(pair::HL, source.wrapping_add_signed(i16::from(step)));
+        // The output forms derive their carry from `L` after the pointer has moved.
+        let index = self.regs.get(pair::HL.low());
+        let flags = flags::prefixed::block_io(counter, value, index);
+        self.write_flags(flags);
+
+        BlockOutcome {
+            repeat: counter != 0,
+            // The output forms leave the *port* on the bus, not a memory address: corpus
+            // `edb3` drives its repeat cycles at `02e0`, which is `BC` after the decrement.
+            last_address: port,
+        }
+    }
+
+    /// Re-run a block instruction by stepping `PC` back onto its own two opcode bytes.
+    ///
+    /// The Z80 has no internal loop: while the condition holds it rewinds `PC` by two and
+    /// lets the next M1 cycle fetch `ED` and the opcode again. That is why corpus vector
+    /// `edb0` shows `MR@0000 MR@0001` sixteen times, why `R` advances by two per iteration,
+    /// and why one [`Cpu::step`] is one pass rather than the whole loop — the instruction
+    /// stays interruptible between iterations, which is what lets a 64 KB `LDIR` coexist
+    /// with a 50 Hz frame interrupt.
+    ///
+    /// Five extra T-states pay for the rewind, driven on whichever address was last on the
+    /// bus.
+    fn repeat_block(&mut self, opcode: u8, outcome: BlockOutcome) {
+        if !repeats(opcode) || !outcome.repeat {
+            return;
+        }
+        self.internal_cycles(outcome.last_address, BLOCK_REPEAT);
+        let rewound = self.regs.pc().wrapping_sub(2);
+        self.regs.set_pc(rewound);
+    }
+
+    /// Decrement `BC` and report what is left — the block instructions' loop counter.
+    fn decrement_byte_counter(&mut self) -> u16 {
+        let remaining = self.regs.pair(pair::BC).wrapping_sub(1);
+        self.regs.set_pair(pair::BC, remaining);
+        remaining
+    }
+
+    /// Decrement `B` and report what is left — the I/O block instructions' counter.
+    fn decrement_b(&mut self) -> u8 {
+        let counter = self.regs.get(index::B).wrapping_sub(1);
+        self.regs.set(index::B, counter);
+        counter
+    }
+
+    /// Execute a `CB`-prefixed instruction: the rotates, shifts and bit operations.
+    ///
+    /// # `DDCB` puts the displacement before the opcode
+    ///
+    /// A plain `CB` instruction fetches its opcode with an ordinary M1 cycle. A `DD CB`
+    /// one does not: the byte order is `DD` `CB` `d` `op`, so the operand is resolved
+    /// *before* the operation is known, and both `d` and `op` arrive as three-T-state
+    /// **memory reads** rather than M1 cycles — `R` advances twice for a four-byte
+    /// instruction, not four times. A decoder that assumed the opcode follows the prefix
+    /// would read the two bytes in the wrong order and refresh twice too often.
+    ///
+    /// # The undocumented register copy
+    ///
+    /// In the `DDCB` set the low three bits of the opcode are not wasted. Only `110` is the
+    /// documented memory-only form; the other seven encodings write the result to `(IX+d)`
+    /// **and** copy it into `B`, `C`, `D`, `E`, `H`, `L` or `A`. Corpus vector `ddcb00`
+    /// shows both destinations taking `0x43`. That register is never the substituted `IXh`
+    /// or `IXl` — the prefix has already been spent on the address.
+    pub(crate) fn execute_cb(&mut self, index: Index) {
+        let (opcode, target) = if index.is_displaced() {
+            let displacement = self.fetch_signed_byte();
+            let opcode = self.fetch_byte();
+            let effective = self.indexed_address(index, displacement);
+            // The opcode fetch has already spent three of the five computation T-states.
+            let last_fetched = self.regs.pc().wrapping_sub(1);
+            self.internal_cycles(last_fetched, INDEX_COMPUTATION_AFTER_FETCH);
+            (opcode, Target::Memory(effective))
+        } else {
+            let opcode = self.fetch_opcode();
+            (opcode, self.resolve_only(Operand::source(opcode), index))
+        };
+
+        let value = self.read_target(target);
+        match CbOp::from_opcode(opcode) {
+            CbOp::Bit(bit_index) => self.test_bit(value, bit_index, target),
+            CbOp::Shift(shift) => {
+                let (result, flags) = self.apply_shift(shift, value);
+                self.write_flags(flags);
+                self.store_cb_result(target, result, index, opcode);
+            }
+            // `RES` and `SET` define no flags at all.
+            CbOp::Reset(bit_index) => {
+                self.store_cb_result(target, value & !(1 << bit_index), index, opcode);
+            }
+            CbOp::Set(bit_index) => {
+                self.store_cb_result(target, value | (1 << bit_index), index, opcode);
+            }
+        }
+    }
+
+    /// One rotate or shift from the `CB` set.
+    fn apply_shift(&self, shift: ShiftOp, value: u8) -> (u8, u8) {
+        let carry_in = self.carry_flag();
+        match shift {
+            ShiftOp::Rlc => flags::prefixed::rlc(value),
+            ShiftOp::Rrc => flags::prefixed::rrc(value),
+            ShiftOp::Rl => flags::prefixed::rl(value, carry_in),
+            ShiftOp::Rr => flags::prefixed::rr(value, carry_in),
+            ShiftOp::Sla => flags::prefixed::sla(value),
+            ShiftOp::Sra => flags::prefixed::sra(value),
+            ShiftOp::Sll => flags::prefixed::sll(value),
+            ShiftOp::Srl => flags::prefixed::srl(value),
+        }
+    }
+
+    /// `BIT n,s` — the one `CB` group that produces no result to store.
+    fn test_bit(&mut self, value: u8, bit_index: u8, target: Target) {
+        let undocumented_source = match target {
+            Target::Register(_) => value,
+            // Both memory forms take bits 3 and 5 from the high byte of `MEMPTR`, which is
+            // the single rule behind what look like two. `BIT n,(IX+d)` has just set
+            // `MEMPTR` to its effective address, so it reads that back; `BIT n,(HL)` never
+            // touches it, so it reads whatever the previous instruction left — zero in the
+            // corpus, which is exactly what vectors `cb46`..`cb7e` expect.
+            Target::Memory(_) => self.wz.to_be_bytes()[0],
+        };
+        let flags = flags::prefixed::bit(value, bit_index, self.regs.f(), undocumented_source);
+        self.write_flags(flags);
+        // The memory form still holds the value for one internal T-state.
+        self.tick_read_modify_delay(target);
+    }
+
+    /// Store a `CB` result: the read-modify delay, the write-back, and — for the `DDCB`
+    /// forms — the undocumented copy into a register.
+    fn store_cb_result(&mut self, target: Target, result: u8, index: Index, opcode: u8) {
+        self.tick_read_modify_delay(target);
+        self.write_target(target, result);
+        if index.is_displaced() {
+            // The copy names a real register: `pair::HL` rather than the index, because the
+            // prefix does not reach this half. Encoding `110` names memory and copies
+            // nowhere, which is the documented form.
+            if let Some(register) = Operand::source(opcode).register_index(pair::HL) {
+                self.regs.set(register, result);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------------
     // Operand access
     // -----------------------------------------------------------------------------
 
-    /// Read the operand a 3-bit field names, taking the memory-cycle cost when the field
-    /// names `(HL)`.
-    fn read_operand(&mut self, operand: Operand, base: PairBase) -> u8 {
-        match operand.register_index(base) {
-            Some(register) => self.regs.get(register),
-            None => {
-                let address = self.regs.pair(base);
-                self.read_byte(address)
+    /// Resolve an operand to the place its value lives, computing an effective address at
+    /// most once.
+    ///
+    /// This is the single point where a memory operand's address is determined — and for a
+    /// `DD`/`FD` prefix that means **fetching the displacement byte**, which can only
+    /// happen once. Everything downstream takes the resulting [`Target`] by value, so
+    /// `INC (IX+d)` reads, waits and writes back at one address arrived at once.
+    ///
+    /// `register_base` is separate from `index` because the prefix reaches the register
+    /// halves and the memory operand independently — see [`Index::for_register_half`].
+    ///
+    /// Deliberately charges **no** T-states: the address computation costs five, but an
+    /// operand byte fetched after the displacement spends three of them, so only the
+    /// caller knows how many are left. See [`Cpu::tick_index_computation`].
+    fn resolve(&mut self, operand: Operand, index: Index, register_base: PairBase) -> Target {
+        match operand.register_index(register_base) {
+            Some(register) => Target::Register(register),
+            None if index.is_displaced() => {
+                let displacement = self.fetch_signed_byte();
+                Target::Memory(self.indexed_address(index, displacement))
             }
+            None => Target::Memory(self.regs.pair(index.base())),
         }
     }
 
-    /// Write the operand a 3-bit field names, taking the memory-cycle cost when the field
-    /// names `(HL)`.
-    fn write_operand(&mut self, operand: Operand, base: PairBase, value: u8) {
-        match operand.register_index(base) {
-            Some(register) => self.regs.set(register, value),
-            None => {
-                let address = self.regs.pair(base);
-                self.write_byte(address, value);
-            }
+    /// Compute an `(IX+d)` effective address, recording it in `MEMPTR` as the hardware does.
+    ///
+    /// Every indexed access sets `MEMPTR` to the address it formed. Nothing in the core
+    /// reads that latch yet except `BIT`, but keeping it here — at the one place an indexed
+    /// address is computed — is what makes `BIT n,(IX+d)` come out right without a special
+    /// case, and is the down payment on the rest of `MEMPTR` at M4.
+    fn indexed_address(&mut self, index: Index, displacement: i8) -> u16 {
+        let effective = self
+            .regs
+            .pair(index.base())
+            .wrapping_add_signed(i16::from(displacement));
+        self.wz = effective;
+        effective
+    }
+
+    /// [`Cpu::resolve`] for a single-operand instruction, where there is no second operand
+    /// for the prefix to interfere with.
+    fn resolve_only(&mut self, operand: Operand, index: Index) -> Target {
+        self.resolve(operand, index, index.base())
+    }
+
+    /// Charge the address-computation cycles an `(IX+d)` operand owes.
+    ///
+    /// The Z80 owes five T-states between fetching the displacement and touching memory,
+    /// and any operand byte fetched in between spends three of them — which is why
+    /// `LD (IX+d),n` and the `DDCB` forms charge two rather than five. Corpus vectors
+    /// `dd7e` (five, on the displacement's address) and `dd36` (two, on the immediate's
+    /// address) are the two shapes; both put the cycles on the last byte fetched.
+    fn tick_index_computation(&mut self, index: Index, touches_memory: bool, count: u8) {
+        if index.is_displaced() && touches_memory {
+            let last_fetched = self.regs.pc().wrapping_sub(1);
+            self.internal_cycles(last_fetched, count);
         }
     }
 
-    /// The extra T-state the read-modify-write forms spend holding a value between the
-    /// read and the write-back. The register forms have no such cycle, which is the whole
+    /// Read a resolved target, taking the memory-cycle cost for the memory form.
+    fn read_target(&mut self, target: Target) -> u8 {
+        match target {
+            Target::Register(register) => self.regs.get(register),
+            Target::Memory(address) => self.read_byte(address),
+        }
+    }
+
+    /// Write a resolved target, taking the memory-cycle cost for the memory form.
+    fn write_target(&mut self, target: Target, value: u8) {
+        match target {
+            Target::Register(register) => self.regs.set(register, value),
+            Target::Memory(address) => self.write_byte(address, value),
+        }
+    }
+
+    /// The extra T-state the read-modify-write forms spend holding a value between the read
+    /// and the write-back. The register forms have no such cycle, which is the whole
     /// difference between `INC r` at 4 T-states and `INC (HL)` at 11.
-    fn tick_read_modify_delay(&mut self, operand: Operand, base: PairBase) {
-        if operand == Operand::MemHl {
+    fn tick_read_modify_delay(&mut self, target: Target) {
+        if let Target::Memory(address) = target {
             // Corpus vector `34`: the operand address stays on the bus for this cycle.
-            let address = self.regs.pair(base);
             self.internal_cycles(address, 1);
         }
     }
@@ -210,15 +712,43 @@ impl<B: Bus> Cpu<B> {
     // -----------------------------------------------------------------------------
 
     /// `LD r,r'` and its `(HL)` forms.
-    fn load_operand_operand(&mut self, destination: Operand, source: Operand, base: PairBase) {
-        let value = self.read_operand(source, base);
-        self.write_operand(destination, base, value);
+    fn load_operand_operand(&mut self, destination: Operand, source: Operand, index: Index) {
+        // INVARIANT: at most one operand can be `MemHl`. The encoding that would mean
+        // `LD (HL),(HL)` is `HALT`, and `execute` routes `0x76` before the `0x40..=0x7F`
+        // arm — so this is the only reason resolving *both* operands is safe. `resolve`
+        // fetches a displacement byte for an indexed memory operand, and two of those would
+        // consume two bytes of the instruction stream.
+        debug_assert!(
+            !(destination == Operand::MemHl && source == Operand::MemHl),
+            "LD (HL),(HL) is HALT and must never reach here",
+        );
+
+        // When either half is the memory operand the prefix is spent on the address, so the
+        // register half is *not* substituted: `DD 74` is `LD (IX+d),H`, storing real `H`.
+        let touches_memory = destination == Operand::MemHl || source == Operand::MemHl;
+        let register_base = index.for_register_half(touches_memory).base();
+
+        let source = self.resolve(source, index, register_base);
+        let destination = self.resolve(destination, index, register_base);
+        self.tick_index_computation(index, touches_memory, INDEX_COMPUTATION);
+
+        let value = self.read_target(source);
+        self.write_target(destination, value);
     }
 
     /// `LD r,n` and `LD (HL),n`.
-    fn load_operand_immediate(&mut self, destination: Operand, base: PairBase) {
+    fn load_operand_immediate(&mut self, destination: Operand, index: Index) {
+        // Resolved before the immediate is fetched: `LD (IX+d),n` carries the displacement
+        // *before* the immediate, so resolving afterwards would read the stream out of
+        // order. That intervening fetch is also why only two computation T-states remain.
+        let target = self.resolve_only(destination, index);
         let value = self.fetch_byte();
-        self.write_operand(destination, base, value);
+        self.tick_index_computation(
+            index,
+            matches!(target, Target::Memory(_)),
+            INDEX_COMPUTATION_AFTER_FETCH,
+        );
+        self.write_target(target, value);
     }
 
     /// `LD A,(BC)` and `LD A,(DE)`.
@@ -327,8 +857,14 @@ impl<B: Bus> Cpu<B> {
     // -----------------------------------------------------------------------------
 
     /// `ALU A,r` and its `(HL)` form.
-    fn alu_with_operand(&mut self, operation: AluOp, operand: Operand, base: PairBase) {
-        let value = self.read_operand(operand, base);
+    fn alu_with_operand(&mut self, operation: AluOp, operand: Operand, index: Index) {
+        let target = self.resolve_only(operand, index);
+        self.tick_index_computation(
+            index,
+            matches!(target, Target::Memory(_)),
+            INDEX_COMPUTATION,
+        );
+        let value = self.read_target(target);
         self.apply_alu(operation, value);
     }
 
@@ -359,21 +895,33 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `INC r` and `INC (HL)`.
-    fn increment_operand(&mut self, operand: Operand, base: PairBase) {
-        let value = self.read_operand(operand, base);
-        self.tick_read_modify_delay(operand, base);
+    fn increment_operand(&mut self, operand: Operand, index: Index) {
+        let target = self.resolve_only(operand, index);
+        self.tick_index_computation(
+            index,
+            matches!(target, Target::Memory(_)),
+            INDEX_COMPUTATION,
+        );
+        let value = self.read_target(target);
+        self.tick_read_modify_delay(target);
         let (result, flags) = flags::inc8(value, self.regs.f());
         self.write_flags(flags);
-        self.write_operand(operand, base, result);
+        self.write_target(target, result);
     }
 
     /// `DEC r` and `DEC (HL)`.
-    fn decrement_operand(&mut self, operand: Operand, base: PairBase) {
-        let value = self.read_operand(operand, base);
-        self.tick_read_modify_delay(operand, base);
+    fn decrement_operand(&mut self, operand: Operand, index: Index) {
+        let target = self.resolve_only(operand, index);
+        self.tick_index_computation(
+            index,
+            matches!(target, Target::Memory(_)),
+            INDEX_COMPUTATION,
+        );
+        let value = self.read_target(target);
+        self.tick_read_modify_delay(target);
         let (result, flags) = flags::dec8(value, self.regs.f());
         self.write_flags(flags);
-        self.write_operand(operand, base, result);
+        self.write_target(target, result);
     }
 
     /// `DAA`.
