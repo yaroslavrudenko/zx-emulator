@@ -3,9 +3,45 @@
 A living record of where the project actually is — what is proven, what is measured, what is
 open. Updated as work lands, not once at the start.
 
-**Last updated:** 2026-08-31, during M1.
+**Last updated:** 2026-08-31, during M2.
 
 ---
+
+## Milestone M2 — the four prefixes
+
+| Prefix | Vectors | State |
+|---|---|---|
+| `DD` | 343 / 343 | ✅ |
+| `FD` | 341 / 341 | ✅ |
+| `ED` | 97 / 97 | ✅ all eight repeating block forms passed first run |
+| `CB` | 260 / 264 | 4 outstanding **by ruling, not defect** — see below |
+| M1 un-prefixed | 290 / 290 | unchanged throughout M2 |
+
+**1041 of 1045 prefixed vectors.** Implementation complete; under cold review.
+
+### The `BIT n,(HL)` ruling
+
+FUSE takes its undocumented bits 3/5 from the **tested value**; we take them from **MEMPTR**.
+We are right, and the evidence is the shape of the discovery rather than an argument: the
+effective address was first hard-coded for `BIT n,(IX+d)`, which fixed `DDCB` and broke nothing.
+Then MEMPTR turned out to be the real rule — and `BIT n,(IX+d)` **fell out with no special case**
+while plain `CB` went 256 → 260. **A rule that explains more than it was fitted to.** The corpus
+needs two unrelated rules where the hardware has one. `zexall` at M4 adjudicates.
+
+### What M2 removed
+
+`StepError::UnsupportedPrefix` became unreachable — all four prefixes are handled, and unassigned
+`ED` encodings are defined two-byte NOPs. The justification for keeping it (*"an M2+ core can
+still fault on an undefined `ED` opcode"*) was simply false.
+
+Removing it exposed the same lie one level down: `execute`, `execute_cb`, `execute_ed` and
+`dispatch` all returned `Result<(), StepError>` with an **unconstructible `Err`**, and `step()`
+unwrapped a `None` that was always `None`. A signature claiming a failure mode that does not exist
+is the type-level form of a comment claiming a protection that does not exist — the class this
+project keeps finding. All four now return `()`.
+
+`StepError` and `fault()` remain, re-scoped: the mode-0 device byte is the one genuine runtime
+condition, and it earns the type on its own.
 
 ## Milestone M1 — Z80 core, un-prefixed opcodes
 
@@ -139,6 +175,52 @@ guarantee; it is a hypothesis that needs its own failing case.
 CI now exists (`.github/workflows/ci.yml`), fetches the corpus, and carries a second job whose
 entire purpose is to assert that the conformance gate **refuses to pass** when the corpus is
 absent.
+
+### Comments rot at milestone boundaries, so the sweep belongs in "done"
+
+Three consecutive reviews produced findings from stale doc comments, and the third had a **live
+panic** attached: `t_states` was a `u8` because a comment argued that the longest Z80 instruction
+is 23 T-states — true when written, and falsified the moment M2's `dispatch` made a run of `DD`
+prefixes into *one* instruction whose length guest memory decides. The comment's own safety
+argument became the defect, and the "loud panic rather than a silent wrap" it promised turned out
+to be reporting a **legal instruction stream**.
+
+The mechanism is worth stating because it tells you *when* to look: **every one of those comments
+was true when written.** They do not decay gradually — they are falsified at milestone boundaries,
+because that is when the claims they encode stop holding. Which is exactly when the sweep should
+run.
+
+**So a doc-comment sweep is part of a milestone's definition of done**, alongside the gate sweep.
+Not a periodic tidy: a step, performed before the milestone is reported.
+
+### Exhaustive on one axis can be weaker than a sample on another
+
+The harness's ALU test was a 256-case proptest; it was replaced with an exhaustive sweep of all
+1,048,576 operand pairs. That reads as unambiguous strengthening, and it was approved as such.
+
+It was not. The sweep is exhaustive on the **operand** axis and **narrower than what it replaced**
+on the **entry-flag** axis — the old `BOUNDARY_FLAGS = [0x00, 0xff]` was deleted, and its own
+comment had said exactly why it existed: *"so every test also proves the instruction overwrites the
+bits it owns and preserves the ones it does not."*
+
+Two mutations, each proven to have landed before its verdict was trusted:
+
+| Mutation | Exhaustive sweep | The deleted boundary test | Proptest | FUSE |
+|---|---|---|---|---|
+| `inc8` wrongly preserves entry `H` | **passes** | **fails on case 1** | fails | — |
+| `CP` ORs entry bit 5 for one operand pair | **passes** | — | passes | **290/290 passes** |
+
+The second is the shape of the register-`Q` behaviour this project defers to M4 — a leak of entry
+`F` into a result — and it is invisible to every gate we have.
+
+**More cases is not more coverage.** A count is a property of the loop; coverage is a property of
+which *dimensions* vary. When replacing a sample with an enumeration, the question to ask is not
+"how many more cases" but "which axis did the old test vary that the new one holds constant".
+
+The comment also said the remaining flag bits were *"covered"* by the proptest. They are
+**sampled** — 256 draws over a 2²⁴ joint space. That is the same pattern this document already
+records twice: prose asserting a protection the mechanism does not provide, this time inside the
+file whose entire claim is exhaustiveness.
 
 ## How this project is verified
 
