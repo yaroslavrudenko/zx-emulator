@@ -101,6 +101,45 @@ Recorded so they are not re-litigated:
 
 ---
 
+## The harness was reviewed, and it could report green while verifying nothing
+
+A cold review of `crates/z80/tests/` — the code that decides whether the core is correct — found
+two CRITICAL and six HIGH defects, **all in the lenient direction**, each reproduced with a
+working probe. The headline, and the reason this section exists rather than a line in a table:
+
+**With `testdata/fuse` absent, `cargo test -p z80` exited 0 with 87 passing tests — byte-for-byte
+indistinguishable from a full green run.** Five tests verified nothing, and the word `SKIPPING`
+never appeared, because libtest captures stdout for passing tests. The test *count did not change*.
+
+The guard against this existed and was deployed nowhere: there was no CI, and `Z80_FUSE_REQUIRED`
+appeared only in its own definition and a README example. Worse, it honoured the literal string
+`"1"` only — `true`, `yes` and `on` silently disarmed it, and `true` is precisely how a GitHub
+Actions `env:` block serialises an unquoted boolean.
+
+This is the project's own doctrine turned on itself. `STATUS.md` already said it: *a failed edit
+and an unbreakable guard produce the same exit code.*
+
+### The class, which matters more than the instances
+
+The reviewer's summary is worth keeping verbatim in spirit: **the most dangerous defect was not a
+bug in a comparison — it was a comment.** Three places asserted a protection the code did not
+provide — the "two independent accounts" T-state cross-check was one counter read twice
+(`t_states += 1` and `bus.tick(addr)` are adjacent lines); an omission "permits exactly the listed
+reads" while silently accepting extra writes and port accesses; "every vector counted, never
+silently dropped" was a tautology over `partition`, and deleting all 264 `CB` vectors left the
+suite green.
+
+Each was written persuasively enough that a reader stops looking. That is the same failure mode
+recorded above for `DAA` — *"the wrong behaviour was defended by a plausible comment and would have
+shipped"* — recurring inside the file whose job is to catch it.
+
+**The remedy adopted: a test per documented claim.** Prose asserting a guarantee is not a
+guarantee; it is a hypothesis that needs its own failing case.
+
+CI now exists (`.github/workflows/ci.yml`), fetches the corpus, and carries a second job whose
+entire purpose is to assert that the conformance gate **refuses to pass** when the corpus is
+absent.
+
 ## How this project is verified
 
 Three tiers, and the distinction between them is the point:
