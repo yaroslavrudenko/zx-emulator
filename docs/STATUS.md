@@ -7,6 +7,25 @@ open. Updated as work lands, not once at the start.
 
 ---
 
+## Milestone M3 — `zexdoc`
+
+In progress. This is the first oracle that grades the **processor**, not an instruction.
+
+The difference is structural, not one of degree. FUSE vectors set up a state, run one instruction
+and compare — so a defect is localised for you, and the failure names the opcode. `zexdoc` is a
+CP/M `.COM` binary that runs on the order of a hundred million instructions, computes a CRC over
+the results and prints `OK` or `ERROR` per test group. It catches what per-instruction vectors
+structurally cannot: an error that only appears in a *sequence*, which is exactly the shape of the
+`SCF`/`CCF` Q latch this project has been deferring since M1.
+
+It needs its own scaffolding rather than an extension of the vector harness — 64 KB of RAM, the
+program at `0x0100`, two BDOS calls trapped at `0x0005` for console output, and warm boot at
+`0x0000` as the termination signal.
+
+`zexall` is M4 and stays out of M3 deliberately: it grades the undocumented flags, the Q latch is
+knowingly unimplemented, and running it now would produce a wall of expected failures that teaches
+nothing.
+
 ## Milestone M2 — the four prefixes
 
 | Prefix | Vectors | State |
