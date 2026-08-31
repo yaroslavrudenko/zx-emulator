@@ -13,7 +13,9 @@ repository = "https://github.com/yaroslavrudenko/zx-emulator"
 z80 = { path = "crates/z80" }
 spectrum = { path = "crates/spectrum" }
 
-thiserror = "2.0.20"
+# `default-features = false` keeps `thiserror` on `core::error::Error`, which is what
+# lets `crates/z80` be `#![no_std]`.
+thiserror = { version = "2.0.20", default-features = false }
 anyhow = "1.0.104"
 bitflags = "2.13.1"
 macroquad = "0.4.16"
