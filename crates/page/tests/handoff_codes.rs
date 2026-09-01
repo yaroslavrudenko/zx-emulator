@@ -2,8 +2,8 @@
 //!
 //! # Why a three-line function gets its own gate
 //!
-//! `docs/M8.md` Decision 4 lists three non-negotiable rules for the download route, and the
-//! third is about a failure that reports success:
+//! `docs/M8.md` Decision 4 lists the rules it holds non-negotiable for the download route, and
+//! one of them is about a failure that reports success:
 //!
 //! > *"`gl.js`'s `add_missing_functions_stabs` replaces any import the JS does not provide with
 //! > a stub that logs a warning to the console. So **a download whose shim was not deployed

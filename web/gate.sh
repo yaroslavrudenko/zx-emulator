@@ -129,7 +129,7 @@ fi
 
 # Assertion 3, and it is much stronger than a size. A size floor cannot tell this emulator from
 # any other half-megabyte of WebAssembly; the import and export names can. Every one of these is
-# a contract with a specific file: the three `zx_*` imports with `web/zx_page.js`, and the
+# a contract with a specific file: the `zx_*` imports listed below with `web/zx_page.js`, and the
 # miniquad exports with `web/mq_js_bundle.js`.
 step "T2     the module's imports and exports are the ones the page provides and calls"
 if [ -f "$wasm" ]; then

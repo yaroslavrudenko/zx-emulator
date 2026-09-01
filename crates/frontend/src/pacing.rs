@@ -32,19 +32,121 @@
 //! asserts both directions: a burst of losses followed by clean frames must go back to normal,
 //! and a stutter that keeps going must stay red across a window boundary. The second is the one
 //! that is easy to forget, and it is the one a naive fix breaks.
+//!
+//! # Running faster than a real Spectrum, and why it belongs *here*
+//!
+//! A tape is a **signal** — `docs/M6.md` Decision 4 rules out the ROM trap that would skip it, and
+//! `crates/spectrum/tests/tape_rom_load.rs`'s `no_shortcut_exists_past_the_ear_bit` keeps it ruled
+//! out — so a three-minute load takes three minutes of emulated time and there is no way round
+//! that which is not the shortcut. The way round it that is **not** a shortcut is to run the same
+//! machine against a faster clock: [`Speed`] multiplies the elapsed wall time this module converts
+//! into frames owed, and nothing below that conversion is told. Every loader works, including the
+//! turbo loaders a trap would have missed, because from the machine's side nothing has happened.
+//!
+//! **What that costs, and where it is paid.** Two things in a frontend are functions of real time
+//! rather than of T-states, and they are the two the multiplier has to be reasoned about at:
+//!
+//! - **The catch-up bound.** [`MAX_CATCH_UP`] is a frame count standing in for a wall-clock
+//!   duration, and it stops being one the moment a tick is *expected* to owe more than four
+//!   frames. It is therefore scaled by the multiplier — see its own documentation — so that a lost
+//!   frame keeps meaning the same physical event at every speed and fast-forward cannot masquerade
+//!   as a stall.
+//! - **Audio.** A device consumes one second per second whatever this module does, so eight
+//!   seconds of samples a second is a backlog rather than a sound. That decision is the shell's
+//!   and is made in `src/main.rs`, at the one place a device is written to.
 
+use core::num::NonZeroU32;
 use core::time::Duration;
 
 /// Nanoseconds in one frame of a 50 Hz machine.
 pub const FRAME_NANOS: u128 = 20_000_000;
 
-/// The most frames one call will run before declaring the remainder lost.
+/// The most frames one call will run before declaring the remainder lost, **at real time**.
 ///
 /// Four frames is 80 ms of emulated time. The bound exists so that a stall cannot compound:
 /// past this point the loop is not going to catch up within a tick, and attempting it turns a
 /// hiccup into a freeze while the backlog keeps growing. Dropping instead is a decision to
 /// lose emulated time, which is why the drop is counted and shown rather than absorbed.
+///
+/// # It is a wall-clock bound wearing a frame count, and [`Speed`] is what exposes that
+///
+/// *"Four frames"* and *"eighty milliseconds"* are the same sentence only while one emulated
+/// second takes one wall second. At eight times real time an ordinary 20 ms tick owes **eight**
+/// frames, so a fixed ceiling of four would clip every single tick: the machine would run at 4×
+/// however high the multiplier went, and [`Pacer::dropped`] would climb by four a frame while
+/// nothing whatever was wrong. The status bar would then be red for the entire fast-forward — a
+/// false alarm indistinguishable from the real one, which is the exact defect [`LossMeter`] was
+/// written to remove, arriving from the other direction.
+///
+/// So [`Pacer::advance`] uses `MAX_CATCH_UP × factor`, and the property that survives is the one
+/// worth having: **a frame is lost only when a tick took more than 80 ms of wall clock**, at every
+/// speed. The meter needs no exception, the colour needs no suppression, and a host that genuinely
+/// cannot sustain the multiplier it was asked for still says so.
 pub const MAX_CATCH_UP: u64 = 4;
+
+/// How much faster than a real Spectrum the machine is being run.
+///
+/// # Why this is a type and not a `u32`
+///
+/// Zero is not a slow machine, it is a **stopped** one: a factor of nought makes
+/// [`Pacer::advance`] owe nothing however long the wall clock takes, so the screen freezes while
+/// the readout insists everything is on time. That is this module's own recurring failure —
+/// an indicator answering a question nobody asked — so the value that produces it is made
+/// unrepresentable rather than guarded against at each use.
+///
+/// [`Default`] is [`Speed::REAL_TIME`], which is what lets [`Pacer`] keep its derived `Default`
+/// and stay the pacer this crate has always had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Speed(NonZeroU32);
+
+impl Speed {
+    /// One emulated second per wall second: a real Spectrum.
+    pub const REAL_TIME: Self = Self(NonZeroU32::MIN);
+
+    /// `factor` emulated seconds per wall second, or `None` when `factor` is zero.
+    ///
+    /// Total rather than panicking, so the one input that is not a speed is a value a caller
+    /// has to answer for rather than an abort. Every caller in this crate passes a literal, and
+    /// in a `const` item [`Option::expect`] turns a mistake there into a build failure.
+    #[must_use]
+    pub const fn new(factor: u32) -> Option<Self> {
+        match NonZeroU32::new(factor) {
+            Some(factor) => Some(Self(factor)),
+            None => None,
+        }
+    }
+
+    /// The multiplier, as the number a readout prints.
+    #[must_use]
+    pub const fn factor(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl Default for Speed {
+    fn default() -> Self {
+        Self::REAL_TIME
+    }
+}
+
+/// The multipliers the window cycles through, in the order it reaches them.
+///
+/// **Doubling rather than a ramp, and stopping at eight.** The number that matters is how many
+/// times shorter a three-minute tape load becomes, and doubling answers it in three keystrokes
+/// where `1..8` would need seven. Eight is the top because that is where the trade turns: it puts
+/// a `.tap` load under twenty seconds, and past it the win is seconds while the cost — an
+/// unwatchable screen and a machine that has to sustain 400 emulated frames a second — is not.
+///
+/// Real time is first so that the cycle both starts and returns there, which is the state
+/// somebody wants back in a hurry.
+pub const SPEEDS: &[Speed] = &[
+    Speed::REAL_TIME,
+    // `expect` on a literal, inside a `const`: a zero written here does not panic at run time,
+    // it fails to compile. Pattern P's permitted case, in its strongest form.
+    Speed::new(2).expect("2 is not zero"),
+    Speed::new(4).expect("4 is not zero"),
+    Speed::new(8).expect("8 is not zero"),
+];
 
 /// Frames lost inside a [`LossMeter`]'s window before the readout calls it a stall.
 ///
@@ -69,17 +171,36 @@ pub struct Pacer {
     owed: u128,
     ran: u64,
     dropped: u64,
+    /// Emulated seconds owed per wall second. See [`Speed`].
+    speed: Speed,
 }
 
 impl Pacer {
-    /// A pacer owing nothing.
+    /// A pacer owing nothing, running at real time.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             owed: 0,
             ran: 0,
             dropped: 0,
+            speed: Speed::REAL_TIME,
         }
+    }
+
+    /// Owe frames at `speed` from the next [`Pacer::advance`] onward.
+    ///
+    /// The sub-frame remainder is **kept** across the change rather than cleared. It is emulated
+    /// time already owed and not yet delivered, and a machine that silently lost up to 20 ms of
+    /// itself every time somebody pressed the speed key would be doing exactly what
+    /// [`Pacer::advance`] keeps the remainder to avoid.
+    pub const fn set_speed(&mut self, speed: Speed) {
+        self.speed = speed;
+    }
+
+    /// The multiplier frames are currently owed at.
+    #[must_use]
+    pub const fn speed(self) -> Speed {
+        self.speed
     }
 
     /// Account for `elapsed` and return how many frames to run now.
@@ -92,8 +213,20 @@ impl Pacer {
     /// suspended laptop can hand this an elapsed time of hours, and a frontend that aborts
     /// because the machine was asleep is a worse outcome than one that reports a very large
     /// number of dropped frames.
+    ///
+    /// [`Speed`] is applied here and **only** here, which is the whole of what makes the machine
+    /// identical at every multiplier: what changes is how much time this function decides has
+    /// passed, and every frame it then asks for is the frame it would have asked for anyway. The
+    /// widest case does not overflow with room to spare — `Duration::MAX` is about 1.8 × 10²⁸
+    /// nanoseconds and the largest multiplier is 4.3 × 10⁹, whose product is 7.9 × 10³⁷ against a
+    /// `u128` ceiling of 3.4 × 10³⁸ — and
+    /// `a_suspended_machine_at_the_highest_multiplier_does_not_overflow` is the assertion rather
+    /// than this sentence.
     pub const fn advance(&mut self, elapsed: Duration) -> u64 {
-        self.owed += elapsed.as_nanos();
+        // `as` rather than `u32::into`, because `From` is not `const` and this function is.
+        // Both casts widen; neither can lose a bit.
+        let factor = self.speed.factor();
+        self.owed += elapsed.as_nanos() * factor as u128;
         let whole = self.owed / FRAME_NANOS;
         self.owed -= whole * FRAME_NANOS;
 
@@ -102,11 +235,11 @@ impl Pacer {
         } else {
             whole as u64
         };
-        let run = if due < MAX_CATCH_UP {
-            due
-        } else {
-            MAX_CATCH_UP
-        };
+        // Scaled, because the bound is a wall-clock one written as a frame count — see
+        // [`MAX_CATCH_UP`]. Unscaled it would clip every ordinary tick above real time and
+        // report the fast-forward as a permanent stall.
+        let ceiling = MAX_CATCH_UP * factor as u64;
+        let run = if due < ceiling { due } else { ceiling };
 
         self.ran += run;
         self.dropped += due - run;

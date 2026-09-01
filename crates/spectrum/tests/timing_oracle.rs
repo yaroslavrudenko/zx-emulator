@@ -23,9 +23,10 @@
 //! # The corpus, and why it is an oracle rather than a second opinion
 //!
 //! `timing_tests_48k_v1.0.z80` is Richard Butler's 48K timing test suite (ZXSpectrum4.net,
-//! 2010). It is a `.z80` snapshot carrying a BASIC front end, 34 machine-code test groups
-//! covering the documented instruction set, and — the part that matters — **two tables of
-//! expected results, at `0xE200` and `0xE400`**.
+//! 2010). It is a `.z80` snapshot carrying a BASIC front end, **37** machine-code test groups —
+//! 34 covering the documented instruction set, and three more that share one program and whose
+//! readings depend on the floating bus — and, the part that matters, **two tables of expected
+//! results, at `0xE200` and `0xE400`**.
 //!
 //! Each test group is a block of instructions executed in a loop until the frame interrupt
 //! fires. The interrupt handler records three numbers: the refresh register `R`, the number of
@@ -72,7 +73,7 @@
 //! - grade the pattern, the phase and the I/O rule **jointly**, integrated over a frame,
 //!   against numbers this project did not write.
 //!
-//! > **Two of the three bullets above are about the 68 graded rows, and the detection run does
+//! > **Two of the three bullets above are about the graded rows, and the detection run does
 //! > none of that work.** An earlier draft said the tables' 120-T-state gap in `R` on the
 //! > detection run meant "a model whose pattern or four-case rule is wrong matches nothing", and
 //! > that is false: the detection group is `JP (HL)` in **uncontended** memory, so contention
@@ -319,14 +320,148 @@
 //!
 //! # What is not graded here
 //!
-//! - **Test groups 35–37.** They need a 48K floating bus, which this machine does not model:
+//! - **Test groups 36 and 37.** They need a 48K floating bus, which this machine does not model:
 //!   [`FLOATING_BUS_BYTE`][spectrum::FLOATING_BUS_BYTE] is a constant. They are counted and
-//!   named as skipped rather than dropped.
+//!   named as skipped rather than dropped. **Group 35 was in this list until 2026-09-01.** It is
+//!   graded now — the section immediately below is what that buys, what it is coupled to, and
+//!   the one thing about it that is not explained.
 //! - **The interrupt window's *length*.** The program only needs the interrupt to be accepted
 //!   at the top of the frame; 32 T-states versus 24 would not move a number here.
 //! - **Anything about a 128.** The suite has a 128 edition; this is the 48K one. The 128 edition
-//!   has since been fetched — read the next section before extending this file to it, because the
-//!   obvious extension is wrong.
+//!   has since been fetched — read the next section but one before extending this file to it,
+//!   because the obvious extension is wrong.
+//!
+//! # Group 35, which *is* graded — and the constant it is silently coupled to
+//!
+//! ## 35, 36 and 37 are one program, and the difference between them is the screen
+//!
+//! Read out of the file rather than inferred. The suite's dispatch table is two bytes per test
+//! based at `0xE000`, and its entries for 35, 36 and 37 — `0xE046`, `0xE048`, `0xE04A` — **all
+//! hold `0xC91D`**. The BASIC supplies the only difference: lines 1350, 1360 and 1370 set `l` to
+//! **0**, **13** and **21** and call the subroutine at 5330, which is `CLS` followed by
+//! `FOR g=0 TO l: PRINT "ZXSPECTRUMZXSPECTRUMZXSPECTRUMZX"`. So the three tests differ **only in
+//! how many rows of text are on the screen** — one, fourteen, twenty-two — and the suite says so
+//! in its own titles: test 36 announces itself as `… [13]`, which is `STR$ l`, not an
+//! instruction list. Its front end draws the same line: `INPUT "choose test 1-35 or leave blank
+//! for all"`.
+//!
+//! The loop at `0xC91D` is why the screen is the variable:
+//!
+//! ```text
+//! C91D  ED 4B 01 EF                LD BC,(0xEF01)   the counter, zeroed by the suite's entry
+//! C921  03                         INC BC            block at 0xC000: LD BC,0 / LD (0xEF01),BC
+//! C922  ED 43 01 EF                LD (0xEF01),BC
+//! C926  79 41 51 59 61 69          LD A,C / B,C / D,C / E,C / H,C / L,C
+//! C92C  D3 FF                      OUT (0xFF),A      port (C<<8)|0xFF
+//! C92E  ED 79  ED 41  ED 51
+//!       ED 59  ED 61  ED 69        OUT (C),A/B/D/E/H/L    port BC = (C<<8)|C
+//! C93A  DB FF                      IN A,(0xFF)
+//! C93C  ED 78                      IN A,(C)          port (C<<8)|C
+//! C93E  ED 40                      IN B,(C)          port (C<<8)|C — and B := the value read
+//! C940  ED 50  ED 58  ED 60  ED 68 IN D,(C) / E,(C) / H,(C) / L,(C)   port (B<<8)|C
+//! C948  18 D3                      JR 0xC91D
+//! ```
+//!
+//! **`IN B,(C)` overwrites the port's own high byte with the value it read**, so the last four
+//! `IN r,(C)` address `(bus << 8) | C`. On hardware the bus floats a display or attribute byte
+//! while the ULA is fetching, so whether those four cycles are contended is a function of **what
+//! is on the screen** — which is exactly the variable the BASIC changes, and exactly the thing
+//! this machine does not model. That is why 36 and 37 are excluded, and it is the whole of the
+//! reason. **Carried, not re-taken here**: the investigation that established this ran group 36
+//! with the screen filled with `0x00`, with `0xFF` and with a text pattern and got **identical**
+//! readings all three times — which is what a constant floating bus predicts and what hardware
+//! cannot do. Whoever needs that number for a decision should re-take it rather than quote it.
+//!
+//! ## What grading group 35 buys
+//!
+//! Everything *before* `IN B,(C)` addresses `(C<<8)|C` with `C` the loop counter, which starts
+//! at zero and advances by one per iteration through the 237 (contended) and 267 (uncontended)
+//! iterations a frame holds. So it sweeps `C` over `0x01..=0xED` at least, **all** of it also on
+//! the port's high half, and reaches two things nothing external reached before:
+//!
+//! - **The four-case I/O rule's fourth term** — `C:1, C:1, C:1, C:1`, a port that is in
+//!   contended memory and is *not* the ULA's, which every odd `C` in `0x41..=0x7F` produces.
+//!   `docs/STATUS.md` carried a row saying that term's only gate was `tests/io_contention.rs` —
+//!   a file this project wrote. This row is its first external check, and that is **measured
+//!   rather than argued**, in a scratch clone on 2026-09-01, each mutation's landing asserted
+//!   before its verdict was read and each restore checked against held bytes:
+//!
+//!   | mutation of the `(true, false)` arm of `Ula::port_delay` | this gate at `GROUPS = 34` | at `GROUPS = 35` | `tests/io_contention.rs` |
+//!   |---|---|---|---|
+//!   | deleted — `(true, false) => 0` | **GREEN**, 3 passed | **RED**, 2 of 70 | **RED**, 2 of 3 |
+//!   | weakened to the two-stall shape of `(true, true)` | **GREEN**, 3 passed | **RED**, 2 of 70 | **RED**, 2 of 3 |
+//!   | the fourth term alone dropped — `first + second + third` | **GREEN**, 3 passed | **RED**, 1 of 70 | **RED**, 1 of 3 |
+//!
+//!   **Every disagreement in all three rows is group 35's own, and no other row moves** — which is
+//!   simultaneously the evidence that the extension catches something and the evidence that it
+//!   disturbs nothing.
+//!
+//!   **The third row is not a weaker version of the first two, and reading it as one is how the
+//!   three came to be mistaken for two.** The first two change the arm's cost at **every** group
+//!   position: deleting it charges nothing anywhere, and the two-stall shape charges the `0x4000`
+//!   row `[6, 5, 4, 3, 2, 1, 0, 6]` where the rule wants `0x4001`'s `[12, 11, 10, 9, 8, 7, 6, 12]`.
+//!   Dropping the fourth term alone changes the cost at **one position in eight**, and
+//!   `tests/io_contention.rs` measures which: with the term gone its per-phase sweep passes phases
+//!   0 through 6 of the `0x4001` case and fails at **phase +7** — 17 where the rule wants 23 — so
+//!   `d = D[p + a + b + c + 3]` lands in one of the pattern's two zero slots at every position but
+//!   the last, where it is 6. Group 35's **uncontended** row sees that one-position perturbation
+//!   and its **contended** row does not. So the two rows do not have different *kinds* of
+//!   sensitivity — both move when the arm's arithmetic moves everywhere — and no claim that the
+//!   contended row grades only the case's existence survives the middle row of the table.
+//! - **`OUT (C),r`**, which `tests/io_contention.rs` names in its own *what is not graded here*.
+//!   Six of them are in the loop above.
+//!
+//! ## The coupling, which must be read before this row is believed *or* fixed
+//!
+//! **Group 35 passes because [`FLOATING_BUS_BYTE`][spectrum::FLOATING_BUS_BYTE] is `0xFF`, and
+//! `0xFF` lies outside the 48K's contended address range `0x4000..=0x7FFF` — not because a
+//! floating bus is modelled.** `0xFF` on the port's high half makes every one of the four
+//! bus-dependent `IN r,(C)` cycles an *uncontended address*, costing nothing extra, so the only
+//! contention this row measures is the part that does not depend on the bus.
+//!
+//! The row is therefore **live to that constant**, and the failure it can produce reads like a
+//! regression while being nothing of the kind:
+//!
+//! - moving `FLOATING_BUS_BYTE` to any value whose byte lies in `0x40..=0x7F` reddens group 35
+//!   for a reason that has nothing to do with the contention model being wrong;
+//! - **implementing a real floating bus can redden it too, and that would not be a
+//!   regression either.** A model returning the byte the ULA is fetching returns display bytes in
+//!   `0x40..=0x7F` for ordinary screen content — the suite's own `"ZXSPECTRUM…"` row is built
+//!   from glyphs whose ROM bitmaps include `0x7E` (`Z`, `E`), `0x7C` (`P`, `R`), `0x66` and
+//!   `0x5A` (`M`) and `0x42` (most of them) — so those four `IN` cycles would begin to be
+//!   charged.
+//!
+//! **So whoever implements a floating bus should take group 35's two rows as part of that work's
+//! acceptance criterion rather than as a pre-existing gate to keep green**, and should expect 36
+//! and 37 to become gradeable in the same change. If group 35 reddens on a tree that moved the
+//! bus and nothing else, the first question is *what byte does the bus float during this loop*,
+//! not *what moved in the contention model*.
+//!
+//! ## The open question — which is why this row is green rather than safe
+//!
+//! **Why hardware agrees with a constant `0xFF` here is not established, and the agreement is
+//! stranger than "there is only one row of text" would suggest.** Both of group 35's rows are
+//! reproduced bit-exactly by this machine, and both were measured on hardware holding a screen a
+//! real floating bus would not have read as `0xFF`:
+//!
+//! - the **contended** row runs after `CLS` and one row of `"ZXSPECTRUM…"` — 32 characters whose
+//!   glyph bytes are largely inside `0x40..=0x7F`;
+//! - the **uncontended** row is the harder one. Line 1350 runs it *before* the `GO SUB 5330` that
+//!   clears the screen, and the suite never clears between tests — `5040`–`5070` set
+//!   `BORDER`/`PAPER`/`INK` and call `USR` with no `CLS` — so on a full run it is measured with
+//!   the accumulated report text of the previous thirty-four tests on screen. **Being
+//!   uncontended buys that row no immunity**: I/O contention is a function of the *port address*,
+//!   not of where the code sits, so its four bus-dependent `IN` cycles are exposed to the screen
+//!   exactly as the contended row's are.
+//!
+//! A fraction argument is available and is deliberately **not** offered as the answer: the ULA
+//! fetches for 128 of each line's 224 T-states, so a screen whose text occupies few rows floats a
+//! contended-range byte over a small part of the frame, and 36 and 37 — fourteen and twenty-two
+//! rows — are where such an argument would stop working, which is where they do stop working. It
+//! does not survive the uncontended row above, and no quantitative version of it has been derived
+//! here. **Recorded as open rather than resolved: this is the one gap that would make grading
+//! group 35 *safe* rather than merely green, and the green must not be read as standing in for
+//! the explanation.**
 //!
 //! # The 128 edition, and the one thing that will bite whoever extends this file
 //!
@@ -492,7 +627,9 @@ const fn page_base(page: u8) -> Option<usize> {
 /// Structure is validated rather than a checksum pinned — the same choice `testdata/README.md`
 /// records for the FUSE vectors and the `zex` exercisers, and for the same reason: any genuine
 /// copy of the file must work, and what the gate actually depends on is the content, which
-/// [`assert_is_the_timing_suite`] checks directly.
+/// `the_corpus_is_the_timing_suite_and_carries_two_distinct_hardware_tables` — this file's own
+/// positive control, which asserts *"the snapshot must contain the suite's own … banner"* for
+/// both hardware tables — checks directly.
 fn load_z80(file: &[u8]) -> Image {
     assert!(file.len() > 34, "a .z80 header is at least 30 bytes");
     assert_eq!(
@@ -790,7 +927,7 @@ const fn label(contended: bool) -> &'static str {
 
 /// The group the suite uses to decide which of the two machines it is running on.
 ///
-/// It is not one of the 34 instruction groups: it is `JP (HL)` jumping to itself out of
+/// It is not one of the suite's 37 numbered test groups: it is `JP (HL)` jumping to itself out of
 /// uncontended memory, so it measures **only** where the interrupt falls, at four T-states and
 /// one `R` increment per iteration.
 ///
@@ -801,13 +938,23 @@ const fn label(contended: bool) -> &'static str {
 const DETECTION_GROUP: u8 = 0;
 
 /// The instruction groups, `1..=GROUPS`.
-const GROUPS: u8 = 34;
+///
+/// **35 rather than 34 since 2026-09-01**, which is 70 hardware rows rather than 68. Group 35 is
+/// the suite's first floating-bus group and it grades here anyway, because the part of it that
+/// this machine can run — a port of `(C<<8)|C` sweeping every high byte and both parities of A0 —
+/// reaches the four-case I/O rule's fourth term and `OUT (C),r`, neither of which any other
+/// external check in this workspace touches. **It passes for a reason that is not "the floating
+/// bus is right", and the module doc's *Group 35* section is that reason**; read it before
+/// treating a red here as a contention defect.
+const GROUPS: u8 = 35;
 
 /// Groups the suite carries that this machine cannot run.
 ///
-/// 35, 36 and 37 read the floating bus. Named rather than silently skipped, because
-/// `docs/STATUS.md` records what a silently narrowed gate costs.
-const NEEDS_FLOATING_BUS: [u8; 3] = [35, 36, 37];
+/// 36 and 37 differ from 35 *only* in how many rows of text the BASIC draws first, and their
+/// readings therefore turn on what the floating bus returns — which here is the constant
+/// [`FLOATING_BUS_BYTE`][spectrum::FLOATING_BUS_BYTE]. Named rather than silently skipped,
+/// because `docs/STATUS.md` records what a silently narrowed gate costs.
+const NEEDS_FLOATING_BUS: [u8; 2] = [36, 37];
 
 #[test]
 fn the_corpus_is_the_timing_suite_and_carries_two_distinct_hardware_tables() {
@@ -868,7 +1015,7 @@ fn the_machine_reproduces_one_of_the_two_measured_hardware_timings() {
     // contention, which cannot reach it. The two hardware answers are `R` = 2 and `R` = 122
     // against an identical loop count and stack pointer, so a machine whose interrupt lands
     // anywhere else matches neither. What it does *not* do is grade the contention phase; that is
-    // the sixty-eight rows in the test below.
+    // the seventy rows in the test below.
     //
     // What it *does* grade, and nothing else in this workspace does, is
     // `timing::INTERRUPT_T_STATES` — the module doc derives why, and measures it: at 32 this row
@@ -908,9 +1055,13 @@ fn the_machine_reproduces_one_of_the_two_measured_hardware_timings() {
 
 #[test]
 fn every_instruction_group_matches_the_hardware_table_contended_and_not() {
-    // Sixty-eight numbers, each of them a whole frame's worth of contention integrated over
+    // Seventy numbers, each of them a whole frame's worth of contention integrated over
     // hundreds of iterations, and not one of them derived from `FIRST_CONTENDED_T_STATE`, from
     // the delay pattern, or from the four-case I/O rule.
+    //
+    // The last two are group 35's, and they are the only ones here that grade the I/O rule's
+    // **fourth** term — see the module doc, which also says what they are coupled to and why
+    // their green is narrower than it looks.
     let Some((snapshot, rom)) = corpora() else {
         return;
     };
@@ -960,10 +1111,10 @@ fn every_instruction_group_matches_the_hardware_table_contended_and_not() {
     // The assertion whose failure means "I was not looking at the thing". Every number below
     // is read out of the guest's own RAM at `RESULT`, so a run in which the program never
     // executed — a prologue that landed somewhere else, a stop address reached immediately —
-    // would report whatever was already there, identically, sixty-eight times, and the
+    // would report whatever was already there, identically, seventy times, and the
     // comparison above would be a comparison of one stale word against a table. The floor is
     // deliberately loose: this only has to separate *ran* from *did not run*, and the observed
-    // spread is 58 distinct iteration counts across the 68 rows.
+    // spread is 60 distinct iteration counts across the 70 rows.
     let mut distinct: Vec<u16> = readings.iter().map(|r| r.iterations).collect();
     distinct.sort_unstable();
     distinct.dedup();

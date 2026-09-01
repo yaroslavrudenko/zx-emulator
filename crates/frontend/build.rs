@@ -39,18 +39,23 @@ const MEDIA: &str = "ZX_BUNDLE_MEDIA";
 ///
 /// A build script runs *before* the crate it builds, so it cannot call `media::kind_of` and
 /// there is no third place to put the list that both could reach without a fourth crate. The
-/// copy is kept honest by `tests/bundled_extensions.rs`, which reads **this file as text** and
-/// asserts every entry here is something `media::kind_of` recognises. That is the shape this
-/// project prefers when duplication is genuinely forced: not a promise, a gate.
+/// copy is kept honest by `tests/bundled_extensions.rs`, which reads **this file as text**,
+/// parses the array below, and asserts it is exactly `media::EXTENSIONS` — in **both**
+/// directions, so an entry missing here fails as loudly as an extra one. Each is then handed to
+/// `media::kind_of` as well, so the two lists agreeing on a typo is not enough.
 ///
-/// **`tzx` is deliberately absent and its absence is the loud kind.** Most commercial games
-/// ship as `.tzx` because `.tap` cannot represent a turbo loader at all, so it is the most
-/// likely thing to point this at — and a build that embedded one would produce an artefact
-/// that starts and cannot load its own payload. `crates/spectrum` is gaining
-/// `tape::tzx::parse`, producing the same pulse train `tap::parse` produces; when it lands,
-/// `tzx` is added here, an arm is added to `media::insert`, and the refusal row in
-/// `media::NOT_YET` is deleted. Three deletions and no rewrite, which is what `docs/M6.md`
-/// Decision 5 bought by choosing a pulse train over a block list.
+/// # That sentence was a promise for a fortnight, which is worse than no sentence
+///
+/// It read *"the copy is kept honest by `tests/bundled_extensions.rs`"* and the file did not
+/// exist — `rg bundled_extensions` returned this line and nothing else. It stated the shape this
+/// project prefers when duplication is forced, *"not a promise, a gate"*, and was itself the
+/// promise. **A file asserting it is gated by a test nobody wrote is worse than an ungated file,
+/// because a reader stops looking**, and this one duly drifted: `tzx` was added below on
+/// 2026-09-01 and the paragraph underneath still said it was deliberately absent and predicted
+/// the day it would arrive.
+///
+/// The gate exists now, and it is written to fail: desynchronising the two lists was measured to
+/// turn it red before it was trusted to keep them together.
 const LOADABLE: &[&str] = &["rom", "tap", "tzx", "z80", "sna"];
 
 fn main() {
@@ -137,9 +142,8 @@ fn embed(out: &Path, slot: &str, variable: &str, bundled: bool) -> String {
              \n\
              It embeds: {}\n\
              \n\
-             .tzx is the common one and is not in that list. `.tap` cannot represent a turbo \
-             loader, which is what most commercial games use, so `.tzx` support is being added \
-             to crates/spectrum — until it lands, a .tzx cannot be embedded or loaded.",
+             A format outside that list has no parser in crates/spectrum, so a binary embedding \
+             one would start and then be unable to read its own payload.",
             source.display(),
             LOADABLE
                 .iter()

@@ -352,7 +352,9 @@ fn the_rom_emits_the_train_our_converter_produces() {
         return;
     };
     // A data block: 3223 pilot pulses rather than a header's 8063, which keeps the run short.
-    // `the_pilot_is_longer_for_a_header_than_for_a_data_block` grades the other branch.
+    // `the_pilot_tone_is_exactly_our_pilot_period_and_our_pilot_length` grades the other branch:
+    // it loops `for flag in [0x00, 0xFF]`, so the header's length is covered there rather than
+    // here, where a header would only make this comparison slower.
     let flag = 0xFF;
     let converted = converter_pulses(flag, &PAYLOAD);
     let measured = rom_emitted_pulses(&rom, flag, &PAYLOAD, converted.len());

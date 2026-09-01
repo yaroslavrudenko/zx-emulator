@@ -18,10 +18,16 @@
 //! 1. **The program is written and the phase is measured.**
 //!    `crates/spectrum/tests/timing_oracle.rs` *is* `docs/MACHINE.md`'s verification item 2:
 //!    Richard Butler's 48K timing suite, whose expected results were taken from real Spectrums
-//!    by nine independent submitters. This machine scores **0 disagreements against its 68
-//!    graded rows**. Thirteen mutations bound that green, and the five that move this file's
+//!    by nine independent submitters. This machine scores **0 disagreements against its 70
+//!    graded rows**. Sixteen mutations bound that green, and the five that move this file's
 //!    constant all go red — 14333 by 13 rows, 14334 by 8, 14336 by 7, 14337 by 7, and 14361
 //!    (the 128's figure) by 23. **14335 is a unique optimum over ±2.**
+//!
+//!    **Those five disagreement counts are out of 68, not 70, and are left at the range they
+//!    were measured against.** The oracle graded 34 instruction groups when they were taken and
+//!    35 — the two extra rows are group 35's — since 2026-09-01; re-stating a verdict against a
+//!    range it never ran on is how a number acquires authority it did not earn.
+//!    `docs/MACHINE.md`'s mutation table carries the same denominators for the same reason.
 //!
 //! 2. **"An issue 2 Spectrum is one T-state earlier than an issue 3" is the wrong axis** —
 //!    not a smaller error than the first, a different one. The suite's own hardware results
@@ -40,9 +46,9 @@
 //! given that this machine asserts `/INT` at frame T-state 0.
 //!
 //! That qualification is not a hedge; it is measured. Moving the interrupt one T-state later
-//! **and** the window to 14336 leaves the oracle **green**, which is the last of its thirteen
-//! mutations and deliberately so. The oracle grades the *interval*, never the constant
-//! standing alone.
+//! **and** the window to 14336 leaves the oracle **green**, which was the thirteenth of its
+//! mutations and deliberately so — the last of them until group 35 added three more against the
+//! four-case I/O rule. The oracle grades the *interval*, never the constant standing alone.
 //!
 //! # What is still open
 //!

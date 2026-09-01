@@ -53,8 +53,9 @@ site that takes it — selects HL, IX or IY, and the entire instruction set work
 > grepped for every other copy of the thing you corrected.**
 >
 > Same class as `Cpu::pc()`, which `MACHINE.md` documented as an available method for two
-> milestones and which never existed — `MACHINE.md:383` records that correction. A name is a claim
-> about the code, and it is the cheapest claim in any of these documents to check.
+> milestones and which never existed — `MACHINE.md:791`, under *What the CPU already gives the
+> machine*, records that correction. A name is a claim about the code, and it is the cheapest claim
+> in any of these documents to check.
 
 ## Flag register
 

@@ -101,17 +101,26 @@ else
 fi
 
 step "build.rs refuses a format the emulator cannot load"
-: > "$work/game.tzx"
-printf 'ZXTape!\032\001\024' > "$work/game.tzx"
-ZX_BUNDLE_MEDIA="$work/game.tzx" \
+# **This step named `.tzx`, and it is why this gate exited 1.** It embedded a `.tzx` and required
+# the build to fail with `cannot load a .tzx`. `.tzx` became loadable on 2026-09-01, so the build
+# it expected to refuse succeeded — and the step then reported "a .tzx was embedded — it would
+# fail at run time on somebody's machine", which was the gate announcing a defect on the day the
+# emulator gained a feature.
+#
+# The invariant was never about `.tzx` and is worth keeping: a format outside `media::EXTENSIONS`
+# must be refused **here**, where a person can act on it, rather than at a stranger's
+# double-click. So it is repointed at `.dsk` — a +3 disk image, a real format this project knows
+# the name of and has written no parser for — and the next format to land moves it again.
+printf 'MV - CPCEMU Disk-File\r\n' > "$work/game.dsk"
+ZX_BUNDLE_MEDIA="$work/game.dsk" \
     cargo build --manifest-path crates/frontend/Cargo.toml --features bundled --lib \
-    > "$work/tzx.txt" 2>&1
+    > "$work/dsk.txt" 2>&1
 status=$?
-if [ "$status" -ne 0 ] && grep -q "cannot load a .tzx" "$work/tzx.txt"; then
-    ok "a .tzx is refused at build time, by name"
+if [ "$status" -ne 0 ] && grep -q "cannot load a .dsk" "$work/dsk.txt"; then
+    ok "a .dsk is refused at build time, by name"
 else
-    bad "a .tzx was embedded (exit $status) — it would fail at run time on somebody's machine"
-    tail -n 20 "$work/tzx.txt"
+    bad "a .dsk was embedded (exit $status) — it would fail at run time on somebody's machine"
+    tail -n 20 "$work/dsk.txt"
 fi
 
 step "build.rs refuses a payload that is not there"
@@ -206,11 +215,19 @@ if [ "$failures" -eq 0 ]; then
     The mechanism is green.
 
     What that does NOT say:
-      - that any particular game runs. No commercial game has ever run on this emulator, and
-        this gate deliberately embeds a ROM this repository wrote so that it needs no corpus.
-      - that a game is playable, or that its keys respond. `tests/keymap_under_a_game.rs`
-        grades what a game would read; nothing here has ever been read by one.
-      - that the in-game music plays. The beeper is being added to crates/spectrum.
+      - that any particular game runs. Four have — Cybernoid, Manic Miner, Cybernoid II and
+        Exolon, photographed in docs/images/ with the command that re-takes each — and not one
+        of them ran from here. This gate deliberately embeds a ROM this repository wrote so
+        that it needs no corpus, and testdata/games/ is gitignored, so a clean checkout has
+        nothing else it could embed.
+      - that a game is playable, or that its keys respond. Manic Miner's key reads were
+        measured (keymap::ArrowTarget::Both, byte-identical state after an identical hold);
+        whether it is playable is a person at a keyboard. `tests/keymap_under_a_game.rs` grades
+        what a game would read, and nothing this script builds has ever been read by one.
+      - that the in-game music plays. The beeper landed at M7 — bit 4 of a 0xFE write drives
+        it in crates/spectrum/src/ula.rs, and crates/spectrum/tests/m7_beeper.rs grades it —
+        but nothing here mixes a sample or opens a device, and this environment has no audio
+        hardware to open. The tune remains observation by somebody with speakers.
 EOF
     exit 0
 else

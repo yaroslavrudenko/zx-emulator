@@ -40,7 +40,19 @@ pub enum Kind {
 /// formats are told apart by their **name**, not their contents. Sniffing would work today —
 /// a 48K `.sna` is exactly 49,179 bytes — and would be a guess dressed as a fact; the file
 /// name is the thing that actually carries the answer.
-const EXTENSIONS: &[(&str, Kind)] = &[
+///
+/// # It is `pub` so that the sentences quoting it can be graded against it
+///
+/// This list is restated in prose everywhere a person is told what to hand the emulator, and
+/// [`unsupported`]'s comment below predicted that drift and then undercounted it. Those
+/// sentences live in two binaries and a build script — none of which a library test can reach
+/// into — so the only way for a gate to ask *"does this sentence name everything?"* is for the
+/// answer to be enumerable from outside this module.
+///
+/// The previous gate of this shape, `main.rs`'s column budget, recorded that it *"needed no new
+/// public item"*. This one does, and the trade is worth naming rather than slipping in: one
+/// exported constant against four sentences no compiler was ever going to check.
+pub const EXTENSIONS: &[(&str, Kind)] = &[
     ("rom", Kind::Rom),
     ("tap", Kind::Tape),
     ("z80", Kind::Z80),
@@ -62,11 +74,14 @@ pub fn kind_of(path: &str) -> Option<Kind> {
 ///
 /// # A refusal that becomes support by deleting a row
 ///
-/// Without this table a `.tzx` — which is what most commercial games actually ship as, because
-/// `.tap` cannot represent a turbo loader at any speed — falls into the generic
-/// *"not a .rom, .tap, .z80 or .sna"* message, which reads as *"this emulator is broken"*
+/// Without this table a format this project knows the name of and has not written a parser for
+/// — a `.dsk`, a `.trd`, a `.szx` — falls into the generic
+/// *"not a .rom, .tap, .tzx, .z80 or .sna"* message, which reads as *"this emulator is broken"*
 /// rather than *"this format is not done yet"*. `docs/STATUS.md`'s standing complaint about
 /// silence applies to a user-facing refusal as much as to a gate.
+///
+/// `.tzx` was that example until 2026-09-01, and the fact that it can no longer serve as one is
+/// the mechanism working: the row came out when the parser landed.
 ///
 /// It is a **table** and not a branch in [`insert`] for one specific reason. `docs/M6.md`
 /// Decision 5 chose a pulse train over a block list precisely so that `.tzx` would be a second
@@ -80,13 +95,28 @@ pub fn kind_of(path: &str) -> Option<Kind> {
 /// by name and not yet loadable — `.dsk`, `.szx`, `.trd` — becomes a legible refusal by adding
 /// one row rather than by rediscovering why the generic message is not good enough.
 ///
-/// **The prediction above was nearly right and it is worth recording that it undercounted.** It
-/// said the cost was *"a row to [`EXTENSIONS`], one arm to [`insert`], and delete the row"*. It
-/// was five: [`Kind`] gained a variant, [`verb`] needed an arm — which is the wildcard-free match
-/// working exactly as designed, refusing to compile rather than picking a verb for a kind nobody
-/// had thought about — and the sentence listing what is loadable appears **twice**, here and in
-/// [`accept`]. A dispatch that costs three edits and a string that costs two is the honest shape,
-/// and the string is the half that no compiler was ever going to catch.
+/// **The prediction above was nearly right and it is worth recording that it undercounted —
+/// twice, and the second undercount is the interesting one.** It said the cost was *"a row to
+/// [`EXTENSIONS`], one arm to [`insert`], and delete the row"*. The dispatch half came to five:
+/// [`Kind`] gained a variant, [`verb`] needed an arm — which is the wildcard-free match working
+/// exactly as designed, refusing to compile rather than picking a verb for a kind nobody had
+/// thought about — and every one of those five failed to compile until it was done.
+///
+/// Then it said the sentence listing what is loadable *"appears **twice**, here and in
+/// [`accept`]"*. **Counted on 2026-09-01, it appears in six places in this crate alone** —
+/// [`accept`]'s refusal, `main.rs`'s `OPENING_MESSAGE` and its module header, `zx-shot`'s usage
+/// block and its own refusal, and `build.rs`'s `LOADABLE` — and in four more outside it. Five of
+/// the six were still describing a four-format emulator a fortnight after the fifth format
+/// landed, because the compiler cannot see any of them.
+///
+/// So the count was wrong by three, and the conclusion drawn from it — *"the string is the half
+/// that no compiler was ever going to catch"* — was right and was left as an observation. It is
+/// a gate now: [`EXTENSIONS`] is `pub` for the purpose, `main.rs` and `zx-shot` each grade their
+/// own literals against it from a `mod tests` that can see them, `tests/on_screen_strings.rs`
+/// grades [`accept`]'s answer by calling it, and `tests/bundled_extensions.rs` reads `build.rs`
+/// as text because a build script is the one caller that cannot link. What is **not** gated is
+/// ordinary prose — this comment, the module headers, the files outside this crate — and that is
+/// stated rather than assumed away.
 const NOT_YET: &[(&str, &str)] = &[];
 
 /// Why `path` cannot be loaded even though the format is a known one.
@@ -277,6 +307,15 @@ fn verb(kind: Kind) -> &'static str {
     match kind {
         // The one that must not be silent: [`insert`] deliberately inserts a tape stopped, so
         // the visible effect of dropping a tape is nothing at all until the tape is started.
+        //
+        // **One arm for two kinds, and that is the answer rather than an oversight.** A verb
+        // names what happened to the machine, and what happened is the same thing: `docs/M6.md`
+        // Decision 5 chose a pulse train over a block list precisely so that `.tzx` would be a
+        // second *converter* and not a second tape engine, so both arrive as one `Tape`,
+        // through one `insert_tape`, stopped, waiting for the same key. The two differ in how
+        // they were *parsed*, which is [`insert`]'s business and not a person's — and the
+        // sentence already carries `{name}`, so which file it was is on the screen either way.
+        // A distinct wording here would be claiming a difference the machine does not have.
         Kind::Tape | Kind::Tzx => "tape in the drive, press F3 to play:",
         Kind::Z80 | Kind::Sna => "snapshot restored from",
         // Unreachable at run time — [`insert`] refuses a ROM before returning `Ok` — and named

@@ -307,6 +307,7 @@ dependencies = [
  "macroquad",
  "page",
  "spectrum",
+ "testsupport",
  "thiserror 2.0.20",
 ]
 

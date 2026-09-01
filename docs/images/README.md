@@ -1,8 +1,10 @@
 # Images
 
-Seven files, referenced from the repository's [`README.md`](../../README.md). They are **produced
-by running the emulator**, not drawn, and this page is the commands that produce them — so that a
-picture making a claim about the machine can be re-taken rather than trusted.
+Nine files, and which of them the repository's [`README.md`](../../README.md) shows is that file's
+business rather than this one's — a tally here of how many it links would be a second copy of a
+fact it owns, and the tally this page used to carry went stale the same day it was written. They
+are all **produced by running the emulator**, not drawn, and this page is the commands that produce
+them — so that a picture making a claim about the machine can be re-taken rather than trusted.
 
 | File | 640 × 512 | What it is |
 |---|---|---|
@@ -10,18 +12,29 @@ picture making a claim about the machine can be re-taken rather than trusted.
 | `central-cavern.png` | gallery | *Manic Miner* playing, on a 48K, loaded from tape by the ROM |
 | `cybernoid-ii.png` | gallery | *Cybernoid II*'s screen arriving from tape, mid-load |
 | `exolon.png` | gallery | *Exolon*'s screen — which was never on the tape as a screen |
+| `exolon-playing.png` | gallery | *Exolon* **being played**, started from its own menu after the tape |
+| `cybernoid-ii-playing.png` | gallery | *Cybernoid II* **being played**, started the same way |
 | `128-menu.png` | gallery | the 128's own boot menu, unassisted |
 | `tape-loading.png` | gallery | the tape three thousand frames in, mid-load |
 | `title.png` | gallery | what that tape produced |
 
-Four games: *Cybernoid*, *Manic Miner*, *Cybernoid II*, *Exolon*. Two machines. One of the seven
-frames is a **48K**, one is a **128**, and the rest are named per command below.
+Four games: *Cybernoid*, *Manic Miner*, *Cybernoid II*, *Exolon*. Two machines. One of the nine
+frames is a **128** and the rest are 48Ks, named per command below.
+
+> **The two `-playing` files were added on 2026-09-01 and they close a gap this page named
+> itself.** *What could not be photographed* said, correctly at the time, that *"a tape-loaded game
+> cannot be started"* — every `--keys` tap happens before PLAY, so no key could reach a game that
+> arrived three minutes of emulated time later — and it identified the fix as *"a missing flag, not
+> a defect"*. `zx-shot --keys-after` is that flag. The two loading-screen frames are **kept**
+> rather than replaced: `exolon.png` and `cybernoid-ii.png` are the evidence for two separate and
+> still-interesting claims about how a tape arrives, and a picture of a game playing does not
+> supersede a picture of a screen being decoded.
 
 ---
 
 ## Which pixels are the machine's
 
-**All of them, in all seven files. There is no surround, no margin, no gutter and no caption
+**All of them, in all nine files. There is no surround, no margin, no gutter and no caption
 baked into any image**, so the question the first version of this page had to argue — *where
 does the emulator's output stop?* — does not arise. Each file is one 320 × 256 frame and nothing
 else.
@@ -72,6 +85,15 @@ docs/images/tape-loading.png: 9 distinct colours, 0 foreign
 docs/images/title.png: 11 distinct colours, 0 foreign
 ```
 
+And the same loop over the two frames added later the same day, which is the point of a checker
+that is a program rather than a paragraph — a new file is graded by running it, not by arguing
+that it was produced the same way:
+
+```
+docs/images/exolon-playing.png: 13 distinct colours, 0 foreign
+docs/images/cybernoid-ii-playing.png: 13 distinct colours, 0 foreign
+```
+
 `cybernoid-ii.png` uses **fifteen**, which is every value the hardware has.
 
 ### The checker was broken on purpose, three times, because a green that cannot go red proves nothing
@@ -114,7 +136,10 @@ pngtopam docs/images/cybernoid.png | pamtopnm > back.ppm
 cmp enlarged.ppm back.ppm
 ```
 
-Run on 2026-09-01 for **all seven**, from one binary, and every `cmp` was silent. That is the
+Run on 2026-09-01 for **all seven**, from one binary, and every `cmp` was silent. Both checks were
+run again the same day for the two `-playing` frames, against the build that first produced them:
+each command re-run gave a byte-identical `.ppm`, and `pngtopam` on each published file
+round-tripped to exactly `pamenlarge 2` of that `.ppm`. That is the
 stronger of the two available checks and it is worth naming why: the four older files were taken
 by an earlier build, so re-running their commands now and getting the published bytes back shows
 that **the commands on this page still produce the files in this directory** — not merely that
@@ -224,6 +249,17 @@ $ZX --rom testdata/roms/48.rom --media testdata/games/CybernoidII.tap \
 $ZX --rom testdata/roms/48.rom --media testdata/games/Exolon.tap \
     --keys "$LOAD" --play-tape --settle 2500 --out exolon.ppm
 
+# --- the same two tapes, now started: --keys-after waits for the tape and then types
+# `--settle` is the gap on *both* sides of the after-keys, and `--hold 30` is not decoration:
+# see "A game's menu polls less often than the ROM does" below.
+START='Space;Space;Key1'          # leave the loading screen, reach the menu, 1 START GAME
+$ZX --rom testdata/roms/48.rom --media testdata/games/Exolon.tap \
+    --keys "$LOAD" --play-tape --keys-after "$START" --hold 30 --settle 800 \
+    --out exolon-playing.ppm
+$ZX --rom testdata/roms/48.rom --media testdata/games/CybernoidII.tap \
+    --keys "$LOAD" --play-tape --keys-after "$START" --hold 30 --settle 2000 \
+    --out cybernoid-ii-playing.ppm
+
 # --- the 128's own boot menu; no keys at all --------------------------------
 $ZX --rom testdata/roms/128-0.rom --rom testdata/roms/128-1.rom --frames 120 \
     --out 128-menu.ppm
@@ -234,14 +270,26 @@ $ZX --rom testdata/roms/48.rom --media testdata/games/ManicMiner.tap \
 $ZX --rom testdata/roms/48.rom --media testdata/games/ManicMiner.tap \
     --keys "$LOAD" --play-tape --settle 10750 --out title.ppm
 
-for f in cybernoid central-cavern cybernoid-ii exolon 128-menu tape-loading title; do
-    pamenlarge 2 $f.ppm | pamtopng > docs/images/$f.png
+# every .ppm the commands above just wrote — the stems are read off what they produced rather
+# than retyped, for the reason below.
+for f in *.ppm; do
+    pamenlarge 2 "$f" | pamtopng > "docs/images/${f%.ppm}.png"
 done
 ```
 
 `pamenlarge` and `pamtopng` are [netpbm](https://netpbm.sourceforge.net). Neither scales, filters
 nor interpolates, so neither can alter a machine pixel; the `cmp` above is what shows that rather
 than the sentence.
+
+**That loop used to name seven stems, and for as long as it did, this page was a recipe that
+reproduced seven of the nine files beside it.** The two `-playing` frames were photographed by the
+commands above and then converted by a hand the page never described, so somebody following it end
+to end finished holding two `.ppm`s with no instruction and no explanation — which is this
+directory's own subject failing on itself. An image whose published path stops short of the file is
+not evidence, and a recipe that silently covers most of its output is that failure in miniature. A
+typed list of stems was a second copy of the `--out` names above it and it fell behind them exactly
+as a second copy does; the glob is derived from what those commands wrote, so the next frame added
+to this page converts itself.
 
 **The game files are yours to supply and are named here as they were on the machine that took
 these.** Nothing in `testdata/games/` is committed — `git check-ignore -v testdata/games/` is the
@@ -335,6 +383,29 @@ listening for a block's pilot tone; blue and yellow is the ROM reading data. Bot
 this set — `exolon.png` is red and cyan, `tape-loading.png` and `cybernoid-ii.png` are blue and
 yellow — which is the evidence for the sentence rather than a claim about a disassembly.
 
+### `exolon-playing.png` and `cybernoid-ii-playing.png` — a tape game, started
+
+Both are the same three-tap sequence against two different games, and the sequence is uniform
+because what it walks is uniform: **a Hewson loading screen and a Hewson title screen each consume
+one key, and only the third is a choice.** `Space;Space;Key1` — dismiss, advance, `1 START GAME`.
+Neither of the first two keys matters; `Space;Key1;Key1` and `Key1;Key1;Key1` were tried and put
+both games in play as well, which is what identifies them as *advance* rather than as *select*.
+
+`exolon-playing.png` is the first zone: the hero under the teleport arch he has just materialised
+from, a gun emplacement with **a shot in the air**, three planets, and the game's own status line
+— `AMMO 99  GRENADES 10  POINTS 000000  LIVES 6  ZONES 000`. The lives count is the honest detail:
+nobody is at the keyboard, so the hero stands under the gun and dies about every four seconds, and
+`6` is where the counter had reached 800 frames after `1` was pressed.
+
+`cybernoid-ii-playing.png` is the first chamber, and its evidence is the **score**: `000025`, up
+from zero. A frame of a static title screen and a frame of a running game are hard to tell apart
+from a still, and a scoreboard that has moved is the difference. The ship is in flight, two of the
+chamber's guardians are on their platform, and a pod sits below.
+
+**Neither picture required knowing anything about either game in advance.** The wait was read off
+the tape rather than swept for — see below — and the key sequence was found by pressing candidates
+and looking, in eight parallel runs that took seconds.
+
 ### `tape-loading.png` — the letters are the attribute file
 
 The Manic Miner tape's third block carries 256 bytes to `22784` = `0x5900` — attribute rows 8–15,
@@ -379,16 +450,119 @@ attract loop rather than a game somebody started.
 
 Recorded because a gallery that shows only what worked is a gallery with an unstated denominator.
 
-**A tape-loaded game cannot be started.** `zx-shot` presses every `--keys` tap *before* it presses
-PLAY, so no key can reach a game that arrives minutes later. *Exolon* and *Cybernoid II* both load
-correctly and then sit on their own menus waiting for a key that this tool has no way to send:
-*Cybernoid II* was observed cycling title ↔ hall of fame out to `--settle 160000` — about 53
-minutes of emulated time — and *Exolon* held its loading screen out to `--settle 175000`. Neither
-has an attract mode, which is why *Manic Miner*, which does, is the only tape game here shown
-playing. **This is a missing flag, not a defect**: something that lets keys be pressed after
-`--play-tape` (a `--keys-after`, or interleaving `--keys` with `--settle`) would put both games in
-this gallery. It has been reported rather than added — `crates/frontend` belongs to other changes
-in flight.
+**~~A tape-loaded game cannot be started.~~ Fixed the same day, by the flag this paragraph asked
+for.** What it said was right: `zx-shot` presses every `--keys` tap *before* it presses PLAY, so no
+key could reach a game that arrives minutes later. *Exolon* and *Cybernoid II* both loaded
+correctly and then sat on their own menus waiting for a key the tool had no way to send —
+*Cybernoid II* observed cycling title ↔ hall of fame out to `--settle 160000`, about 53 minutes of
+emulated time, and *Exolon* holding its loading screen out to `--settle 175000`. It named the
+remedy as *"a missing flag, not a defect"*, and `zx-shot --keys-after` is that flag. Both games are
+now in this gallery playing, and the paragraph is corrected rather than deleted because a
+prediction that came true within the day is worth more standing than removed.
+
+**How the flag knows the game has arrived, which is the part that was not obvious.** A fixed frame
+count is what every command above uses and it is fragile: it is a property of one tape on one
+model, and `--settle 11750` means *Central Cavern* on this *Manic Miner* file and nothing anywhere
+else. So `--keys-after` does not count — it **asks the tape**. `docs/M6.md` Decision 5 makes the
+pulse train the tape's representation rather than a detail of one, and `Tape::pulses` is public
+because of it; the half-periods are T-states, their sum is the cassette end to end, and dividing by
+the machine's own frame length gives the wait. Read, not swept for, and right for either model:
+
+```
+--keys-after: waited 10653 frames; the tape ran out at frame 10953     # Exolon.tap
+--keys-after: waited 13904 frames; the tape ran out at frame 14864     # CybernoidII.tap
+```
+
+**What the tape cannot say is how long the loader then takes to jump into the game**, and nothing
+in the machine can be asked either — whether the next instant is a title screen, a menu or a black
+frame mid-clear is a property of the game. That gap is `--settle`, it is an honest guess rather
+than a derived number, and it is named as one. It is applied on **both** sides of the after-keys —
+before them so the game is up to receive them, after them so what they did is on the picture — and
+one number serving both was checked rather than assumed: `--settle` was swept over 200, 400, 600,
+800, 1000, 1200, 1600 and 2000, and **every one of the sixteen runs put both games in play**. A
+second flag would have bought nothing, so there is not one.
+
+**A game's menu polls less often than the ROM does, and `--hold` is where that shows.** At the
+default `--hold 10`, *Cybernoid II* starts and *Exolon* does not — it sits on its menu, because its
+tap was too short for the menu's scan. `--hold 30` starts both, and both published commands use it.
+This is exactly the ambiguity `zx-shot`'s own source names about `--hold` — *"every 'the game does
+not respond' is ambiguous between a defect in the emulator and a tap this tool made too short"* —
+and it is now a measurement rather than a worry: the tool can press a key after a load, so the two
+can be told apart by pressing it for longer.
+
+**The other end of `--hold` is a threshold, not a number.** `--hold` is shared by `--keys` and
+`--keys-after`, so a hold long enough for a game's menu is also a hold the 48K editor reads as a key
+being held down — and past a point it starts repeating it. It surfaced while `--hold` was being
+raised for *Exolon*'s menu, and what got written down was the line a single run at `--hold 60` put
+on the screen. That is a reading taken at one setting, recorded as though it were a property of the
+flag: the count is a function of `--hold`, so no one rendering of the line is the true one. *(The
+entry also said it was seen in "two of the sixteen sweep runs", which cannot be right — those
+sixteen are the `--settle` sweep above, and every one of them put both games in play.)*
+
+Re-measured on 2026-09-01 against `testdata/roms/48.rom`, by photographing the editor straight after
+the four taps and counting the keywords on the picture rather than reasoning about repeat rates:
+
+```sh
+$ZX --rom testdata/roms/48.rom --media testdata/games/Exolon.tap \
+    --keys "$LOAD" --play-tape --hold N --settle 50 --out hold-N.ppm
+```
+
+| `--hold` | `LOAD` keywords on screen | |
+|---|---|---|
+| 10, 20, 30, 35 | 1 | the line is `LOAD ""`, `ENTER` submits it, the tape loads |
+| 36, 37, 38, 39, 40 | 2 | the rest are a syntax error and the tape never starts |
+| 41, 45 | 3 | |
+| 50 | 4 | |
+| 55 | 5 | |
+| 60 | 6 | |
+| 65 | 7 | |
+| 70 | 8 | |
+| 75 | 9 | |
+| 80 | 10 | |
+
+So 35 is the longest hold the editor still accepts, the first duplicate arrives at 36, and every
+further five frames buys one more — a 35-frame delay and a 5-frame period, read off the screen
+rather than off a variable. The figure the old sentence carried was right for the run it came from
+and wrong as a fact about the flag, which is the whole distinction this page exists to keep.
+
+**It is not only the keyword that repeats, and that is the part the old line hid.** Every tap in
+the script repeats, because every tap is held for the same `--hold`. At 60 the screen reads
+
+```
+LOAD ? LOAD LOAD LOAD LOAD LOAD
+""""""""""""L
+```
+
+— six keywords, and **twelve** quotes rather than two, six from each `SYMBOL SHIFT`+`P`. The `?` is
+the editor's flashing error marker sitting where the second `LOAD` made the line unparseable, and
+the `L` is the cursor. Run the published `--keys-after` command at `--hold 60` and the `1` arrives
+six times as well, into the editor, because the game it was meant for never loaded.
+
+**Neither the tape nor the emulator is involved, and that is worth stating because it narrows what
+could ever break here.** Every key is typed before PLAY, so at `--hold 60` *Exolon*, *Manic Miner*
+and an empty drive produce **byte-identical** frames — the `.ppm`s have the same MD5. Nor is it
+true of the machine in general: the same command with two `--rom`s never reaches an editor at all,
+because the 128 boot menu takes `ENTER` as *Tape Loader* and the frame shows that loader waiting.
+This is a 48K-editor property, reachable only through `--keys`.
+
+`30` is clear of both edges — five frames under the repeat delay, and enough for *Exolon*'s menu —
+and nothing was added to separate the two halves, because one number that works for both is a knob
+nobody has to reason about.
+
+**The threshold is gated now, and the gate is deliberately not this table.** `zx-shot`'s own
+`mod tests` — inside the binary, because `--hold`'s default and the `press` that implements a hold
+are both private to it — runs the four taps at the two settings either side of the edge and asserts
+the change across them: at the delay every tap lands once and `ENTER` submits the line, one frame
+above it every tap lands twice, quotes included, and the syntax error stays in the editor. Both
+holds are derived from the same constant rather than typed, so a wrong constant reddens on both
+sides at once. It also reads `REPDEL` — the repeat delay the 48K's keyboard routine counts down,
+35 at boot — back out of the booted machine, which is where the number comes from and what makes a
+red say *which* fact moved: how the tool steps a key, or which ROM is in `testdata/`.
+
+The ramp above stays a reading and is asserted nowhere, and the reason is arithmetic rather than
+taste: a delay of 30 with a period of 6 reproduces the sixty-frame row of that table exactly — six
+keywords — while duplicating at 35. A gate pinned to any one row of the ramp would stay green
+through that, with the edge five frames from where this page says it is.
 
 **The ordering also costs the *snapshot* games nothing, which is the shape of the fix.** A `.z80`
 lands before frame zero, so `cybernoid.png` gets its keypress and is the one game here shown
@@ -411,14 +585,32 @@ What it loads into is worth recording, and it is *not* a picture:
   means **the game's own code is executing**, not merely resident.
 - And there it stays, out to `--settle 140000`: roughly **47 minutes** of emulated time.
 
-**Whether that is a game waiting for a key or a defect cannot be decided with the tool as it
-stands, and that is the point.** `zx-shot` cannot press a key after a load, so *"it does not
-advance"* and *"it is waiting for input"* produce identical evidence. `zx-shot`'s own source
-already names this failure mode, about `--hold`: *"every 'the game does not respond' is ambiguous
-between a defect in the emulator and a tap this tool made too short, and an ambiguous report is the
-expensive kind."* The same sentence applies one level up, to the key that cannot be sent at all.
-This is the second and stronger reason for the missing flag above: the first was a nicer gallery,
-this one is a diagnosis nobody can currently make.
+**~~Whether that is a game waiting for a key or a defect cannot be decided with the tool as it
+stands, and that is the point.~~ It was decided the same day, and the answer is *waiting for a
+key*.** The paragraph was right that the two were indistinguishable — `zx-shot` could not press a
+key after a load, so *"it does not advance"* and *"it is waiting for input"* produced identical
+evidence — and it was right that this, rather than a nicer gallery, was the stronger reason for the
+missing flag. With `--keys-after` the question takes one command:
+
+```sh
+$ZX --rom testdata/roms/48.rom --media testdata/games/MarioBros.tzx \
+    --keys "$LOAD" --play-tape --keys-after 'Space;Space;Key1' --hold 30 --settle 600 \
+    --out /tmp/mario.ppm
+# --keys-after: waited 12294 frames; the tape ran out at frame 13254
+```
+
+One key past `OCEAN PRESENTS` reaches the game's own `OPTIONS` menu — `1 1 PLAYER`, `2 2 PLAYER`,
+`3 REDEFINE KEYS`, `OCEAN (C) 1987`, `CODED BY CHOICE` — and `1` starts it: Mario on the girders,
+the `POW` block, turtles walking, a coin, and `MARIO 000000` across the top. So the 47 minutes of
+apparent inactivity were a title screen doing exactly what a title screen does, and **nothing in
+the emulator was wrong**. The `.tzx` container, the four standard-speed blocks, and the game's own
+code were all working the whole time.
+
+**No Mario Bros frame is published here, and the reason is provenance rather than the picture.**
+The licensing section below sets out a separate case for each rights-holder, resting on searches
+that were actually performed; Ocean Software is a fourth publisher and no such search has been done
+for it. A screenshot is cheap to take and a claim about permission is not, so what is recorded is
+the finding and not the frame.
 
 **`Batty` was rejected on provenance, not on looks.** The copy to hand
 (`1c7df3e9be2d57ae0f094d9d426898475bf82ca3`) is a cracked release: it loads to a full-screen
@@ -432,6 +624,32 @@ striking and very on-brand picture. It then reaches **test 36** (`IN A,(n)` / `O
 `sp=23337`. Photographing an early page of that run would have been selecting a green frame from a
 suite that goes red later, which is the exact failure this repository documents itself committing.
 The observation is left here as a finding for whoever owns the timing model; it is not a picture.
+
+> **Three corrections to the sentence above, made 2026-09-01 by the pass that extended
+> `crates/spectrum/tests/timing_oracle.rs`. The finding stands; its three specifics were each
+> wrong in a way worth leaving visible.**
+>
+> - **It quotes one of *two* mismatching fields.** The suite highlights every field that
+>   disagrees, and two did: **`R=54` against an expected `49`**, as well as `sp=23300` against
+>   `23337`. Only **`loop=237`** matched. Reporting one of two mismatches understates the
+>   disagreement by half.
+> - **The instruction list does not identify test 36.** Tests **35, 36 and 37 are one program** —
+>   the suite's dispatch table sends all three to `0xC91D` — so they share that instruction list
+>   and it cannot distinguish them. The screen does: the BASIC sets `l` to **0**, **13** and
+>   **21** and prints that many rows of `"ZXSPECTRUMZXSPECTRUMZXSPECTRUMZX"` before running, and
+>   test 36's own title is `… [13]`, which is literally `STR$ l`. **The `[13]` is the
+>   discriminating variable**; the instruction list is the part the three have in common.
+> - **The third field is not a stack pointer, and 37 is not a T-state count.** The suite labels it
+>   `sp`, but what its handler records is the **interrupted `PC`**: `23300` is `0x5B04` and
+>   `23337` is `0x5B29`, both instruction boundaries inside the loop the suite copies to
+>   `0x5B00`, and `0x5B29` is its `IN L,(C)`. The 37 between them is a *distance through the loop
+>   body*, not an amount of time.
+>
+> **The finding has since been acted on rather than only recorded.** `timing_oracle.rs` grades
+> group **35** as of the same day and names 36 and 37 as needing a floating bus — which is also
+> the explanation for the numbers above: this machine floats the constant `0xFF`, so its reading
+> for test 36 is its reading for test **35**, to the byte (`R=54 loop=237 sp=23300`), and 35 is
+> the row hardware agrees with.
 
 ---
 
@@ -459,9 +677,12 @@ resolved.
 
 ### 3. The three Hewson games, where something was found — and it is not a permission for this
 
-**`cybernoid.png` is *Cybernoid — The Fighting Machine*, `cybernoid-ii.png` is *Cybernoid II — The
-Revenge*, and `exolon.png` is *Exolon*. All three are by Raffaele Cecco and published by Hewson
-Consultants Ltd** — *Exolon* in 1987, both *Cybernoid*s in 1988. *Cybernoid II*'s own title screen,
+**`cybernoid.png` is *Cybernoid — The Fighting Machine*, `cybernoid-ii.png` and
+`cybernoid-ii-playing.png` are *Cybernoid II — The Revenge*, and `exolon.png` and
+`exolon-playing.png` are *Exolon*. All five are by Raffaele Cecco and published by Hewson
+Consultants Ltd** — *Exolon* in 1987, both *Cybernoid*s in 1988. The two `-playing` frames are the
+same three titles and the same rights-holder as the frames beside them, so they add a file to this
+case and nothing to its reasoning. *Cybernoid II*'s own title screen,
 visible in `cybernoid-ii.png`, credits *"BY RAFFAELE CECCO / GRAPHICS BY HUGH BINNS / MUSIC BY DAVE
 ROGERS"* and carries `CYBERNOID II (C) 1988 HEWSON` unaltered.
 

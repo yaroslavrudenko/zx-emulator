@@ -31,8 +31,17 @@
 //! regression. Nothing in this file changes that, and the assertions below are deliberately
 //! about keys in *different* half-rows, which is where the modelled behaviour is defined.
 //!
-//! **Whether a game responds at all.** No commercial game has ever run on this emulator. These
-//! gates say the keymap delivers what a game would read; they cannot say a game reads it.
+//! **Whether a game responds at all.** ~~No commercial game has ever run on this emulator.~~ Four
+//! have, on 2026-09-01 — *Cybernoid*, *Manic Miner*, *Cybernoid II* and *Exolon*; `crates/frontend`'s
+//! own coverage table and `docs/images/README.md` carry the photographs and the commands. Manic
+//! Miner's reads were **measured** rather than watched: `keymap::ArrowTarget::Both` records that
+//! the bare digits and the Kempston port leave byte-identical machine state after an identical
+//! hold, which is this file's subject observed against a real title.
+//!
+//! **None of that happened here, and it cannot.** `testdata/games/` is gitignored, so a clean
+//! checkout has no corpus and these gates have no game to run. They still say only that the
+//! keymap delivers what a game *would* read; a person with their own files is what turned that
+//! into an observation, and `cargo test` remains none the wiser.
 
 use std::collections::BTreeSet;
 

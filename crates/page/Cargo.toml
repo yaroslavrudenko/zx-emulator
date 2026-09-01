@@ -36,9 +36,15 @@ tinyaudio = "1.1.0"
 
 [lints.rust]
 # Deliberately NOT `unsafe_code = "forbid"`, and this is the only crate in the workspace that
-# is not. `crates/z80`, `crates/spectrum` and `crates/frontend` keep the `forbid` that makes
-# the guarantee structural; the exception lives here, in one file, so that a reviewer looking
-# for `unsafe` has exactly one place to look.
+# is not: every other member declares it in its own `[lints.rust]`, and the root has no
+# `[workspace.lints]` table for one to inherit it from instead. Stated as a complement rather
+# than as a list of crate names, and deliberately — a list is a second copy of the same fact,
+# and it goes stale the day a member is added while the sentence it decorates stays true. The
+# check is `rg -l '^unsafe_code = "forbid"' crates/*/Cargo.toml`, which returns every member
+# but this one; the `^` is load-bearing, because the phrase appears unanchored in this comment
+# and an unanchored search reports this crate as declaring the lint it deliberately omits.
+# The `forbid` is what makes the guarantee structural; the exception lives here, in one file,
+# so that a reviewer looking for `unsafe` has exactly one place to look.
 missing_docs = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 

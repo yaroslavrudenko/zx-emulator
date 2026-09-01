@@ -313,16 +313,23 @@ shasum -a 256 testdata/timing/timing_tests_48k_v1.0.z80
 
 `crates/spectrum/tests/timing_oracle.rs` runs each group twice — once where it sits in
 uncontended memory and once copied into the screen bank — and compares the results against the
-suite's own tables. **68 hardware rows, 0 disagreements.**
+suite's own tables. **70 hardware rows, 0 disagreements.**
 
-**State what it grades precisely if you cite it.** Thirteen mutations bound it: 14333, 14334,
+**State what it grades precisely if you cite it.** Sixteen mutations bound it: 14333, 14334,
 14336, 14337 and 14361 for `FIRST_CONTENDED_T_STATE` all go red and only **14335** is green, and
 perturbing the delay pattern, making `Ula::fetch` a three-T-state read, or stopping internal
-cycles contending all go red by 14–38 rows. But three mutations came back **green** — shortening
-the interrupt window, and moving the interrupt and the window *together* — so the oracle grades
-the **interval from `/INT` to the first contended T-state**, not the constant alone. The constant
-is anchored; the frame's origin remains a convention and the interrupt window's length is still
-ungraded.
+cycles contending all go red by 14–38 rows. Three of the sixteen are the four-case I/O rule's
+`C:1, C:1, C:1, C:1` arm, and they arrived with group 35 in 2026-09-01's extension from 34
+instruction groups to 35 — the arm deleted and the arm weakened to a two-stall shape each redden
+**2 of 70**, its fourth term alone dropped reddens **1 of 70**. But three mutations came back
+**green** — shortening the interrupt window, and moving the interrupt and the window *together* —
+so the oracle grades the **interval from `/INT` to the first contended T-state**, not the constant
+alone. The constant is anchored; the frame's origin remains a convention and the interrupt
+window's length is still ungraded.
+
+**The row counts above are not interchangeable.** Everything measured before group 35 was measured
+against 68 rows and is quoted at 68; only the three I/O rows ran against 70. `docs/MACHINE.md`'s
+mutation table keeps both denominators visible for that reason.
 
 The suite has two tables because **real Spectrums have two behaviours**, one T-state apart, and
 they do not sort by board issue: the authors record a cold machine reporting late and then early

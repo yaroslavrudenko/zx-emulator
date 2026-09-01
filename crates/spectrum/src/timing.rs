@@ -135,9 +135,11 @@ const CONTENDED_T_STATES_PER_LINE: u32 = 128;
 /// `frame_t_states` is `t_states_per_line * lines_per_frame` and `contended_span` is
 /// `DISPLAY_HEIGHT * t_states_per_line`. Both are written out in the constants below **and**
 /// checked against their definitions by `Timing::is_consistent`, which is asserted at compile
-/// time for both machines. Two representations that cannot disagree, because the build fails if
-/// they do — the instrument `crate::PAGE_SIZE_U16` and this module's own power-of-two
-/// assertions already use.
+/// time for both machines by the two `const _: () = assert!(…)` items beneath the `impl`. Two
+/// representations that cannot disagree, because the build fails if they do — the instrument
+/// this module's own `const _: () = assert!(DELAY_PATTERN.len().is_power_of_two())` already
+/// uses, and `joystick.rs`'s `KEMPSTON_PORT & KEMPSTON_PORT_MASK == KEMPSTON_PORT_SELECT`
+/// after it.
 ///
 /// The alternative was a `const fn` constructor taking four `u32`s positionally, which is a
 /// worse trade: it swaps a compiler-checked redundancy for an argument order that nothing

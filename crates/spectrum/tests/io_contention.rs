@@ -44,8 +44,46 @@
 //!   pattern — see `contention_magnitude.rs`. `tests/timing_oracle.rs` reaches part of it and
 //!   is measured to miss the rest: `docs/MACHINE.md`'s mutation table has the `N:1, C:3` case
 //!   losing its stall red at 4 of 68 hardware rows, and the **fourth** term dropped
-//!   (`C:1,C:1,C:1,C:1`) **green**, because the suite's groups never reach a contended
-//!   non-ULA port. This file remains that term's only gate.
+//!   (`C:1,C:1,C:1,C:1`) **green**, ~~because the suite's groups never reach a contended
+//!   non-ULA port. This file remains that term's only gate.~~
+//!
+//!   > **The struck clause was true of the *oracle's then-range*, not of the suite — and stating
+//!   > it as a property of the suite is what cost the fourth term an external check for as long
+//!   > as it stood.** Groups **1–34** do not reach a contended non-ULA port. **Group 35 does**:
+//!   > its loop addresses `(C<<8)|C` with `C` a counter advancing once per iteration, so it
+//!   > sweeps every high byte and both parities of A0, and every *odd* `C` in `0x41..=0x7F` is
+//!   > precisely the `C:1, C:1, C:1, C:1` case. The oracle stopped at 34 only because 35 was
+//!   > listed among the groups needing a floating bus; it was extended to 35 on **2026-09-01**
+//!   > and grades **70** hardware rows.
+//!   >
+//!   > So this file is **no longer that term's only gate**, and the two are complementary rather
+//!   > than redundant: this one is exhaustive over four ports × eight phases with every
+//!   > expectation derived by hand from the published rule; the oracle's row is **external** and
+//!   > integrated over a whole frame. Measured on the day of the change, in a scratch clone,
+//!   > three mutations of the arm rather than one — each leaving the oracle's other 68 rows
+//!   > green, and each moving a different amount:
+//!   >
+//!   > | mutation of the `(true, false)` arm | the oracle at 70 rows | this file |
+//!   > |---|---|---|
+//!   > | deleted — `(true, false) => 0` | **RED**, 2 of 70 — both group 35's | **RED**, 2 of 3 |
+//!   > | weakened to the two-stall shape of `(true, true)` | **RED**, 2 of 70 — both group 35's | **RED**, 2 of 3 |
+//!   > | the fourth term alone dropped | **RED**, 1 of 70 — group 35 uncontended only | **RED**, 1 of 3 |
+//!   >
+//!   > **The third row is the one that grades the fourth term specifically, and it is the
+//!   > smallest of the three** — the first two change the arm's cost at every group position,
+//!   > while dropping the fourth term changes it at **one position in eight**. This file measures
+//!   > which: with the term gone, `a_real_in_or_out_is_stalled_by_the_four_case_rule_at_every_phase`
+//!   > passes phases 0 through 6 of the `0x4001` case and fails at **phase +7**, costing 17 where
+//!   > the rule wants 23. That is `d = D[p + a + b + c + 3]` landing in one of the pattern's two
+//!   > zero slots at every position but the last — which the `0x4001` row of the table below
+//!   > already says, in the jump from `6` back to `12`.
+//!   >
+//!   > **The oracle's row carries a coupling this file does not**, and it is written up in
+//!   > `timing_oracle.rs`'s own *Group 35* section rather than summarised away here: that row
+//!   > passes because [`FLOATING_BUS_BYTE`][spectrum::FLOATING_BUS_BYTE] is `0xFF`, which lies
+//!   > outside the contended address range — **not** because a floating bus is modelled. A real
+//!   > floating bus, implemented later, can redden it for reasons that have nothing to do with
+//!   > this rule.
 //! - **The phase.** Every position here is relative to
 //!   [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE], so every
 //!   assertion survives that constant being wrong. That is `contention_phase.rs` — which pins
@@ -55,7 +93,10 @@
 //!   `/INT` at frame T-state 0. The frame's **origin**, the interrupt window's **length** and
 //!   the `64 × 224` **factorisation** stay open — three rows in `docs/STATUS.md`.
 //! - **`OUT (C),r`.** `IN A,(C)` covers the `ED`-page shape — two M1 fetches then the port
-//!   cycle — and nothing here reaches the `OUT` half of it.
+//!   cycle — and nothing here reaches the `OUT` half of it. **The oracle's group 35 does**, as
+//!   of 2026-09-01: six of them sit in its loop body, at a port that sweeps all four cases. That
+//!   is the shape being reached from *outside* this project rather than inside it, so the gap in
+//!   this file is unchanged and is worth closing here too.
 //! - **The `ED` block I/O forms** (`INI`/`OUTI`/`INIR`/`OTIR` and their twins), which add
 //!   internal cycles and a repeat. They are `block_contention.rs`, where the port cycle is
 //!   priced by this file's four-case rule as one term of a longer walk — and where the

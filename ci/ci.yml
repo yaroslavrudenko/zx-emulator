@@ -1,0 +1,411 @@
+# The workflow this repository does not have installed, and cannot install from here.
+#
+# `ci/README.md` says why it lives in `ci/` rather than in `.github/workflows/`, and gives the
+# one command that installs it. Read that before concluding anything about this file's absence
+# from the pipeline: **nothing runs this**, and every gate figure in `docs/STATUS.md` was
+# produced by a person typing the command locally.
+#
+# ## What this grades, and what it deliberately does not
+#
+# The `gate` job runs `web/gate.sh` rather than restating its steps in YAML. That script is the
+# project's own definition of green — a developer types `sh web/gate.sh` and gets exactly what
+# CI gets — and a copy of its steps here would be a second definition free to drift from the
+# first. Its own header still says *"There is no CI in this repository that could"* run it;
+# installing this file is what makes that sentence stale.
+#
+# Not graded here, and not gradeable by anything in a repository: whether the page renders,
+# whether a keypress arrives, whether a `Ctrl` chord is cancellable, whether it is playable.
+# `web/gate.sh`'s verdict block lists them and `web/README.md` records the human runs. A green
+# tick on this workflow is a build-and-oracle verdict, not a T4 one.
+
+name: CI
+
+on:
+  push:
+    branches: [main, "m*"]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Nothing here publishes, comments, or writes to the repository.
+permissions:
+  contents: read
+
+# A second push to the same ref supersedes the first. The conformance job is minutes of
+# billion-instruction emulation; paying for it twice on a branch nobody is looking at any more
+# is waste, not thoroughness.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately NOT setting ZX_CORPUS_ALLOW_MISSING, and it would not help if it were set:
+  # `crates/testsupport` refuses the opt-out whenever `CI` is set, which GitHub Actions sets on
+  # every step. That refusal is the point — the opt-out exists so a human can work on a
+  # checkout without a corpus, and it must never be what decides whether a pipeline verified
+  # anything. `guard-must-be-armed` proves the refusal rather than trusting it.
+  #
+  # The two pre-rename spellings — Z80_FUSE_REQUIRED and Z80_FUSE_ALLOW_MISSING — are hard
+  # errors in every gate, not no-ops. A workflow that still exported one would fail loudly on
+  # its first run instead of quietly disarming every corpus-backed assertion while looking
+  # armed. That, too, is proven below rather than assumed.
+
+jobs:
+  # -------------------------------------------------------------------------------------
+  # The project's own gate: fmt, clippy on both targets, the whole suite, the wasm build,
+  # and what is inside the artefact. Plus the corpora, without which most of it verifies
+  # nothing — and under CI a missing corpus is a failure, so "fetched" is not optional.
+  # -------------------------------------------------------------------------------------
+  gate:
+    name: web/gate.sh — T1 + T2 + T3
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # `crates/page` depends on `tinyaudio`, whose `alsa-sys` build script probes pkg-config
+      # for ALSA and *panics* when the headers are absent — it is not a soft failure or a
+      # feature that switches off. Without this line the very first `cargo` invocation that
+      # touches the workspace dies, before a single test runs. Measured from the crate's own
+      # build.rs rather than inferred: it prints "For Debian/Ubuntu users: # apt-get install
+      # libasound2-dev" and panics.
+      #
+      # `miniquad` needs nothing installed: it loads libX11 and libGL with dlopen at run time,
+      # so it links on a machine with no X11 development headers and no display. Nothing in the
+      # suite opens a window.
+      - name: ALSA headers, which crates/page's audio device will not build without
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libasound2-dev
+
+      # No toolchain name here on purpose. `rust-toolchain.toml` pins the channel, the
+      # components and the wasm32 target; `rustup toolchain install` with no argument installs
+      # *that* toolchain with all three. Naming `stable` instead would install a toolchain
+      # without the target the wasm half of the gate needs.
+      - name: The toolchain rust-toolchain.toml names
+        run: |
+          rustup toolchain install
+          rustup show
+          rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Also asserts that Cargo.lock is current: `--locked` fails rather than silently
+      # resolving a different graph than the committed lockfile describes.
+      - name: Dependencies resolve exactly as Cargo.lock says
+        run: cargo fetch --locked
+
+      # -----------------------------------------------------------------------------------
+      # The corpora.
+      #
+      # `testdata/README.md` is the source for every URL below; this is a copy of its fetch
+      # blocks and will go stale if they move. What keeps that honest is the verification step
+      # after it: three of the four corpora have recorded SHA-256s and they are checked, so a
+      # mirror that changes its bytes fails here with an obvious cause rather than inside a
+      # gate with an obscure one.
+      # -----------------------------------------------------------------------------------
+      - name: Fetch the corpora every gate in the workspace is backed by
+        run: |
+          set -eu
+          mkdir -p testdata/fuse testdata/snapshots testdata/timing testdata/tapes
+
+          # The FUSE conformance vectors — the M1 and M2 oracle.
+          #
+          # This mirror is not interchangeable with the upstream FUSE tree, and the difference
+          # is measured rather than assumed: on 2026-09-01 the two disagreed byte for byte
+          # (152280 vs 161511 bytes for tests.in). This is the copy every recorded figure in
+          # docs/STATUS.md and testdata/README.md was taken against. testdata/README.md
+          # deliberately pins no checksum here — the harness validates the corpus's structure
+          # on load rather than trusting it — so the hash is printed, not asserted, and a
+          # change is visible in the log without being a failure nobody chose.
+          fuse=https://raw.githubusercontent.com/floooh/chips-test/master/tests/fuse
+          curl -fsSL -o testdata/fuse/tests.in       "$fuse/tests.in"
+          curl -fsSL -o testdata/fuse/tests.expected "$fuse/tests.expected"
+
+          # Third-party snapshots — M6's external oracle, and the only instrument in the
+          # workspace that grades .z80/.sna offsets against something other than our own code.
+          snap=testdata/snapshots
+          curl -fsSL -o "$snap/3dshow_demo.z80"   https://raw.githubusercontent.com/antirez/zx2040/main/games/z80/3dshow_demo.z80
+          curl -fsSL -o "$snap/spectral_test.z80" https://raw.githubusercontent.com/r-lyeh/Spectral/main/src/res/rzx/test.z80
+          curl -fsSL -o "$snap/fire.z80"          https://raw.githubusercontent.com/remogatto/gospeccy/master/src/formats/testdata/fire.z80
+          curl -fsSL -o "$snap/fire.sna"          https://raw.githubusercontent.com/remogatto/gospeccy/master/src/formats/testdata/fire.sna
+
+          # Richard Butler's 48K timing suite — the machine-level oracle, whose expected
+          # numbers were measured on real Spectrums. Only the 48K file is read by anything:
+          # timing_tests-128k_v1.0.z80 is documented in docs/M7.md and read by no gate, so it
+          # is not fetched here.
+          curl -fsSL -o testdata/timing/timing_tests_48k_v1.0.z80 \
+            https://raw.githubusercontent.com/MrKWatkins/EmulatorTestSuites/main/src/MrKWatkins.EmulatorTestSuites.ZXSpectrum/Timing/timing_tests_48k_v1.0.z80
+
+          # Third-party .tap tapes. The sweep checks each recovered block against a parity byte
+          # somebody else's tool wrote, which is the one assertion here that owes nothing to
+          # this project.
+          tapes=https://raw.githubusercontent.com/MrKWatkins/EmulatorTestSuites/main/src/MrKWatkins.EmulatorTestSuites.Z80/Program
+          curl -fsSL -o testdata/tapes/z80doc.tap    "$tapes/Raxoft/V1_2A/z80doc.tap"
+          curl -fsSL -o testdata/tapes/z80memptr.tap "$tapes/Raxoft/V1_2A/z80memptr.tap"
+          curl -fsSL -o testdata/tapes/z80tests.tap  "$tapes/MarkWoodmass/z80tests.tap"
+
+      # A fetch can return HTTP 200 and write an empty file, and the gate that then fails does
+      # so a long way from the cause. This is the same reason the harness itself checks: a
+      # failure at the point of the mistake beats the same failure three minutes later.
+      - name: The corpora are actually there, and are the recorded bytes
+        run: |
+          set -eu
+          for f in testdata/fuse/tests.in testdata/fuse/tests.expected \
+                   testdata/snapshots/3dshow_demo.z80 testdata/snapshots/spectral_test.z80 \
+                   testdata/snapshots/fire.z80 testdata/snapshots/fire.sna \
+                   testdata/timing/timing_tests_48k_v1.0.z80 \
+                   testdata/tapes/z80doc.tap testdata/tapes/z80memptr.tap \
+                   testdata/tapes/z80tests.tap; do
+            test -s "$f" || { echo "::error::$f is missing or empty"; exit 1; }
+          done
+
+          # Checked where testdata/README.md records a hash, and only there. The FUSE vectors
+          # and the zex exercisers are deliberately unpinned in that file — "any genuine copy
+          # works, because the harness validates their structure on load" — and pinning them
+          # here would impose a policy the project considered and declined.
+          sha256sum -c <<'SUMS'
+          477ec76c7556a9329408aa8976f0cfdc9516d753b7df3672fbf96076af37e57c  testdata/snapshots/3dshow_demo.z80
+          bc32121f62d66684e941094c355f841a757d3fdf1ca3c285583b18e3c4b7faa2  testdata/snapshots/spectral_test.z80
+          1bdd66e2fa456a383f2d97685b5ff9ada3b027390f5d05b576ae4d6bc3c3df4a  testdata/snapshots/fire.z80
+          54f890f3b5509f08bc98b81b2b8ef5d5591f2ff6ba102a69c262b0bab7daacb9  testdata/snapshots/fire.sna
+          1e66230a7b23737294f35d2778b8384ce3f81412b98883d35e564091377382af  testdata/timing/timing_tests_48k_v1.0.z80
+          4b06ce9fd517fd5f5a86d4ff2ef05a3f0ab7ed20eb075b87b0623d42fbd3e4bd  testdata/tapes/z80doc.tap
+          444582ddfa4d05711b6235e743ddf68295231e97ba92cc838c5d09a106c9a10f  testdata/tapes/z80memptr.tap
+          42ce7fc8393de83876b89015be54f7d0da3c8c5b07a075981c12dd9d84c8b95d  testdata/tapes/z80tests.tap
+          SUMS
+
+          echo "FUSE corpus, unpinned by design — recording what this run fetched:"
+          sha256sum testdata/fuse/tests.in testdata/fuse/tests.expected
+          wc -l testdata/fuse/tests.in testdata/fuse/tests.expected
+
+      # The whole gate, in the project's own words. Do not replace this with a list of cargo
+      # invocations: gate.sh is where "green" is defined, and it grades several things no
+      # reasonable YAML would remember to — that the .wasm exists and is not a stub, that its
+      # imports and exports are the ones web/zx_page.js provides and web/mq_js_bundle.js calls,
+      # that the page's four scripts are present, that build.sh copies the audio worklet, and
+      # that the vendored miniquad bundle is byte-identical to the pinned crate's.
+      - name: sh web/gate.sh
+        run: sh web/gate.sh
+
+      # gate.sh prints only the last three lines of the suite log, which is right for a
+      # terminal and not enough for a run nobody was watching. On failure the whole thing goes
+      # into the job log, where the person reading the red tick is already looking.
+      - name: The captured logs, when the gate went red
+        if: failure()
+        run: |
+          for log in /tmp/zx-m8-gate-tests.txt /tmp/zx-m8-gate-clippy.txt \
+                     /tmp/zx-m8-gate-clippy-wasm.txt /tmp/zx-m8-gate-build.txt; do
+            if [ -f "$log" ]; then
+              printf '\n===== %s =====\n' "$log"
+              cat "$log"
+            fi
+          done
+
+  # -------------------------------------------------------------------------------------
+  # The three gates that are `#[ignore]`d, and whose own ignore text says "CI runs it that
+  # way". Until this file is installed, all three are exactly what docs/STATUS.md calls the
+  # headline defect: an `#[ignore]`d gate that no pipeline executes is not a gate.
+  #
+  # A separate job, because it is independent of the one above — different corpora, no ALSA,
+  # no wasm — and running it alongside costs wall-clock nothing.
+  # -------------------------------------------------------------------------------------
+  conformance:
+    name: zexdoc, zexall and the MEMPTR exerciser
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The toolchain rust-toolchain.toml names
+        run: |
+          rustup toolchain install
+          rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: conformance
+
+      # `zexdoc.com` and `zexall.com` are the M3 and M4 oracles. `z80memptr.tap` is the M6-era
+      # MEMPTR oracle's program — the same file tape_corpus.rs sweeps as data, executed here as
+      # a program by the real ROM's LD-BYTES. The 48K ROM it needs is committed.
+      #
+      # Unpinned, as testdata/README.md has it: both exercisers are validated on load — the
+      # image must contain the four report literals the parser reads — rather than by checksum,
+      # so a different genuine build still runs. Sizes are asserted because 8704 is recorded.
+      - name: Fetch the exercisers and the MEMPTR tape
+        run: |
+          set -eu
+          mkdir -p testdata/zex testdata/tapes
+          zex=https://raw.githubusercontent.com/anotherlin/z80emu/master/testfiles
+          curl -fsSL -o testdata/zex/zexdoc.com "$zex/zexdoc.com"
+          curl -fsSL -o testdata/zex/zexall.com "$zex/zexall.com"
+          curl -fsSL -o testdata/tapes/z80memptr.tap \
+            https://raw.githubusercontent.com/MrKWatkins/EmulatorTestSuites/main/src/MrKWatkins.EmulatorTestSuites.Z80/Program/Raxoft/V1_2A/z80memptr.tap
+
+          for f in testdata/zex/zexdoc.com testdata/zex/zexall.com; do
+            bytes=$(stat -c %s "$f")
+            test "$bytes" -eq 8704 || { echo "::error::$f is $bytes bytes, not the recorded 8704"; exit 1; }
+          done
+          sha256sum -c <<'SUMS'
+          444582ddfa4d05711b6235e743ddf68295231e97ba92cc838c5d09a106c9a10f  testdata/tapes/z80memptr.tap
+          SUMS
+          echo "exercisers, unpinned by design — recording what this run fetched:"
+          sha256sum testdata/zex/zexdoc.com testdata/zex/zexall.com
+
+      # `--release` is not a speed preference. In the dev profile each exerciser is about
+      # twenty minutes against forty-three seconds, and the MEMPTR run is 24 s against 2.7 s.
+      #
+      # `--ignored` is load-bearing, and this was measured rather than assumed: without it the
+      # same command exits 0 having never looked for the corpus. `guard-must-be-armed` asserts
+      # both halves of that, so a future edit dropping the flag cannot pass silently.
+      #
+      # This also exercises the release profile's `overflow-checks = true` across 5.8 billion
+      # instructions — every deliberate wrap in the core is an explicit `wrapping_*` call, and
+      # a stray implicit one would panic here rather than wrap quietly in a shipped binary.
+      - name: zexdoc and zexall, 67 groups each over an identical instruction stream
+        run: cargo test --release -p z80 --test zex_oracle -- --ignored --nocapture
+
+      - name: The MEMPTR exerciser, loaded through the real ROM and run on the whole machine
+        run: cargo test --release -p spectrum --test memptr_oracle -- --ignored --nocapture
+
+      # Cheap, and it grades the release profile against the unit tests rather than only
+      # against the exercisers: same `overflow-checks = true`, a different body of code.
+      - name: The z80 unit tests in release, where overflow-checks is on
+        run: cargo test --release -p z80 --lib
+
+  # -------------------------------------------------------------------------------------
+  # This job exists because of a measured defect, not a hypothetical one. With testdata/fuse
+  # moved aside the suite once exited 0 with 87 passing tests, byte for byte indistinguishable
+  # from a full green run: five tests verified nothing, the test count did not change, and the
+  # skip notice was swallowed because libtest captures stdout for passing tests.
+  #
+  # The guard is on by default now. This proves it is still on, rather than trusting that it
+  # stayed on — and it proves each of the ways it could be turned off is refused.
+  #
+  # The positive control is the `gate` job above: it fetches the corpora and the suite must be
+  # green. Without it these assertions would be satisfied by a gate that always fails.
+  # -------------------------------------------------------------------------------------
+  guard-must-be-armed:
+    name: The corpus-required guard is armed
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The toolchain rust-toolchain.toml names
+        run: |
+          rustup toolchain install
+          rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: guard
+
+      # Everything below concludes something from a failure, so the thing being tested has to
+      # be verified present first — or rather, verified absent. A corpus that had been
+      # committed would make every assertion here pass for a reason that has nothing to do
+      # with the guard, which is the same class of mistake as a mutation that never landed.
+      - name: The corpora really are absent on a fresh checkout
+        run: |
+          set -eu
+          for d in testdata/fuse testdata/zex; do
+            if [ -e "$d" ]; then
+              echo "::error::$d exists on a fresh checkout, so nothing below is testing an"
+              echo "::error::absent corpus. .gitignore is meant to keep it out of the tree."
+              exit 1
+            fi
+          done
+          echo "testdata/fuse and testdata/zex are absent, as .gitignore intends."
+
+      - name: Every way to disarm the guard is refused, and none is a no-op
+        run: |
+          set -u
+          failures=0
+          log=$(mktemp)
+
+          # Exit status alone is not enough to conclude the guard fired. A typo in a package
+          # name, a renamed test target and an ordinary compile error all exit non-zero too,
+          # and a check that only looks at $? reads every one of them as "correct, the gate
+          # refused". The message is what separates the guard from a broken command, so both
+          # are asserted. Status is captured on the line that produced it and never after a
+          # pipe, for the reason docs/STATUS.md gives: `cmd | tail; echo $?` reports tail's.
+          must_fail_with() {
+              expected=$1; shift
+              "$@" > "$log" 2>&1
+              status=$?
+              if [ "$status" -eq 0 ]; then
+                  printf '    FAIL exited 0: %s\n' "$*"
+                  failures=$((failures + 1))
+                  return
+              fi
+              if grep -qF "$expected" "$log"; then
+                  printf '    ok   exited %s saying: %s\n' "$status" "$expected"
+              else
+                  printf '    FAIL exited %s but never said: %s\n' "$status" "$expected"
+                  cat "$log"
+                  failures=$((failures + 1))
+              fi
+          }
+
+          must_pass() {
+              why=$1; shift
+              "$@" > "$log" 2>&1
+              status=$?
+              if [ "$status" -eq 0 ]; then
+                  printf '    ok   exited 0, %s\n' "$why"
+              else
+                  printf '    FAIL exited %s, expected 0 — %s\n' "$status" "$why"
+                  cat "$log"
+                  failures=$((failures + 1))
+              fi
+          }
+
+          printf '\n==> An undeclared absence must move the pass/fail surface\n'
+          must_fail_with 'It is gitignored and fetched on demand' \
+              cargo test -p z80 --test fuse_vectors -- --nocapture
+
+          printf '\n==> The opt-out is for a human on a fresh clone, never for a pipeline\n'
+          # GitHub Actions sets CI=true on every step, so this is the refusal that protects
+          # this workflow from itself: somebody exporting the variable once to get a checkout
+          # building, and never unsetting it, is the realistic route back to a green tick over
+          # a suite that verified nothing.
+          must_fail_with 'ZX_CORPUS_ALLOW_MISSING is set and so is CI' \
+              env ZX_CORPUS_ALLOW_MISSING=1 cargo test -p z80 --test fuse_vectors -- --nocapture
+
+          printf '\n==> Both pre-rename spellings are errors rather than no-ops\n'
+          # A variable a CI file still exports and the code silently ignores is precisely the
+          # failure the whole policy exists to catch. Z80_FUSE_ALLOW_MISSING is the sharper of
+          # the two: it was a real opt-out under its old name, so a stale configuration setting
+          # it would have disarmed every corpus-backed gate in the workspace while looking
+          # armed. `reject_obsolete_env` runs before the absence check, so these two failures
+          # are the rejection and not the absence — which is exactly why the message is
+          # asserted and not just the status.
+          must_fail_with 'Z80_FUSE_REQUIRED is obsolete and no longer read' \
+              env Z80_FUSE_REQUIRED=1 cargo test -p z80 --test fuse_vectors -- --nocapture
+          must_fail_with 'Z80_FUSE_ALLOW_MISSING is obsolete and no longer read' \
+              env Z80_FUSE_ALLOW_MISSING=1 cargo test -p z80 --test fuse_vectors -- --nocapture
+
+          printf '\n==> --ignored is load-bearing on the zex gate, in both directions\n'
+          # Measured, not reasoned about: without the flag this command exits 0 with the
+          # corpus absent, never looking for the exerciser. A conformance step written without
+          # it would assert nothing and look identical to one that asserts everything — so the
+          # negative control is asserted too, and if it ever starts failing then either the
+          # ignore attributes moved or something unrelated broke, and the conformance job's
+          # command needs rereading before it is trusted.
+          must_pass 'the zex gate without --ignored never looks for the corpus' \
+              cargo test -p z80 --test zex_oracle
+          must_fail_with 'It is gitignored and fetched on demand' \
+              cargo test -p z80 --test zex_oracle -- --ignored --nocapture
+
+          printf '\n==> verdict\n'
+          if [ "$failures" -eq 0 ]; then
+              echo "    The guard is armed: absence fails, the opt-out is refused under CI,"
+              echo "    both obsolete spellings are errors, and --ignored still decides"
+              echo "    whether the zex gate looks at anything."
+              exit 0
+          fi
+          printf '    %s assertion(s) failed\n' "$failures"
+          echo "::error::The corpus-required guard is not armed. A green suite would not mean"
+          echo "::error::the corpora were verified. See docs/STATUS.md and testdata/README.md."
+          exit 1

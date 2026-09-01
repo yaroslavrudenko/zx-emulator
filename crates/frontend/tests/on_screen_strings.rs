@@ -101,12 +101,26 @@ fn every_message_a_dropped_file_can_produce_is_drawable() {
     //
     // Reaching it costs nothing: build a 128 from the two committed ROMs, save it, and hand it
     // to the 48K that is already running. Decision 11's wording is graded at the same time.
-    // **The direction matters, and finding out which one works was itself the point.**
-    // The obvious case — a *128* snapshot handed to a *48K* — does **not** refuse: it restores,
-    // silently. Measured 2026-09-01: `media::save` on a 128 writes `.z80` hardware-mode byte
-    // **0**, which is *48K*, so the file does not describe the machine that produced it and
-    // nothing downstream can tell. That is a `crates/spectrum` matter, not this crate's, and it
-    // is reported rather than worked around here — but it is why this case runs the *other* way.
+    //
+    // > **The paragraph that used to be here said the direction mattered, and it no longer does —
+    // > because the defect it was routing around has been fixed.** It read: *"The obvious case — a
+    // > 128 snapshot handed to a 48K — does not refuse: it restores, silently. Measured
+    // > 2026-09-01: `media::save` on a 128 writes `.z80` hardware-mode byte 0, which is 48K, so
+    // > the file does not describe the machine that produced it and nothing downstream can tell."*
+    // > It was true when it was written and it is false now, in **both** halves. Re-measured the
+    // > same day, by saving a 128 through `media::save` and reading the bytes back rather than by
+    // > reading the writer:
+    // >
+    // > - the `.z80` v3 hardware-mode byte at offset 34 is **4**, which is a 128 — not 0;
+    // > - and `media::accept` of that file on a running 48K returns
+    // >   *"a 128 snapshot cannot be restored into a 48K - restart naming the ROMs that machine
+    // >   needs"*, so the obvious case **does** refuse.
+    // >
+    // > The correction is recorded rather than swapped in because the stale sentence was a
+    // > *reported defect* — a note left in a test explaining why it takes the long way round — and
+    // > a reported defect that has been fixed should be visibly closed rather than quietly
+    // > deleted. Nothing about the case below changed: both directions now reach `Error::Model`,
+    // > so this one is kept exactly as it was, and it is no longer the only one that would work.
     //
     // A 48K snapshot into a running 128 is refused, and that is the branch with the message.
     let editor = std::fs::read(workspace_root().join("testdata/roms/128-0.rom"));
@@ -133,6 +147,53 @@ fn every_message_a_dropped_file_can_produce_is_drawable() {
     assert_eq!(
         produced, 8,
         "the table and the run disagree about how many cases ran"
+    );
+}
+
+#[test]
+fn the_refusal_a_stranger_earns_names_every_format_that_would_have_worked() {
+    // Not a *drawability* claim — a **completeness** one, and it belongs here because this is the
+    // file that already calls `media::accept` and looks at what comes back. Asking the function
+    // is the strongest form available: `main.rs` and `zx-shot` have to grade their literals as
+    // literals, because theirs are private to a binary and never pass through anything a test can
+    // call. This one is the message itself.
+    //
+    // It matters because the sentence is the last thing a person reads before giving up. A
+    // refusal that omits a format they are holding sends them away from an emulator that would
+    // have loaded it, and the omission is invisible from inside: `accept` returns the same shape
+    // of string either way, and every assertion that ever compared it compared it to another
+    // hand-written list of the same four names.
+    let Some(rom) = std::fs::read(workspace_root().join(ROM)).ok() else {
+        eprintln!("skipping: {ROM} is absent — see testdata/README.md");
+        return;
+    };
+    let mut machine = media::start(&[&rom[..]]).expect("one ROM is a 48K");
+
+    // `.dsk` is the control: a real format, recognised by nobody here, so `kind_of` returns
+    // `None` and this is the branch that fires. It has to stay unloadable for this test to reach
+    // the message at all, which is asserted rather than assumed.
+    assert!(
+        media::kind_of("thing.dsk").is_none(),
+        ".dsk became loadable, so this test no longer reaches the refusal it grades",
+    );
+    let refusal = media::accept(&mut machine, "thing.dsk", b"");
+
+    // Every extension, `.rom` included: this branch is reached when `kind_of` says *nothing at
+    // all*, and `kind_of` does know a `.rom`. Naming it is correct here even though `insert`
+    // turns one away later with a different message — which is exactly why the two sentences in
+    // `zx-shot`, whose `--media` never builds a machine, list one format fewer.
+    let mut named = 0;
+    for &(extension, _) in media::EXTENSIONS {
+        assert!(
+            refusal.contains(&format!(".{extension}")),
+            "a .{extension} loads and the refusal does not say so, so somebody holding one is \
+             told this emulator cannot read it: {refusal}",
+        );
+        named += 1;
+    }
+    assert!(
+        named >= 5,
+        "only {named} extensions were checked — media::EXTENSIONS has shrunk",
     );
 }
 

@@ -21,8 +21,24 @@
 //! `docs/M8.md` Decision 4's whole argument for a separate crate is that the exception is
 //! *confined to a surface a person can read in one sitting*. That is a property of a **size**,
 //! and a size that nothing checks is a size that grows. The numbers below are therefore
-//! literals with a reason attached rather than a floor: if a fourth `unsafe` block is right,
-//! this file is where the case for it gets written down.
+//! literals with a reason attached rather than a floor: if the next `unsafe` block is right,
+//! this file is where the case for it gets written down, beside the constant it moves.
+//!
+//! *This sentence used to name **"a fourth `unsafe` block"** as the next one. It was written
+//! when the surface was three blocks, it outlived that, and it did so inside the very test whose
+//! job is to notice that number moving — an ordinal is just another copy of the count, and it
+//! drifts exactly as any other copy does. The constants below are where the figures live; prose
+//! that needs one names the constant instead of repeating its value.*
+//!
+//! **The general test — whether a figure or a list in prose is a second copy at all — is stated
+//! once, and not here.** `README.md`'s *Engineering rules* owns it, as the third of three sibling
+//! rules: *"does the surrounding sentence stay true when the list or the figure goes wrong?"*
+//! Writing it out again in this file would be the defect it names, so what stays here is this
+//! crate's own working of it. It deleted *"the three imports"* from `src/lib.rs`, which had gone
+//! stale, in favour of *"every import declared below"*, which cannot. It kept the enumeration of
+//! `unsafe` syntax forms in the same file, because that crate's *"sweep is over syntax"* is
+//! unreadable without them. And it kept `Cargo.toml`'s *"3 runtime crates"*, a dated measurement
+//! whose count and names are one fact.
 //!
 //! **What it cannot see:** whether the blocks are *correct*. A `// SAFETY:` comment is prose,
 //! and prose asserting a guarantee is a hypothesis rather than a guarantee. This grades that
@@ -35,21 +51,29 @@
 /// `cargo test` happens to run from.
 const SOURCE: &str = include_str!("../src/lib.rs");
 
-/// One `unsafe { … }` block per FFI call.
+/// One `unsafe { … }` block per FFI call, across both seams.
 ///
-/// Three for the argument and download seam, two for audio. It grew when the browser gained a
-/// device, and growing is what this constant exists to make visible: `docs/M8.md` Decision 4's
-/// whole case for a separate crate is that the exception stays *readable in one sitting*, and a
-/// size nothing checks is a size that climbs.
+/// It grew when the browser gained a device, and growing is what this constant exists to make
+/// visible: `docs/M8.md` Decision 4's whole case for a separate crate is that the exception
+/// stays *readable in one sitting*, and a size nothing checks is a size that climbs.
 const EXPECTED_BLOCKS: usize = 5;
 
-/// Two `unsafe extern "C"` blocks: the page seam, and the audio device.
+/// How many of [`EXPECTED_BLOCKS`] are on the audio seam; the rest are the page's.
+///
+/// The division was prose — *"three for the argument and download seam, two for audio"* — above
+/// a constant that only knew the total, so a block retargeted from one seam to the other left
+/// the total right, the sentence wrong, and the suite green. It is a constant now, and the
+/// page's share is its complement rather than a third figure that could disagree with the other
+/// two. Attribution is by callee: a block reaching a `zx_audio_*` import is audio.
+const EXPECTED_AUDIO_BLOCKS: usize = 2;
+
+/// One `unsafe extern "C"` block per seam: the page, and the audio device.
 ///
 /// Kept apart rather than merged so that each carries its own `#[link(wasm_import_module)]` and
 /// its own explanation, and so that deleting audio would delete a block rather than edit one.
 const EXPECTED_EXTERN_BLOCKS: usize = 2;
 
-/// One `#[unsafe(no_mangle)]`, on the plugin version export.
+/// `#[unsafe(no_mangle)]`, on the plugin version export.
 ///
 /// Counted separately from the blocks because it is a different obligation: a block promises
 /// something about memory, and `no_mangle` promises something about the **linker** — that no
@@ -101,6 +125,10 @@ fn the_unsafe_surface_is_the_size_it_is_documented_to_be() {
     let code = code_lines();
 
     let blocks = code.iter().filter(|line| line.contains("unsafe {")).count();
+    let audio = code
+        .iter()
+        .filter(|line| line.contains("unsafe {") && line.contains("zx_audio_"))
+        .count();
     let externs = code
         .iter()
         .filter(|line| line.contains("unsafe extern"))
@@ -113,6 +141,11 @@ fn the_unsafe_surface_is_the_size_it_is_documented_to_be() {
     assert_eq!(
         blocks, EXPECTED_BLOCKS,
         "the crate has {blocks} `unsafe` blocks and is documented as having {EXPECTED_BLOCKS}",
+    );
+    assert_eq!(
+        audio, EXPECTED_AUDIO_BLOCKS,
+        "{audio} of them are on the audio seam and the inventory says {EXPECTED_AUDIO_BLOCKS}; \
+         the total above is still right, so a block has moved between the seams",
     );
     assert_eq!(externs, EXPECTED_EXTERN_BLOCKS);
     assert_eq!(attributes, EXPECTED_UNSAFE_ATTRIBUTES);
