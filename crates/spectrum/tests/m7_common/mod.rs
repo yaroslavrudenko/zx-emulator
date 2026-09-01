@@ -132,6 +132,68 @@ pub fn out_c_a(port: u16, value: u8) -> Vec<u8> {
 /// Instructions [`out_c_a`] assembles, for a caller that has to step exactly that many.
 pub const OUT_C_A_STEPS: usize = 3;
 
+/// `LD BC,port : IN A,(C)`, as bytes — a real port read.
+///
+/// [`out_c_a`]'s partner, and it exists for the same reason: `common::read_port` calls
+/// `Ula::in_port` directly, which proves the bus method and cannot see whether a guest's `IN`
+/// reaches it. The AY's read arm sits **before** the floating-bus fallback in that function,
+/// and an arm placed after it would never run — so the wiring is exactly what needs a gate.
+#[must_use]
+pub fn in_c_a(port: u16) -> Vec<u8> {
+    let [low, high] = port.to_le_bytes();
+    vec![
+        0x01, low, high, // LD BC,port
+        0xED, 0x78, // IN A,(C)
+    ]
+}
+
+/// Instructions [`in_c_a`] assembles.
+pub const IN_C_A_STEPS: usize = 2;
+
+/// Run the assembled `program` from `address`, `steps` instructions of it.
+pub fn run_program(machine: &mut Spectrum, address: u16, program: &[u8], steps: usize) {
+    crate::common::write_program(machine, address, program);
+    crate::common::set_pc(machine, address);
+    for _ in 0..steps {
+        machine.step();
+    }
+}
+
+/// The AY's register-select and register-read port.
+pub const AY_SELECT_PORT: u16 = 0xFFFD;
+
+/// The AY's register-write port.
+pub const AY_WRITE_PORT: u16 = 0xBFFD;
+
+/// Select `register` and write `value` to it, the way a guest does.
+///
+/// Two real `OUT (C),A` instructions through `AY_SELECT_PORT` and `AY_WRITE_PORT`, never a
+/// direct call into the chip: the port decode and the bus wiring are part of what a gate using
+/// this is grading, and a helper that reached past them would grade neither.
+pub fn ay_poke(machine: &mut Spectrum, register: u8, value: u8) {
+    ay_poke_via(machine, AY_SELECT_PORT, AY_WRITE_PORT, register, value);
+}
+
+/// The same, through a caller's choice of ports, so the decode family can be exercised.
+pub fn ay_poke_via(machine: &mut Spectrum, select: u16, write: u16, register: u8, value: u8) {
+    run_program(machine, PROGRAM, &out_c_a(select, register), OUT_C_A_STEPS);
+    run_program(machine, PROGRAM, &out_c_a(write, value), OUT_C_A_STEPS);
+}
+
+/// Read the selected register the way a guest does, and report what landed in `A`.
+pub fn ay_peek(machine: &mut Spectrum) -> u8 {
+    ay_peek_via(machine, AY_SELECT_PORT)
+}
+
+/// The same, through a caller's choice of port.
+pub fn ay_peek_via(machine: &mut Spectrum, port: u16) -> u8 {
+    run_program(machine, PROGRAM, &in_c_a(port), IN_C_A_STEPS);
+    (machine.cpu_state().af >> 8) as u8
+}
+
+/// Where [`ay_poke`] and its neighbours assemble: bank 2, which no paging value moves.
+const PROGRAM: u16 = crate::common::PROLOGUE;
+
 /// The screen read back as text, matched against a font taken from **an explicit ROM image**.
 ///
 /// # Why this exists rather than [`spectrum::screen::read_text`]

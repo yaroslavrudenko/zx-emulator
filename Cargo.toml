@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/z80", "crates/spectrum", "crates/frontend", "crates/testsupport"]
+members = ["crates/z80", "crates/spectrum", "crates/frontend", "crates/page", "crates/testsupport"]
 
 [workspace.package]
 edition = "2024"
@@ -12,6 +12,13 @@ repository = "https://github.com/yaroslavrudenko/zx-emulator"
 [workspace.dependencies]
 z80 = { path = "crates/z80" }
 spectrum = { path = "crates/spectrum" }
+# The browser page's half of the frontend's host seam, and the only crate in this workspace
+# that is not `unsafe_code = "forbid"`. `docs/M8.md` Decision 4 records why the exception is a
+# crate rather than an `#[allow]`: `forbid` cannot be overridden from inside, so the choice was
+# between relaxing a whole crate's posture and confining the FFI to a surface a reviewer can
+# read in one sitting. It compiles on every target — off `wasm32` both entry points degrade —
+# so `crates/frontend` needs no `#[cfg]` to depend on it.
+page = { path = "crates/page" }
 # Test support only, and never published: the corpus-absence policy every gate shares.
 testsupport = { path = "crates/testsupport" }
 

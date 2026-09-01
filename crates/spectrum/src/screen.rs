@@ -38,21 +38,39 @@
 //! # What this module does not model
 //!
 //! [`render`] takes the screen as it stands **at the moment it is called**. A real ULA
-//! draws the frame progressively, so software that changes attributes, the border, or the
-//! bitmap partway down a frame — multicolour effects, Nirvana-engine sprites, border
-//! stripes — is drawn here as if the last value had applied all frame.
+//! draws the frame progressively, so software that changes attributes or the bitmap partway
+//! down a frame — multicolour effects, Nirvana-engine sprites — is drawn here as if the last
+//! value had applied all frame.
 //!
 //! That is a deliberate M5 boundary and not an oversight: drawing progressively needs the
 //! frame's write history keyed by T-state, which is a different data structure and a
 //! different verification story. `docs/MACHINE.md` puts exactly this software in the
 //! "observation" tier, and there is no oracle for it here.
 //!
+//! ## The **border** is now the exception, and the boundary moved for one reason
+//!
+//! This paragraph listed *"border stripes"* alongside the other two, and that is no longer
+//! true. The border **is** drawn as the beam painted it, row by row, from
+//! [`BorderTrace`] — because a tape load is the one place a mid-frame write is what a person
+//! is looking at, and a loading screen drawn in one colour is visibly wrong rather than
+//! subtly so. Nothing else about the boundary moved: attributes and the bitmap are still
+//! sampled once.
+//!
+//! It is worth being exact about how much that is. The border's history costs **one slot per
+//! rendered row** and needs no event list, because a guest cannot create rows; the bitmap's
+//! would need a write history keyed by T-state over 6912 bytes, which is the different data
+//! structure the paragraph above is about. **The two are not the same problem and the cheap
+//! half being done is not the expensive half being started.**
+//!
 //! **The shadow screen does not change that and slightly reduces the pressure for it.** A 128
 //! that can double-buffer has less reason to reach for a mid-frame trick, so M7 leaves the
 //! boundary where M5 put it — but a *mid-frame* switch of bit 3 is drawn here as if the last
 //! value had applied all frame, exactly as a mid-frame attribute write is.
 
+use core::fmt;
+
 use crate::memory::{Memory, PAGE_SIZE};
+use crate::timing::{Clock, Timing};
 
 /// Pixels across the display, excluding the border.
 pub const DISPLAY_WIDTH: usize = 256;
@@ -391,10 +409,10 @@ pub struct Frame {
     pixels: Box<[Colour; FRAME_PIXELS]>,
 }
 
-impl std::fmt::Debug for Frame {
+impl fmt::Debug for Frame {
     /// Deliberately not derived, for the same reason as [`crate::memory::Memory`]: a
     /// derived `Debug` prints 81920 colours and makes any failing assertion unreadable.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Frame")
             .field("width", &FRAME_WIDTH)
             .field("height", &FRAME_HEIGHT)
@@ -432,9 +450,21 @@ impl Frame {
         self.pixels.as_slice()
     }
 
-    /// Paint the whole frame one colour.
-    fn fill(&mut self, colour: Colour) {
-        self.pixels.fill(colour);
+    /// Paint one row of the frame, border to border.
+    ///
+    /// The display is drawn over the middle of it afterwards. Painting the whole row and then
+    /// overwriting the middle costs [`DISPLAY_WIDTH`] redundant stores per display row and
+    /// buys the property that matters: **a frame with a uniform border is byte-identical to
+    /// what the whole-buffer `fill` this replaced produced**, because filling every row with
+    /// one colour and filling the buffer with one colour are the same bytes.
+    /// `tests/border_stripes.rs` asserts that rather than trusting the argument — and that
+    /// `fill` is gone rather than kept beside this, because a private helper with no caller is
+    /// indistinguishable from one whose caller was lost.
+    fn fill_row(&mut self, row: usize, colour: Colour) {
+        let start = row * FRAME_WIDTH;
+        if let Some(pixels) = self.pixels.get_mut(start..start + FRAME_WIDTH) {
+            pixels.fill(colour);
+        }
     }
 
     /// Paint one pixel, in frame coordinates.
@@ -445,14 +475,260 @@ impl Frame {
     }
 }
 
-/// Draw the current screen into `frame`.
+/// Where the border was as the beam went down the frame.
+///
+/// # What this is, and the one thing it is not
+///
+/// The ULA paints the border as it sweeps, so a program that writes `0xFE` partway down a
+/// frame produces horizontal bands — which is what a tape load looks like, and what
+/// [`render`] on its own draws as a single colour. This is the record that makes the bands
+/// possible: **the colour in effect at the moment each rendered row began.**
+///
+/// It is **not** progressive drawing. Mid-frame *attribute* and *bitmap* writes are still
+/// drawn as if the last value had applied all frame, and the module documentation above says
+/// so. Only the border is progressive, which is why the entry point is named for the border
+/// and not for the frame.
+///
+/// # Resolution: one row, and it is derived rather than chosen
+///
+/// **Vertically the frame buffer maps to hardware exactly; horizontally it does not.** A
+/// display line is [`crate::timing::Timing::t_states_per_line`] T-states and there are
+/// [`crate::timing::Timing::lines_per_frame`] of them, so every rendered row has an exact
+/// T-state at which it begins. Across a line the buffer is admittedly *not* the hardware:
+/// [`BORDER`] is 32 pixels a side because *"a uniform margin is what a frame buffer wants"*,
+/// where the real border is wider at the sides than it is tall and there is flyback with no
+/// pixels at all. So a T-state-to-column mapping would be inventing precision this buffer
+/// cannot carry, and a T-state-to-row mapping is not.
+///
+/// **And per-row is far finer than the effect that prompted it.** Measured, on this machine,
+/// running the real 48K ROM's own `LD-BYTES` against a real tape: the loader changes the
+/// border every **1884 to 2159 T-states** — a minimum of **8.4 scanlines** and a median of
+/// **9.6**. Per-row resolution is therefore about eight times finer than the loader's own
+/// rate, which is why the bands come out at their true thickness rather than merely present.
+///
+/// **What it cannot show**, stated because it is a real limit and not a rounding: a border
+/// change *within* a line. Border-multicolour demos rewrite `0xFE` every eight to twenty-four
+/// T-states to paint patterns across a single line, and every one of those writes lands in
+/// the same row here. The last one before a row begins is the one that row gets.
+///
+/// # Bounded by construction, which is stronger than a bound that is enforced
+///
+/// There is no event list and no capacity to overrun: the record is one slot per **rendered
+/// row**, and a guest cannot create rows. So there is no allocation sized by guest behaviour,
+/// no drop policy, and no failing case for a policy to have. What is lost instead is stated
+/// above — several writes inside one row collapse to the last of them — and
+/// `tests/border_stripes.rs` gates that collapse rather than leaving it to be discovered.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct BorderTrace {
+    /// The colour last written to `0xFE` — what [`crate::Ula::border`] reports.
+    ///
+    /// **The border is one datum and this is where it lives.** Keeping a separate `border`
+    /// field on the ULA alongside this record would be two representations of one thing that
+    /// can disagree, which is the defect `crate::memory` rejects for the paging port under
+    /// *"one representation, derived once"*.
+    current: Colour,
+    /// The frame [`BorderTrace::changes`] describes, if it describes one.
+    ///
+    /// Compared at read time rather than maintained at frame boundaries, because there is no
+    /// frame-boundary hook that is not [`crate::Ula::tick`] — and putting anything on that
+    /// path for a display effect is the trade M7's sound half refused for audio.
+    frame: Option<u64>,
+    /// The colour at the top of that frame.
+    initial: Colour,
+    /// Where the colour changed, by rendered row. `None` is a row that inherits.
+    changes: [Option<Colour>; FRAME_HEIGHT],
+}
+
+impl fmt::Debug for BorderTrace {
+    /// Not derived: a derived `Debug` prints 256 `Option`s and makes any failing assertion
+    /// involving a `Ula` unreadable. The same reason [`Frame`] and
+    /// [`Memory`](crate::Memory) have their own.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BorderTrace")
+            .field("current", &self.current)
+            .field("frame", &self.frame)
+            .field("changes", &self.changes.iter().flatten().count())
+            .finish()
+    }
+}
+
+impl BorderTrace {
+    /// A trace with the border at `colour` and no frame recorded.
+    pub(crate) const fn new(colour: Colour) -> Self {
+        Self {
+            current: colour,
+            frame: None,
+            initial: colour,
+            changes: [None; FRAME_HEIGHT],
+        }
+    }
+
+    /// The colour last written.
+    pub(crate) const fn current(&self) -> Colour {
+        self.current
+    }
+
+    /// Set the border **without** recording it as something the beam saw.
+    ///
+    /// The snapshot applier's route, and the reason is the one [`crate::Ula::set_border`]
+    /// already gives for existing at all: a restore is not elapsed time, so the machine being
+    /// restored into did not paint a band. The record is dropped rather than kept, because
+    /// keeping the old machine's bands would draw a history that never happened here.
+    pub(crate) fn set(&mut self, colour: Colour) {
+        *self = Self::new(colour);
+    }
+
+    /// Record a write of `colour` at the position `clock` stands at.
+    ///
+    /// The caller has already established that the colour is changing; a write of the colour
+    /// already showing paints no band and is not a row this record needs a slot for.
+    pub(crate) fn record(&mut self, clock: Clock, colour: Colour) {
+        if self.frame != Some(clock.frames()) {
+            self.frame = Some(clock.frames());
+            self.initial = self.current;
+            self.changes = [None; FRAME_HEIGHT];
+        }
+        self.current = colour;
+        if let Some(row) = first_row(clock.timing(), clock.frame_t_state()) {
+            // Several writes inside one row collapse to the last, which is correct: the row
+            // is painted with what was in effect when it began, and by then all of them have
+            // happened.
+            self.changes[row] = Some(colour);
+        }
+    }
+
+    /// The border colour of each rendered row, top to bottom, as of frame `frames`.
+    ///
+    /// A frame the record does not describe reads as [`BorderTrace::current`] throughout —
+    /// which is right rather than a fallback: a frame in which nothing wrote the border had
+    /// one border colour, and it is the one still standing.
+    ///
+    /// # It accepts the frame **just finished** as well as the one running, and that is the
+    /// difference between working and not
+    ///
+    /// A frontend's loop is `run_frame(); render();`, and [`crate::Spectrum::run_frame`]
+    /// returns the instant the frame **counter advances** — so at the moment it renders, the
+    /// machine stands a few T-states into the *next* frame and the record describes the
+    /// previous one. A rule of "this frame only" is therefore a rule that shows a frontend
+    /// nothing at all, every time, while passing any test that renders mid-frame.
+    ///
+    /// **That was not reasoned out in advance; it was a failing gate.**
+    /// `tests/border_stripes.rs` ran the real ROM's loader for twenty frames, rendered, and
+    /// got a uniform frame — which is exactly what the owner would have seen. The gate that
+    /// found it is `the_frontends_own_loop_shows_the_bands`, and it is named for the call
+    /// pattern rather than for the mechanism because the call pattern is what was wrong.
+    ///
+    /// One frame back and no further: older than that and the border has been unwritten for a
+    /// whole frame, so it really has been uniform.
+    fn rows(&self, frames: u64) -> impl Iterator<Item = Colour> + '_ {
+        let stale = !matches!(self.frame, Some(frame) if frames.saturating_sub(1) <= frame && frame <= frames);
+        let mut colour = if stale { self.current } else { self.initial };
+        self.changes.iter().map(move |change| {
+            if let (false, Some(next)) = (stale, change) {
+                colour = *next;
+            }
+            colour
+        })
+    }
+}
+
+/// The rendered row a border write at `frame_t_state` first shows in.
+///
+/// `None` when the write lands past the bottom of what is rendered — during the vertical
+/// flyback, where the beam is not painting anything this frame.
+///
+/// # The mapping, derived from `Timing` and from nothing else
+///
+/// A second T-state-to-beam-position mapping would be a second thing that has to agree with
+/// contention's, and two mappings that must agree is the defect class this project keeps
+/// catching. So every term below comes out of [`Timing`]:
+///
+/// ```text
+///   display's first frame line = first_contended_t_state / t_states_per_line + 1
+///   the row-0 frame line       = that, minus BORDER
+///   the first row shown        = the first frame line beginning at or after frame_t_state
+/// ```
+///
+/// The `+ 1` is because the first contended T-state falls a few T-states **before** the line
+/// boundary the display starts on — one on a 48K, three on a 128 — so the line containing it
+/// is the last border line. Both are asserted at compile time below, which is what makes the
+/// `+ 1` a reading of the constants rather than a fudge that happens to work twice.
+fn first_row(timing: Timing, frame_t_state: u32) -> Option<usize> {
+    let line = timing.t_states_per_line();
+    let first_line_shown = display_first_line(timing) - BORDER as u32;
+    // The first frame line that *begins* at or after the write, so a write partway down a
+    // line shows from the next one. It is exactly one line late, always in that direction,
+    // and never early — which is the honest cost of a per-row record.
+    let affected = frame_t_state.div_ceil(line);
+    let row = usize::try_from(affected.saturating_sub(first_line_shown)).ok()?;
+    (row < FRAME_HEIGHT).then_some(row)
+}
+
+/// The frame line the display's first pixel row falls on.
+const fn display_first_line(timing: Timing) -> u32 {
+    timing.first_contended_t_state() / timing.t_states_per_line() + 1
+}
+
+// The `+ 1` above reads the constants rather than fitting them, and these are what say so:
+// the first contended T-state is a few T-states short of a line boundary on both machines,
+// and the rendered frame fits inside the lines each machine has.
+const _: () = assert!(
+    display_first_line(Timing::SPECTRUM_48K) * Timing::SPECTRUM_48K.t_states_per_line()
+        - Timing::SPECTRUM_48K.first_contended_t_state()
+        == 1
+);
+const _: () = assert!(
+    display_first_line(Timing::SPECTRUM_128) * Timing::SPECTRUM_128.t_states_per_line()
+        - Timing::SPECTRUM_128.first_contended_t_state()
+        == 3
+);
+const _: () = assert!(display_first_line(Timing::SPECTRUM_48K) >= BORDER as u32);
+const _: () = assert!(display_first_line(Timing::SPECTRUM_128) >= BORDER as u32);
+const _: () = assert!(
+    display_first_line(Timing::SPECTRUM_48K) - BORDER as u32 + FRAME_HEIGHT as u32
+        <= Timing::SPECTRUM_48K.lines_per_frame()
+);
+const _: () = assert!(
+    display_first_line(Timing::SPECTRUM_128) - BORDER as u32 + FRAME_HEIGHT as u32
+        <= Timing::SPECTRUM_128.lines_per_frame()
+);
+
+/// Draw the current screen into `frame`, with **one** border colour for the whole frame.
 ///
 /// `flash_phase` is the half of the 32-frame `FLASH` cycle the machine is in; see
 /// [`flash_phase`].
 /// The signature is unchanged and deliberately so: `Memory` already knows which bank the ULA
 /// is drawing, so no caller has to learn about the shadow screen to keep working.
+///
+/// **It is now a projection of [`render_border_trace`] against a uniform border**, rather than
+/// a second implementation — the same instrument `crate::timing`'s public constants use, so
+/// there is one drawing loop and no pair to drift. A caller wanting the border as the beam
+/// painted it uses [`crate::Spectrum::render`], which is what a frontend already calls.
 pub fn render(memory: &Memory, border: Colour, flash_phase: bool, frame: &mut Frame) {
-    frame.fill(border);
+    draw(memory, core::iter::repeat(border), flash_phase, frame);
+}
+
+/// Draw the current screen into `frame`, painting each row's border as the beam painted it.
+pub(crate) fn render_border_trace(
+    memory: &Memory,
+    border: &BorderTrace,
+    frames: u64,
+    frame: &mut Frame,
+) {
+    draw(memory, border.rows(frames), flash_phase(frames), frame);
+}
+
+/// The one drawing loop: `border_rows` supplies a colour per rendered row, then the display
+/// is drawn over the middle of them.
+fn draw(
+    memory: &Memory,
+    border_rows: impl Iterator<Item = Colour>,
+    flash_phase: bool,
+    frame: &mut Frame,
+) {
+    for (row, colour) in border_rows.take(FRAME_HEIGHT).enumerate() {
+        frame.fill_row(row, colour);
+    }
     let renderer = Renderer {
         // Resolved once for the whole frame rather than per cell. That is the same reason
         // `read_text` hoists the font, and it is also the only place the shadow-screen

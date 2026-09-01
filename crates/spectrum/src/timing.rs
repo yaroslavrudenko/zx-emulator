@@ -152,6 +152,7 @@ pub struct Timing {
     first_contended_t_state: u32,
     contended_span: u32,
     interrupt_t_states: u32,
+    cpu_hz: u32,
 }
 
 impl Timing {
@@ -185,6 +186,7 @@ impl Timing {
         first_contended_t_state: 14335,
         contended_span: 192 * 224,
         interrupt_t_states: 32,
+        cpu_hz: 3_500_000,
     };
 
     /// The 128's geometry. **Transcribed, and its two numbers are not equally supported** — see
@@ -266,6 +268,7 @@ impl Timing {
         first_contended_t_state: 14361,
         contended_span: 192 * 228,
         interrupt_t_states: 32,
+        cpu_hz: 3_546_900,
     };
 
     /// Whether the derived fields agree with what they are derived from.
@@ -279,6 +282,11 @@ impl Timing {
             && self.first_contended_t_state < self.frame_t_states
             && self.interrupt_t_states < self.first_contended_t_state
             && CONTENDED_T_STATES_PER_LINE < self.t_states_per_line
+            // The clock and the frame length are transcribed from different sources, so this
+            // is a genuine cross-check rather than a restatement: a transposed digit in
+            // either puts the implied frame rate nowhere near 50 Hz. It does *not* establish
+            // either figure — the band it admits is roughly +/-1 %.
+            && self.cpu_hz / self.frame_t_states == 50
     }
 
     /// T-states in one display line, border and flyback included.
@@ -313,6 +321,33 @@ impl Timing {
     #[must_use]
     pub const fn interrupt_t_states(self) -> u32 {
         self.interrupt_t_states
+    }
+
+    /// The Z80's clock, in Hz.
+    ///
+    /// # Why a frequency is here at all, when nothing else in this crate needs one
+    ///
+    /// Everything about time in this emulator is counted in T-states, and until M7's sound
+    /// half nothing needed to know how long a T-state *is*. [`crate::audio`] does, and only
+    /// at one remove: a consumer resampling the sample stream to a host rate needs the
+    /// stream's rate, which is this divided by [`crate::audio::SAMPLE_PERIOD_T_STATES`]. It
+    /// is exposed rather than the rate itself because the rate is not an integer on a 128
+    /// (110840.625 Hz) and a rounded frequency is worse than a ratio.
+    ///
+    /// # Both figures are transcriptions, and the better-sourced one is the 128's
+    ///
+    /// | | Hz | Standing |
+    /// |---|---|---|
+    /// | 48K | 3500000 | The machine's own documentation and every source since. As uncontroversial as a figure in this project gets, and still a transcription |
+    /// | 128 | 3546900 | **Primary.** The Sinclair *Servicing Manual* states a `3.54689 MHz` Z80 clock, which `timing.rs` already cited as *"the divisor"* behind 70908 before anything needed the number itself. It descends from the PAL colour subcarrier: `17.734475 MHz / 5 = 3546895`, five Hz below the quoted figure and immaterial at any resolution this emulator has |
+    ///
+    /// `Timing::is_consistent` checks each against its own frame length — the implied frame
+    /// rate must be 50 Hz — which is a real cross-check between two independently transcribed
+    /// numbers and catches a transposed digit. It does **not** establish either figure: the
+    /// band it admits is about a percent wide either way.
+    #[must_use]
+    pub const fn cpu_hz(self) -> u32 {
+        self.cpu_hz
     }
 
     /// The stall, in T-states, a contended access starting at `frame_t_state` suffers.
@@ -491,6 +526,28 @@ impl Clock {
     #[must_use]
     pub const fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// T-states elapsed since the clock started, across every frame.
+    ///
+    /// The frame-relative pair above is what contention and the interrupt window are
+    /// functions of, and this is what anything measuring an *interval* needs — an interval
+    /// spanning a frame boundary looks negative in frame-relative coordinates.
+    /// `crates/spectrum/tests/tape_rom_timings.rs` needed exactly this and open-coded it;
+    /// [`crate::audio`] needs it too, and one expression that knows the machine's own frame
+    /// length is better than two that assume a 48K's.
+    ///
+    /// # It is not monotonic, and the two places it moves backwards are named
+    ///
+    /// [`Clock::set_frame_t_state`] and a fresh clock after [`crate::Ula::reset`] both move
+    /// this backwards, because neither is elapsed time. Anything integrating over it must
+    /// handle that explicitly rather than assume it away; [`crate::audio::Audio::rebase`] is
+    /// what does, and it exists because a restore that manufactured a frame of audio out of
+    /// the jump would be the same defect as a restore that charges a machine cycle.
+    #[inline]
+    #[must_use]
+    pub const fn t_states(&self) -> u64 {
+        self.frames * self.timing.frame_t_states as u64 + self.frame_t_state as u64
     }
 
     /// The frame-relative position `offset` T-states from now.
@@ -673,6 +730,32 @@ mod tests {
             detection_row(Timing::SPECTRUM_48K.frame_t_states(), TWO_INTERRUPTS),
             detection_row(Timing::SPECTRUM_128.frame_t_states(), TWO_INTERRUPTS)
         );
+    }
+
+    #[test]
+    fn each_machines_clock_and_frame_length_imply_a_50_hz_frame() {
+        // The cross-check `is_consistent` makes, named in a failure message. Two figures
+        // transcribed from different sources have to agree about something, and this is the
+        // only thing they can both be asked about.
+        for (name, timing) in MACHINES {
+            let millihertz = u64::from(timing.cpu_hz()) * 1000 / u64::from(timing.frame_t_states());
+            assert!(
+                (49_900..=50_100).contains(&millihertz),
+                "{name}: {millihertz} mHz is not a 50 Hz frame"
+            );
+        }
+        // The two are genuinely different clocks, which is why this is a field rather than a
+        // constant. A model that shared one would put the 128's audio 1.3 % out — inaudible
+        // on its own and a drift of a whole frame every 74 seconds against the host.
+        assert_ne!(Timing::SPECTRUM_48K.cpu_hz(), Timing::SPECTRUM_128.cpu_hz());
+        assert_eq!(Timing::SPECTRUM_48K.cpu_hz(), 3_500_000);
+        assert_eq!(Timing::SPECTRUM_128.cpu_hz(), 3_546_900);
+
+        // The 128's descends from the PAL colour subcarrier, which is the closest thing to a
+        // derivation either figure has. Recorded as the five-Hz rounding it is rather than as
+        // an exact identity it is not.
+        assert_eq!(17_734_475 / 5, 3_546_895);
+        assert!(Timing::SPECTRUM_128.cpu_hz().abs_diff(3_546_895) <= 5);
     }
 
     #[test]
@@ -963,6 +1046,44 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn absolute_time_counts_whole_frames_of_the_machines_own_length() {
+        for (name, timing) in MACHINES {
+            let mut clock = Clock::with_timing(timing);
+            assert_eq!(clock.t_states(), 0, "{name}");
+            clock.advance(timing.frame_t_states() * 3 + 7);
+            assert_eq!(
+                clock.t_states(),
+                u64::from(timing.frame_t_states()) * 3 + 7,
+                "{name}"
+            );
+        }
+        // The distinction that makes this worth having over `frames * T_STATES_PER_FRAME`:
+        // the two machines' frames are different lengths, so a shared constant would put a
+        // 128's absolute time 3060 T-states out after three frames.
+        let mut one_two_eight = Clock::with_timing(Timing::SPECTRUM_128);
+        one_two_eight.advance(Timing::SPECTRUM_128.frame_t_states() * 3);
+        assert_ne!(
+            one_two_eight.t_states(),
+            u64::from(T_STATES_PER_FRAME) * 3,
+            "a 48K frame is not a 128 frame"
+        );
+    }
+
+    #[test]
+    fn absolute_time_moves_backwards_at_exactly_the_two_places_that_are_not_elapsed_time() {
+        // Named rather than assumed, because anything integrating over this clock has to
+        // handle it. `Audio::rebase` is what does.
+        let mut clock = Clock::new();
+        clock.advance(T_STATES_PER_FRAME + 5_000);
+        let before = clock.t_states();
+        clock.set_frame_t_state(10);
+        assert!(clock.t_states() < before, "a restore moves it back");
+        assert_eq!(clock.t_states(), u64::from(T_STATES_PER_FRAME) + 10);
+        // And a reset builds a fresh clock rather than moving this one, which is the other.
+        assert_eq!(Clock::new().t_states(), 0);
     }
 
     #[test]

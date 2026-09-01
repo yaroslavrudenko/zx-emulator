@@ -76,9 +76,13 @@ const ORIGIN: u16 = 0x4321;
 /// against, since the whole register was unimplemented until recently.
 const POISON: u16 = 0xA5C3;
 
-/// Assemble `bytes` at [`ORIGIN`] with the given registers, and seed [`POISON`].
-fn machine_with(bytes: &[u8], registers: Registers) -> Machine {
-    let mut machine = Machine::load(&Setup {
+/// Where the tests whose operand arrives from memory rather than from the instruction stream
+/// put their stack, clear of [`ORIGIN`] and of every target below.
+const STACK: u16 = 0x8000;
+
+/// The program image every test starts from: `bytes` assembled at [`ORIGIN`], with `PC` there.
+fn program(bytes: &[u8], registers: Registers) -> Setup {
+    Setup {
         name: String::from("memptr_rules"),
         registers: Registers {
             pc: ORIGIN,
@@ -89,9 +93,45 @@ fn machine_with(bytes: &[u8], registers: Registers) -> Machine {
             start: ORIGIN,
             bytes: bytes.to_vec(),
         }],
-    });
+    }
+}
+
+/// Load a setup and seed [`POISON`].
+///
+/// The one place in this file the latch is primed, so a test cannot be written that forgets
+/// to — and against a zeroed latch half these assertions would pass on a handler that wrote
+/// nothing at all.
+fn poisoned(setup: Setup) -> Machine {
+    let mut machine = Machine::load(&setup);
     machine.set_memptr(POISON);
     machine
+}
+
+/// Assemble `bytes` at [`ORIGIN`] with the given registers, and seed [`POISON`].
+fn machine_with(bytes: &[u8], registers: Registers) -> Machine {
+    poisoned(program(bytes, registers))
+}
+
+/// [`machine_with`], with `stacked` sitting at [`STACK`] and `SP` pointing at it.
+///
+/// The returns and `EX (SP),HL` take their operand off the stack, so the value they latch is
+/// one no part of their encoding could have produced — which is the whole reason those rules
+/// are worth asserting separately from the jumps'. `SP` is set here rather than by each caller
+/// because a stacked word and a stack pointer that disagree would make every one of those
+/// assertions vacuous.
+fn machine_with_stack(bytes: &[u8], registers: Registers, stacked: u16) -> Machine {
+    let mut setup = program(
+        bytes,
+        Registers {
+            sp: STACK,
+            ..registers
+        },
+    );
+    setup.memory.push(MemoryBlock {
+        start: STACK,
+        bytes: stacked.to_le_bytes().to_vec(),
+    });
+    poisoned(setup)
 }
 
 /// Assemble `bytes`, run one instruction, and report `MEMPTR`.
@@ -341,6 +381,35 @@ fn add_ix_rr_takes_ix_because_the_prefix_moves_the_destination() {
     );
 }
 
+/// `F` with the carry flag set, so `ADC` takes a third operand into its sum.
+const CARRY_SET: u16 = 0x0001;
+
+#[test]
+fn adc_hl_rr_takes_the_destination_before_the_addition() {
+    // The third encoding of the one arithmetic rule, and it had no assertion of its own while
+    // `ADD` and `SBC` each had one: "ADD/ADC/SBC rp1,rp2 — MEMPTR = rp1_before_operation + 1".
+    // `ED` ignores an index prefix, so `rp1` here is always HL — unlike `Cpu::add_pair`,
+    // whose destination the prefix does move.
+    //
+    // The carry is set so the sum lands further from the augend than a plain `ADD` would put
+    // it, and the operands are chosen so the three candidate answers are three numbers.
+    let memptr = memptr_after(
+        &[0xED, 0x4A], // ADC HL,BC
+        Registers {
+            af: CARRY_SET,
+            hl: 0x2000,
+            bc: 0x3010,
+            ..Registers::default()
+        },
+    );
+
+    assert_eq!(
+        0x2001, memptr,
+        "the latch takes HL as it was, plus one. 0x5011 would be the sum plus one — the same \
+         code with the write moved after the addition — and 0x3011 the addend's"
+    );
+}
+
 #[test]
 fn sbc_hl_rr_takes_the_minuend_and_not_the_difference() {
     // Subtraction is no exception to the one arithmetic rule: the latch takes `rp1` before the
@@ -491,6 +560,86 @@ fn ret_cc_leaves_the_latch_alone_when_the_branch_is_not_taken() {
     assert_eq!(POISON, machine.memptr());
 }
 
+/// The address the return family finds on the stack.
+///
+/// Unrelated to [`STACK`] in both bytes, so *"latched the address it popped from"* and
+/// *"latched `SP` afterwards"* are each a different number from the rule — and unrelated to
+/// [`ORIGIN`], so *"latched its own instruction address"* is too.
+const RETURN_TARGET: u16 = 0x2F8D;
+
+#[test]
+fn ret_latches_the_address_it_returns_to() {
+    // "JR/DJNZ/RET/RETI/RST (jumping to addr) — MEMPTR = addr". `RET`'s address comes off the
+    // stack rather than out of its own encoding, which is what makes this assertion possible
+    // at all: a one-byte instruction contains no operand a wrong rule could have latched
+    // instead, so every wrong answer is a *different* number rather than a coincidence.
+    let mut machine = machine_with_stack(&[0xC9], Registers::default(), RETURN_TARGET);
+    machine.step();
+
+    assert_eq!(
+        RETURN_TARGET,
+        machine.snapshot().0.pc,
+        "precondition failed: the return did not happen, so this proves nothing"
+    );
+    assert_eq!(
+        RETURN_TARGET,
+        machine.memptr(),
+        "RET latches where it returns to. {STACK:#06X} would be the address it popped from, \
+         {:#06X} the stack pointer afterwards, and {POISON:#06X} a handler that wrote nothing",
+        STACK.wrapping_add(2),
+    );
+}
+
+#[test]
+fn ret_cc_latches_its_target_when_the_branch_is_taken() {
+    // The complement of `ret_cc_leaves_the_latch_alone_when_the_branch_is_not_taken`, and the
+    // half that has to exist for either to mean anything: the untaken case reads `POISON` just
+    // as happily when the taken path writes nothing at all.
+    let mut machine = machine_with_stack(
+        &[0xC8], // RET Z
+        Registers {
+            af: ZERO_SET,
+            ..Registers::default()
+        },
+        RETURN_TARGET,
+    );
+    machine.step();
+
+    assert_eq!(
+        RETURN_TARGET,
+        machine.snapshot().0.pc,
+        "precondition failed: the return was not taken"
+    );
+    assert_eq!(
+        RETURN_TARGET,
+        machine.memptr(),
+        "a taken RET cc latches like an unconditional one — the condition governs whether the \
+         stack is read, and the latch follows the read"
+    );
+}
+
+#[test]
+fn reti_and_retn_latch_the_address_they_return_to() {
+    // "MEMPTR = addr, as for RET" — the document lists `RETI` beside it. Both encodings share
+    // one handler, so asserting the two together is what pins that they still do.
+    let mut reti = machine_with_stack(&[0xED, 0x4D], Registers::default(), RETURN_TARGET);
+    reti.step();
+    let mut retn = machine_with_stack(&[0xED, 0x45], Registers::default(), RETURN_TARGET);
+    retn.step();
+
+    assert_eq!(
+        RETURN_TARGET,
+        reti.snapshot().0.pc,
+        "precondition failed: RETI did not return"
+    );
+    assert_eq!(RETURN_TARGET, reti.memptr(), "RETI");
+    assert_eq!(
+        RETURN_TARGET,
+        retn.memptr(),
+        "RETN takes the same rule through the same handler"
+    );
+}
+
 #[test]
 fn rst_latches_its_page_zero_destination() {
     // "JR/DJNZ/RET/RETI/RST (jumping to addr) — MEMPTR = addr". `RST` has no operand fetch, so
@@ -529,34 +678,21 @@ fn ex_sp_hl_latches_the_value_that_came_off_the_stack() {
     // "EX (SP),rp — MEMPTR = rp value after the operation". The one rule whose operand is a
     // *value* rather than an address. HL, SP and the stacked word are all different, so taking
     // any of the other two is caught.
-    let mut machine = Machine::load(&Setup {
-        name: String::from("memptr_rules"),
-        registers: Registers {
-            pc: ORIGIN,
+    let mut machine = machine_with_stack(
+        &[0xE3], // EX (SP),HL
+        Registers {
             hl: 0x1111,
-            sp: 0x8000,
             ..Registers::default()
         },
-        state: State::default(),
-        memory: vec![
-            MemoryBlock {
-                start: ORIGIN,
-                bytes: vec![0xE3], // EX (SP),HL
-            },
-            MemoryBlock {
-                start: 0x8000,
-                bytes: vec![0xCD, 0xAB], // 0xABCD, little end first
-            },
-        ],
-    });
-    machine.set_memptr(POISON);
+        0xABCD,
+    );
     machine.step();
 
     assert_eq!(
         0xABCD,
         machine.memptr(),
-        "0x1111 would be the outgoing HL and 0x8000 the stack address; the rule takes the \
-         incoming value"
+        "0x1111 would be the outgoing HL and {STACK:#06X} the stack address; the rule takes \
+         the incoming value"
     );
     assert_eq!(
         0xABCD,
@@ -756,6 +892,59 @@ fn the_last_iteration_of_an_inir_takes_the_ini_rule() {
     );
 }
 
+#[test]
+fn a_repeating_otir_takes_its_own_instruction_address_plus_one() {
+    // **The half of the repeat rule that no oracle in this project reaches.** The exerciser
+    // grades the input forms through a self-overwriting `->NOP'` trick that has no output
+    // counterpart, so `OTIR` and `OTDR` have no group — they are covered by
+    // `Cpu::repeat_block`'s single write and graded, until this test, by nothing at all.
+    //
+    // That matters more here than it would for a rule with a document behind it. The uniform
+    // repeat rule contradicts its own primary source (see
+    // `the_io_block_repeat_takes_the_instruction_address_against_the_2006_document`), and the
+    // handler *did* once carry the per-family exception the 2006 document asks for. If it were
+    // reintroduced for the outputs alone, every other instrument in this repository would stay
+    // green.
+    let memptr = memptr_after(
+        &[0xED, 0xB3], // OTIR
+        Registers {
+            bc: 0x0234, // B = 2, so this iteration repeats
+            hl: 0x6000,
+            ..Registers::default()
+        },
+    );
+
+    assert_eq!(
+        ORIGIN + 1,
+        memptr,
+        "a repeating OTIR latches its instruction address plus one; 0x0135 is what OUTI's own \
+         port rule would leave if the repeat wrote nothing over it"
+    );
+}
+
+#[test]
+fn the_last_iteration_of_an_otir_takes_the_outi_rule_and_otdr_the_outd_one() {
+    // The complement, and what keeps the correction above narrow at the one end of the block
+    // families no oracle can see: an iteration that stops takes the plain port rule, and the
+    // two directions differ by two.
+    let registers = Registers {
+        bc: 0x0134, // B = 1, so both stop here; the port is 0x0034 once B has fallen
+        hl: 0x6000,
+        ..Registers::default()
+    };
+
+    assert_eq!(
+        0x0035,
+        memptr_after(&[0xED, 0xB3], registers), // OTIR
+        "the stopping iteration takes OUTI's port + 1"
+    );
+    assert_eq!(
+        0x0033,
+        memptr_after(&[0xED, 0xBB], registers), // OTDR
+        "and OTDR's takes OUTD's port - 1"
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // The port group addressed by BC
 // ---------------------------------------------------------------------------------------
@@ -806,4 +995,155 @@ fn an_indexed_access_latches_its_effective_address() {
         },
     );
     assert_eq!(0x5FFE, memptr);
+}
+
+// ---------------------------------------------------------------------------------------
+// Interrupt acceptance, which is a `CALL` the device asked for
+// ---------------------------------------------------------------------------------------
+
+/// Where mode 2's vector-table entry sits.
+///
+/// `I` and the byte the device supplies are taken from its two halves rather than written
+/// separately, so the pointer the test *builds* and the pointer the test *names as a wrong
+/// answer* cannot drift apart.
+const VECTOR_POINTER: u16 = 0x3040;
+
+/// The address mode 2's table entry holds.
+///
+/// No arithmetic in this file — and none in the interrupt path — can produce it from anything
+/// else in the setup, so a latch holding it can only have been loaded from the table.
+const VECTOR_TARGET: u16 = 0x9ABC;
+
+/// A machine holding `state`, stopped at [`ORIGIN`] with a stack, mode 2's vector table
+/// loaded, and [`POISON`] in the latch.
+///
+/// The table is loaded whichever mode is asked for. The modes that ignore it are unaffected by
+/// its presence, and one shape for all of these tests keeps the difference between them down to
+/// the one thing under test. The `NOP` at [`ORIGIN`] never executes: an interrupt is offered to
+/// a stopped CPU, and `PC` is there only to be the return address.
+fn machine_for_interrupt(state: State) -> Machine {
+    let mut setup = program(
+        &[0x00],
+        Registers {
+            sp: STACK,
+            ..Registers::default()
+        },
+    );
+    setup.state = state;
+    setup.memory.push(MemoryBlock {
+        start: VECTOR_POINTER,
+        bytes: VECTOR_TARGET.to_le_bytes().to_vec(),
+    });
+    poisoned(setup)
+}
+
+#[test]
+fn an_accepted_interrupt_latches_the_address_it_vectors_to() {
+    // Boo-boo and Kladov give the whole rule in three words — "as usual CALL" — and an accepted
+    // interrupt is exactly that: the device asks for a call and the CPU performs one, so the
+    // latch takes the destination as `CALL nn`'s does. Mode 1 vectors to 0x0038 whatever byte
+    // the device puts on the bus, which is why the byte here is deliberately not 0xFF's
+    // `RST 38h`: under mode 1 it cannot matter, and a passing test must not depend on it.
+    let mut machine = machine_for_interrupt(State {
+        iff1: true,
+        im: 1,
+        ..State::default()
+    });
+    let t_states = machine.interrupt(0x00);
+
+    assert_ne!(
+        0, t_states,
+        "precondition failed: the offer was declined, so nothing was accepted to observe"
+    );
+    assert_eq!(
+        0x0038,
+        machine.snapshot().0.pc,
+        "precondition: mode 1 vectors to 0x0038"
+    );
+    assert_eq!(
+        0x0038,
+        machine.memptr(),
+        "an accepted interrupt latches its vector. {POISON:#06X} would be an acceptance that \
+         wrote nothing and {ORIGIN:#06X} the return address it stacked instead"
+    );
+}
+
+#[test]
+fn a_mode_2_interrupt_latches_the_address_it_read_and_not_the_table_pointer() {
+    // The discriminating case, and the reason the core reads the value back from `PC` rather
+    // than from the dispatch it resolved: in mode 2 the destination is not known until the
+    // vector table has been read, so a rule written to latch what the *device* named would
+    // latch the pointer. Mode 1 cannot tell those two apart — its pointer and its destination
+    // are the same fixed number — and this is the mode where they are different numbers.
+    let [page, low] = VECTOR_POINTER.to_be_bytes();
+    let mut machine = machine_for_interrupt(State {
+        iff1: true,
+        im: 2,
+        i: page,
+        ..State::default()
+    });
+    machine.interrupt(low);
+
+    assert_eq!(
+        VECTOR_TARGET,
+        machine.snapshot().0.pc,
+        "precondition: the vector table was read"
+    );
+    assert_eq!(
+        VECTOR_TARGET,
+        machine.memptr(),
+        "mode 2 latches the address its table named; {VECTOR_POINTER:#06X} is the table entry's \
+         own address, which is what the device actually supplied"
+    );
+}
+
+#[test]
+fn a_declined_interrupt_leaves_the_latch_alone() {
+    // The complement, and it guards a property the handler is built around rather than a
+    // MEMPTR rule of its own: an interrupt is accepted whole or not at all. A latch written
+    // before the accept/decline test would be a half-accepted interrupt leaving a trace, and
+    // this is the assertion that would notice.
+    let mut machine = machine_for_interrupt(State {
+        iff1: false,
+        im: 1,
+        ..State::default()
+    });
+    let t_states = machine.interrupt(0x00);
+
+    assert_eq!(
+        0, t_states,
+        "precondition failed: the offer was accepted, so this proves nothing about declining"
+    );
+    assert_eq!(
+        ORIGIN,
+        machine.snapshot().0.pc,
+        "precondition: a declined interrupt does not move PC"
+    );
+    assert_eq!(
+        POISON,
+        machine.memptr(),
+        "a declined offer must leave MEMPTR exactly as it found it"
+    );
+}
+
+#[test]
+fn an_nmi_latches_its_fixed_vector() {
+    // An NMI is always accepted and always vectors to 0x0066, so unlike the maskable path it
+    // has no mode to vary — which makes the whole of its rule the one write. `IFF1` is left
+    // clear on purpose: an NMI does not consult it, and a test that set it would leave the
+    // reader unable to tell whether that mattered.
+    let mut machine = machine_for_interrupt(State::default());
+    machine.nmi();
+
+    assert_eq!(
+        0x0066,
+        machine.snapshot().0.pc,
+        "precondition: the NMI vectored to 0x0066"
+    );
+    assert_eq!(
+        0x0066,
+        machine.memptr(),
+        "an NMI latches its vector as an accepted interrupt does; {POISON:#06X} would be a \
+         handler that wrote nothing"
+    );
 }

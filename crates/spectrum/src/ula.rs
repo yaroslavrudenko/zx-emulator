@@ -31,9 +31,15 @@
 //! | Internal-cycle contention | yes, per T-state |
 //! | I/O contention | yes, the four-case ULA port pattern |
 //! | Keyboard | yes |
-//! | Border colour | latched, but sampled once per frame — see [`crate::screen`] |
+//! | Kempston joystick | **yes** — port `0x1F`, five switches, active high; see [`crate::joystick`] |
+//! | The Kempston **decode** | **primary** — `A5 = A6 = A7 = 0` from the Issue 4 (1989) schematic, so the window is `0x00..=0x1F`; see [`crate::joystick::KEMPSTON_PORT_MASK`] |
+//! | Border colour | latched, **and recorded per rendered row** — a tape load shows its bands; see [`crate::screen::BorderTrace`] |
 //! | Floating bus | **no** — an undecoded port reads [`FLOATING_BUS_BYTE`] |
-//! | Speaker and `MIC` | **no** — bits 3 and 4 of a `0xFE` write are discarded |
+//! | Speaker | **yes** — bit 4 of a `0xFE` write drives the beeper; M7 closed this |
+//! | `MIC` | **no** — bit 3 is still discarded, and what that costs is in [`MIC_BIT`] |
+//! | The `0xFE` port's **four** output levels | **no** — the speaker is two-level. `MIC` shifting it is a magnitude with no source |
+//! | AY-3-8912 | **yes on a 128, absent on a 48K** — `0xFFFD` select and read, `0xBFFD` write; see [`crate::ay`] |
+//! | The AY's **address decode** | **derived, and the weakest claim in M7** — no source states it; see [`AY_PORT_MASK`] |
 //! | `EAR` input | **yes** — bit 6 of a `0xFE` read follows [`crate::tape::Tape::level`] |
 //! | Issue 2 / issue 3 `EAR` readback | **no** — writing bit 3 or 4 does not change what bit 6 reads |
 //! | Paging port `0x7FFD` writes | **yes**, on the partial decode — A15 and A1 both reset |
@@ -154,9 +160,12 @@
 
 use z80::{Bus, MEMORY_ACCESS_T_STATES, OPCODE_FETCH_T_STATES, PORT_ACCESS_T_STATES};
 
+use crate::audio::{Audio, Sample};
+use crate::ay::Ay;
+use crate::joystick::{Joystick, KEMPSTON_PORT_MASK, KEMPSTON_PORT_SELECT};
 use crate::keyboard::Keyboard;
 use crate::memory::Memory;
-use crate::screen::Colour;
+use crate::screen::{BorderTrace, Colour};
 use crate::tape::Tape;
 use crate::timing::Clock;
 
@@ -218,8 +227,85 @@ const _: () = assert!(
     "0x7FFD is not a border write"
 );
 
+/// The AY answers three address lines: **A15 and A1**, plus **A14** to choose which of its two
+/// ports.
+///
+/// **This is the least-supported claim in M7 and it is written here rather than buried.**
+/// `docs/M7.md` says so in terms: *"no source was found stating which lines decode `0xFFFD`
+/// and `0xBFFD`"*, and this mask is inferred from the two well-attested addresses plus the
+/// style of the `0x7FFD` decode beside it — which **does** have a primary witness in the
+/// Sinclair *Servicing Manual*, and this does not. Treat it as derived, and treat a game that
+/// misbehaves reaching the AY some unusual way as evidence about this constant first.
+///
+/// What the inference rests on, stated so a reader can weigh it rather than take it:
+/// `0xFFFD` and `0xBFFD` differ in **A14 alone**, both have A15 set and A1 clear, and the
+/// 128's other partially-decoded ports each answer a two- or three-line pattern of exactly
+/// this shape. That is consistent with the addresses and it is not a citation.
+const AY_PORT_MASK: u16 = 0xC002;
+
+/// The address the AY's register-select and register-read port answers: A15 and A14 set.
+const AY_SELECT_PORT: u16 = 0xC000;
+
+/// The address the AY's register-write port answers: A15 set, A14 clear.
+const AY_WRITE_PORT: u16 = 0x8000;
+
+const _: () = assert!(
+    0xFFFD & AY_PORT_MASK == AY_SELECT_PORT,
+    "the select port decodes"
+);
+const _: () = assert!(
+    0xBFFD & AY_PORT_MASK == AY_WRITE_PORT,
+    "the write port decodes"
+);
+const _: () = assert!(AY_SELECT_PORT != AY_WRITE_PORT, "A14 tells them apart");
+
+// **The AY and the paging port cannot collide, and this is the assertion that says so once so
+// nobody re-derives it.** The paging port needs A15 *reset* and both AY ports need it *set*,
+// so the two families are disjoint on a line neither leaves free. `M7.md` Decision 2 calls
+// this a genuine structural guarantee and it is worth having the compiler hold it.
+const _: () = assert!(AY_SELECT_PORT & PAGING_PORT_SELECT != 0);
+const _: () = assert!(AY_WRITE_PORT & PAGING_PORT_SELECT != 0);
+
+// The AY and the ULA **do** collide, on any address with A0, A1 reset and A15 set — `0xFFFC`
+// is one. Neither published address is such an address, because both have A0 set, so this is
+// unreachable by software that addresses either port the ordinary way. It is the same shape
+// as the ULA/paging overlap two constants above, and it is handled the same way: `out_port` is
+// independent `if`s so both devices act, and `in_port` fixes an order and says why at the site.
+const _: () = assert!(0xFFFC & ULA_PORT_SELECT == 0 && 0xFFFC & AY_PORT_MASK == AY_SELECT_PORT);
+const _: () = assert!(0xFFFD & ULA_PORT_SELECT != 0, "0xFFFD is not a ULA port");
+const _: () = assert!(0xBFFD & ULA_PORT_SELECT != 0, "0xBFFD is not a ULA port");
+
 /// Bits of a `0xFE` write that set the border colour.
 const BORDER_MASK: u8 = 0x07;
+
+/// Bit 4 of a `0xFE` write: the speaker.
+///
+/// **The 48K's entire sound output**, and every 48K game's music. It is the same byte the
+/// border comes out of bits 0–2 of, which is why the beeper is a `crates/spectrum` concern —
+/// being audible does not make a ULA output a frontend's business. `docs/M8.md` Decision 9
+/// ruled it here and this constant is what that ruling landed as.
+const SPEAKER_BIT: u8 = 0x10;
+
+/// Bit 3 of a `0xFE` write: the `MIC` output.
+///
+/// **Still not modelled, and it is a narrower gap than it was.** `MIC` is tape *save*, which
+/// no milestone has claimed. What it also does — on real hardware it shifts the speaker's
+/// output level slightly, giving the port four output levels rather than two — is a
+/// **magnitude** with no source this project can adjudicate, and inventing a ratio between two
+/// bits would be exactly the kind of plausible number `docs/M7.md` Decision 6 rules out. So
+/// the speaker follows bit 4 alone and this constant exists to name what is left out rather
+/// than to leave it unnamed.
+///
+/// `crates/spectrum/tests/tape_rom_timings.rs` watches this bit from outside the machine, and
+/// its account is unaffected: the ROM's `SA-BYTES` toggles `MIC` and the border together and
+/// leaves bit 4 alone, so tape saving still emits no beeper edges.
+const MIC_BIT: u8 = 0x08;
+
+const _: () = assert!(
+    SPEAKER_BIT & BORDER_MASK == 0,
+    "the speaker is not a border bit"
+);
+const _: () = assert!(SPEAKER_BIT & MIC_BIT == 0, "and it is not MIC either");
 
 /// Bits 5 and 7 of a `0xFE` read, which nothing drives.
 ///
@@ -242,6 +328,14 @@ const _: () = assert!(EAR_BIT & UNDRIVEN_INPUT_BITS == 0);
 pub struct Ula {
     memory: Memory,
     keyboard: Keyboard,
+    /// The Kempston joystick, which is an interface on the bus rather than a key.
+    ///
+    /// Always present, on both machines. A real Spectrum has one only if somebody plugged it
+    /// in, and modelling that would mean an `Option` whose `None` differs from its `Some`
+    /// **only** in what an undecoded port reads — which is a distinction no software can act
+    /// on, since a game that reads `0x1F` and finds nothing held behaves identically either
+    /// way. See `crate::joystick`.
+    joystick: Joystick,
     clock: Clock,
     /// T-states of the machine cycle in progress whose contention is already charged.
     ///
@@ -251,8 +345,20 @@ pub struct Ula {
     /// spending it. That costs nothing to such a caller, who is reading a value rather than
     /// measuring time, and the next transfer overwrites it.
     covered_t_states: u8,
-    border: Colour,
+    /// Where the border was as the beam went down the frame, and what it is now.
+    ///
+    /// **One field, not two.** The colour showing now and the record of where it changed are
+    /// one datum seen at two resolutions, and [`crate::screen::BorderTrace`] owns both — so
+    /// there is no pair to disagree. [`Ula::border`] reads through it.
+    border: BorderTrace,
     tape: Tape,
+    /// The machine's sound: the beeper, the AY on a machine that has one, and the samples
+    /// they have produced.
+    ///
+    /// **Nothing in [`Ula::tick`] touches this**, and that is the whole of M7's sound design
+    /// on the hot path — see [`crate::audio`] for why generating late is not merely cheaper
+    /// but produces an identical stream.
+    audio: Audio,
 }
 
 impl Ula {
@@ -266,14 +372,20 @@ impl Ula {
     /// merely unlikely.
     #[must_use]
     pub fn new(memory: Memory) -> Self {
-        let clock = Clock::with_timing(memory.model().timing());
+        let model = memory.model();
         Self {
             memory,
             keyboard: Keyboard::new(),
-            clock,
+            joystick: Joystick::new(),
+            clock: Clock::with_timing(model.timing()),
             covered_t_states: 0,
-            border: Colour::BLACK,
+            border: BorderTrace::new(Colour::BLACK),
             tape: Tape::default(),
+            // The sound chip comes from the same value the clock and the map do, for the same
+            // reason: a machine with a 48K's memory and a 128's chip is a machine nobody
+            // built, and taking every model-dependent thing from one place makes it
+            // unrepresentable rather than merely unlikely.
+            audio: Audio::new(model),
         }
     }
 
@@ -291,11 +403,17 @@ impl Ula {
     /// machine's reset value is the value it already holds.
     ///
     /// The clock keeps its machine's geometry: a reset is not a change of model.
+    /// **Sound is reset too**, which the sentence above about RAM and the tape does not cover
+    /// and which is a different kind of claim: the reset line genuinely reaches the AY, so a
+    /// 128 that was playing goes quiet. What is *not* discarded is the sample buffer — those
+    /// samples describe sound the machine really made before the button was pressed, and a
+    /// consumer that has not drained them yet is owed them.
     pub fn reset(&mut self) {
         self.clock = Clock::with_timing(self.clock.timing());
         self.covered_t_states = 0;
-        self.border = Colour::BLACK;
+        self.border.set(Colour::BLACK);
         self.memory.reset();
+        self.audio.reset();
     }
 
     /// The memory this ULA fronts.
@@ -320,6 +438,17 @@ impl Ula {
         &mut self.keyboard
     }
 
+    /// The Kempston joystick.
+    #[must_use]
+    pub fn joystick(&self) -> Joystick {
+        self.joystick
+    }
+
+    /// The Kempston joystick, mutably — how a frontend pushes it.
+    pub fn joystick_mut(&mut self) -> &mut Joystick {
+        &mut self.joystick
+    }
+
     /// The frame clock.
     #[must_use]
     pub fn clock(&self) -> Clock {
@@ -329,7 +458,60 @@ impl Ula {
     /// The colour last written to the border.
     #[must_use]
     pub fn border(&self) -> Colour {
-        self.border
+        self.border.current()
+    }
+
+    /// Where the border was as the beam went down the frame.
+    ///
+    /// `pub(crate)` because the only caller is [`crate::Spectrum::render`], which is what a
+    /// frontend already calls — so the stripes arrive with **no** public API change at all.
+    /// A public accessor here would be a type nothing outside this crate can do anything
+    /// with, which `docs/M6.md` Decision 1 calls decoration.
+    pub(crate) fn border_trace(&self) -> &BorderTrace {
+        &self.border
+    }
+
+    /// The sound chip, on a machine that has one.
+    ///
+    /// `None` on a 48K, which does not contain the chip at all — so the `Option` is the
+    /// machine's shape rather than a caller's convenience. Everything an [`Ay`] exposes is
+    /// read-only, because the only things that may change it are a guest's `OUT` and a
+    /// snapshot restore, and both already have a route.
+    #[must_use]
+    pub fn ay(&self) -> Option<&Ay> {
+        self.audio.ay()
+    }
+
+    /// The sound chip, mutably. The snapshot applier's route, and nothing else's.
+    pub(crate) fn ay_mut(&mut self) -> Option<&mut Ay> {
+        self.audio.ay_mut()
+    }
+
+    /// Generate the sound up to now and hand over everything since the last call.
+    ///
+    /// **The only route to the machine's audio**, and the whole of the consumer's job is to
+    /// call it once a frame and copy what it returns. It borrows rather than allocating; the
+    /// buffer behind it is allocated once, at construction, and refilled in place.
+    ///
+    /// The two sources arrive **separate** — [`crate::audio::Sample`] carries the AY's three
+    /// channels and the beeper as distinct numbers — because mixing them is the frontend's
+    /// job and because the AY's own gate must not be falsifiable by the beeper.
+    ///
+    /// Calling it twice in a row yields the second call nothing, which is what taking means.
+    /// A consumer that calls it less often than once a frame loses samples and can find out
+    /// how many from [`Ula::dropped_samples`].
+    pub fn take_samples(&mut self) -> &[Sample] {
+        let now = self.clock.t_states();
+        self.audio.take(now)
+    }
+
+    /// Samples lost because [`Ula::take_samples`] was not called often enough.
+    ///
+    /// Zero for a consumer draining once a frame. Reported rather than swallowed, because an
+    /// unexplained gap in audio gets blamed on everything except the buffer that caused it.
+    #[must_use]
+    pub fn dropped_samples(&self) -> u64 {
+        self.audio.dropped()
     }
 
     /// Whether the ULA is holding `/INT` low right now.
@@ -364,7 +546,11 @@ impl Ula {
     /// It does not touch the clock, the tape, or the cycle bookkeeping, because setting state
     /// is not elapsed time.
     pub(crate) fn set_border(&mut self, border: Colour) {
-        self.border = border;
+        // Through `BorderTrace::set`, which drops the record as well as setting the colour:
+        // the machine being restored into did not paint the bands the saved machine did, and
+        // keeping them would draw a history that never happened here. Same reason this setter
+        // exists at all — a restore is not elapsed time.
+        self.border.set(border);
     }
 
     /// Put the clock at `frame_t_state`, leaving the frame counter alone.
@@ -381,8 +567,15 @@ impl Ula {
     /// [`crate::screen::FLASH_FRAMES`] frames after loading.
     ///
     /// The tape does not move either: restoring a snapshot is not elapsed time.
+    /// **The audio's time base moves with it, and does not generate a sample.** This is the
+    /// one operation that can move the clock *backwards*, and an integrator that met a
+    /// backwards jump would either render nothing forever or manufacture a frame of sound out
+    /// of the discontinuity. `Audio::rebase` is the explicit re-basing that avoids both, and
+    /// it is called here rather than hidden inside the generator so that a future caller who
+    /// moves the clock has to think about it.
     pub(crate) fn set_frame_t_state(&mut self, frame_t_state: u32) {
         self.clock.set_frame_t_state(frame_t_state);
+        self.audio.rebase(self.clock.t_states());
     }
 
     /// Put `tape` in the drive, stopped and wound to wherever it stands.
@@ -506,9 +699,41 @@ impl Bus for Ula {
         self.memory.write(address, value);
     }
 
+    /// The AY is asked **before** the floating-bus fallback, and the order is load-bearing.
+    ///
+    /// `0xFFFD` has A0 set, so it falls into the "no ULA port, therefore floating bus" arm
+    /// that used to be the second line of this function. An AY arm placed after it would
+    /// never run, and the machine would read as *"the sound chip is write-only"* — which is
+    /// silent, plausible, and exactly the kind of defect that shows up as one game misbehaving
+    /// years later. `docs/M7.md` Decision 2 names this ordering specifically.
+    ///
+    /// **Where the two devices genuinely collide, this fixes an order and that is a ruling.**
+    /// An address with A0 and A1 reset and A15, A14 set — `0xFFFC`, say — is claimed by the
+    /// ULA *and* by the AY, and on the hardware both drive the data bus at once. There is no
+    /// right answer to be found by thinking harder about it. The AY wins here because it
+    /// decodes three address lines to the ULA's one, so giving it priority changes the fewest
+    /// addresses; nothing in reach exercises the case, because every published address for
+    /// either port has A0 the other way.
     #[inline]
     fn in_port(&mut self, port: u16) -> u8 {
         self.begin_port_cycle(port);
+        if port & AY_PORT_MASK == AY_SELECT_PORT
+            && let Some(ay) = self.audio.ay()
+        {
+            return ay.read();
+        }
+        // **The joystick answers before the ULA, and that is a ruling.** Its decode is three
+        // address lines to the ULA's one, so it claims every *even* port from `0x00` to `0x1E`
+        // as well — an overlap that is real on hardware, where a fitted Kempston and the ULA
+        // would both drive the data bus. There is no right answer to find by thinking harder,
+        // so the narrower decode wins, exactly as it does for the AY two arms below.
+        //
+        // Nothing in reach exercises it: the keyboard is scanned at `0xFE` and every
+        // "is any key down" idiom is `IN A,(0xFE)` with a high half, whose low byte has A5
+        // set. `tests/kempston.rs` pins the choice so it is not silently reversed.
+        if port & KEMPSTON_PORT_MASK == KEMPSTON_PORT_SELECT {
+            return self.joystick.read();
+        }
         if port & ULA_PORT_SELECT != 0 {
             return FLOATING_BUS_BYTE;
         }
@@ -525,23 +750,46 @@ impl Bus for Ula {
     fn out_port(&mut self, port: u16, value: u8) {
         self.begin_port_cycle(port);
         if port & ULA_PORT_SELECT == 0 {
-            // Bits 3 and 4 are `MIC` and the speaker, and both are still dropped.
+            // Bit 4 is the speaker and it is **no longer dropped**: this line's predecessor
+            // read *"discarded until M6 and M8 want them"*, `M8.md` Decision 9 overruled it —
+            // the beeper is a ULA output and therefore the machine's — and the comment then
+            // sat here for a milestone calling itself *"an open finding, not a deferral"*.
+            // It is closed. `MIC`, bit 3, is still dropped, and `MIC_BIT` says what that costs.
             //
-            // This line used to say *"discarded until M6 and M8 want them"*. `M8.md` Decision 9
-            // quotes it verbatim while overruling it: **the beeper is M7's**. It is bit 4 of the
-            // same `0xFE` write this function already takes the border out of bits 0-2 of, and
-            // being audible does not make it a frontend concern — M8 owns the audio *device* and
-            // the resampling to a host rate, not the source.
+            // `set_beeper` compares before it renders, so a border-only write — which is what
+            // almost every write to this port is — costs one comparison and no work.
             //
-            // So this is an **open finding, not a deferral**: M7 has landed and the bit is still
-            // dropped. (`MIC` is tape *save*. M6 loaded, and no milestone has claimed saving, so
-            // that half of the sentence named a milestone that was never going to want it.)
-            self.border = Colour::new(value & BORDER_MASK);
+            // **One write, one event, two consumers.** The border and the speaker come out of
+            // the same byte at the same instant, so the clock is read once and handed to both.
+            // What they need from it differs and that is why there is one *record* rather than
+            // two: the border must be remembered until something renders, so it has a history;
+            // the speaker is turned into samples immediately, so it has none. Keeping a shared
+            // log and deriving both from it was considered and rejected — the two have
+            // different lifetimes (a frame against a consumer's drain schedule) and different
+            // overflow semantics, and coupling them would let a display-shaped bound drop audio.
+            let colour = Colour::new(value & BORDER_MASK);
+            if colour != self.border.current() {
+                self.border.record(self.clock, colour);
+            }
+            self.audio
+                .set_beeper(value & SPEAKER_BIT != 0, self.clock.t_states());
         }
         if port & PAGING_PORT_SELECT == 0 {
             // A 48K absorbs this: it powers on with the lock bit set, and `Memory` needs no
             // model check to know that. `M7.md` Decision 1.
             self.memory.write_paging_port(value);
+        }
+        // The AY's two ports differ in A14 alone and both need A15 set, so neither can be the
+        // paging port above. They are independent `if`s for the same reason every other decode
+        // here is: on the hardware every device that matches answers, and a `match` on the port
+        // would silently pick one. A machine with no chip reaches nothing, which is what a
+        // 48K's `OUT (0xBFFD)` does.
+        if port & AY_PORT_MASK == AY_SELECT_PORT {
+            self.audio.select_ay(value);
+        }
+        if port & AY_PORT_MASK == AY_WRITE_PORT {
+            let now = self.clock.t_states();
+            self.audio.write_ay(value, now);
         }
     }
 

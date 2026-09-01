@@ -23,28 +23,40 @@ fn an_extension_names_the_format() {
 fn the_extension_is_matched_without_regard_to_case() {
     // `.TAP` and `.Z80` are how half the archives on the internet are named, and a
     // case-sensitive match would reject them with "not a file this emulator knows".
-    for path in ["GAME.TAP", "Game.Tap", "SAVE.Z80", "Fire.SNA", "48.ROM"] {
+    for path in [
+        "GAME.TAP",
+        "Game.Tap",
+        "SAVE.Z80",
+        "Fire.SNA",
+        "48.ROM",
+        "MANIC.TZX",
+        "Manic.Tzx",
+    ] {
         assert!(media::kind_of(path).is_some(), "{path}");
     }
     assert_eq!(media::kind_of("GAME.TAP"), Some(Kind::Tape));
     assert_eq!(media::kind_of("Fire.SNA"), Some(Kind::Sna));
+    assert_eq!(media::kind_of("MANIC.TZX"), Some(Kind::Tzx));
 }
 
 #[test]
 fn anything_else_is_refused_rather_than_guessed_at() {
-    // Including `.tzx`, which is a real tape format this emulator cannot read yet. Answering
-    // `Some(Tape)` for it would turn "unsupported format" into "corrupt tape".
-    for path in [
-        "notes.txt",
-        "game.tzx",
-        "archive.zip",
-        "noextension",
-        "",
-        ".",
-        "a.",
-    ] {
+    for path in ["notes.txt", "archive.zip", "noextension", "", ".", "a."] {
         assert_eq!(media::kind_of(path), None, "{path:?}");
     }
+}
+
+#[test]
+fn a_tzx_is_its_own_kind_and_not_a_tape() {
+    // `game.tzx` used to be in the list above, because answering `Some(Tape)` for a format that
+    // could not be read would have turned "unsupported format" into "corrupt tape". It reads now
+    // — and the distinction it was protecting still matters, pointing the other way: `Tzx` must
+    // not collapse into `Tape`, because `tzx::parse` needs the machine's `Model` and `tap::parse`
+    // does not. A `.tzx` sent to the `.tap` converter would fail on the signature, and one sent
+    // to the right converter with the wrong model would load and play at the wrong speed, which
+    // is far worse than a refusal.
+    assert_eq!(media::kind_of("game.tzx"), Some(Kind::Tzx));
+    assert_ne!(media::kind_of("game.tzx"), media::kind_of("game.tap"));
 }
 
 #[test]

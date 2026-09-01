@@ -7,16 +7,27 @@
 //!
 //! Files are told apart by extension, in any order: `.rom` builds the machine, `.tap` goes in
 //! the drive, `.z80` and `.sna` are restored over the top. With no ROM named, the machine is
-//! built from `testdata/roms/48.rom`.
+//! built from `testdata/roms/48.rom`. **Files can also be dropped on the window**, on every
+//! target, and go through the same two functions.
+//!
+//! In a browser the same files are named by the query string —
+//! `?rom=roms/48.rom&tape=games/thing.tap` — which becomes the same argument list this shell
+//! already reads. See [`frontend::host::arguments_from_query`] and `web/README.md`.
 //!
 //! | Key | |
 //! |---|---|
-//! | `Shift` / `Ctrl` | `CAPS SHIFT` / `SYMBOL SHIFT` — either hand |
+//! | `Shift` | `CAPS SHIFT` — either hand |
+//! | `Ctrl` or `Tab` | `SYMBOL SHIFT` — either hand, and `Tab` because a browser keeps `Ctrl`+digit for itself |
 //! | `Backspace`, arrows, `Escape`, `,` `.` `;` `'` `-` `=` `/` | the combination the Spectrum prints on the key |
 //! | `F1` | show or hide the pacing readout |
 //! | `F2` | save a `.z80` |
 //! | `F3` `F4` `F5` | tape play, stop, rewind |
 //! | `F6` | reset |
+//! | `F7` | what the arrow keys send — **starts on the setting for games**, and `F7` reaches the BASIC cursor keys |
+//!
+//! The arrows are the one choice this emulator cannot make once and be right about, because the
+//! Spectrum has no arrow keys and games disagree about what to read. See
+//! [`frontend::keymap::ARROW_SCHEMES`], which records what six games were disassembled to find.
 //!
 //! # This file is the untestable part, and it is kept thin on purpose
 //!
@@ -31,9 +42,11 @@ use std::time::Duration;
 
 use macroquad::prelude::*;
 
+use frontend::audio::{self, Resampler};
+use frontend::bundle;
 use frontend::keymap::Hotkey;
-use frontend::media::{self, Kind};
-use frontend::pacing::{Pacer, RateMeter};
+use frontend::media;
+use frontend::pacing::{LossMeter, Pacer, RateMeter};
 use frontend::viewport::Viewport;
 use frontend::{host, keymap, palette, viewport};
 use spectrum::screen::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -54,11 +67,91 @@ const INITIAL_SCALE: i32 = 3;
 /// Seconds each rate window covers. See [`RateMeter::new`].
 const RATE_WINDOW: f64 = 1.0;
 
+/// Seconds of lost frames the readout's colour looks back over. See [`LossMeter`].
+///
+/// Held separately from [`RATE_WINDOW`] rather than sharing it, though the two agree today. They
+/// are answers to different questions — how long a rate needs to read steadily, and how long a
+/// stall should stay visible after it stops — and one constant serving both would make a change to
+/// either silently move the other.
+///
+/// A second is the value both questions happen to land on. [`LossMeter`] spans the open window and
+/// the one before it, so the bar reddens on the frame a stall happens and clears between one and
+/// two seconds after the last lost frame: long enough that a person glancing at the bar sees it,
+/// short enough that it is plainly reporting *now* rather than *earlier*. Half a second clears
+/// before a glance lands; two seconds and the red has stopped meaning the present.
+const LOSS_WINDOW: f64 = 1.0;
+
 /// Height of the status bar, in window pixels.
 const STATUS_HEIGHT: f32 = 22.0;
 
+/// Left margin of every status row, in window pixels.
+const STATUS_MARGIN: f32 = 6.0;
+
+/// What the status line says before anything has happened.
+///
+/// # A page has no manual, so the manual is the first line of the status bar
+///
+/// `docs/M8.md` Decision 2 rules that `Tab` becomes a third alias for `SYMBOL SHIFT` because a
+/// browser takes `Ctrl`+`8` and `Ctrl`+`9` — which are `(` and `)`, which no BASIC program
+/// avoids — and then says what that ruling costs: *"The alias does not remove the sharp edge,
+/// it provides a way around it, and a person has to know the way around exists. That is a
+/// documentation problem with a real failure mode."*
+///
+/// A person who opened a URL never reads `README.md`. This line is where they find out, and it
+/// is shown on both targets rather than only in a browser: the alias exists on both, and a
+/// message that appears on one platform is a second thing to keep true.
+///
+/// # It said `F7 changes what the arrows do`, and that was not enough
+///
+/// It was true, it was on the screen from the first frame, and the owner still met a default
+/// that made Manic Miner's Willy jump on every arrow press with no idea he needed the key. The
+/// sentence told him a control **existed**; what he needed was a reason to reach for it, and
+/// *"changes what the arrows do"* reads as an option rather than as a fix.
+///
+/// So it now names the trade instead: the arrows start on the setting for **games**, and `F7` is
+/// where the BASIC cursor keys went. That is also the honest counterpart to moving the default —
+/// somebody who opens this to type BASIC has had something taken away, and this is the one place
+/// they are told where it is.
+///
+/// # It has a row to itself, because it did not fit on the shared one
+///
+/// Measured 2026-09-01, before this change: with the message appended to the readout the line was
+/// **178 characters**, and the window [`window_conf`] opens holds **136**. The last 42 characters
+/// were off the right-hand edge — the line stopped at *"F7 for the"*, cutting the sentence in half
+/// and taking `drop a .tap/.z80/.sna` off the screen entirely. The instruction written because a
+/// person could not discover the arrow key was itself undiscoverable, and it had been over the
+/// edge since well before this message grew: the readout alone spends 65 of the 136 columns.
+///
+/// Nothing in the repository could see it. `tests/on_screen_strings.rs` grades these strings for
+/// *drawable characters* and has no way to ask how **wide** they are, which is the same shape as
+/// the em-dash defect that file was written about — an assertion comparing a string to another
+/// string, when the thing that failed was the picture.
+///
+/// So the readout and the message are two rows now, and `mod tests` below measures both against
+/// the window rather than leaving it to somebody to notice on a screenshot.
+///
+/// The line break is inside a phrase rather than at a separator on purpose: `\` at the end of a
+/// Rust string literal eats the newline **and the next line's indentation**, so a break placed
+/// just before `-   drop` silently ate two of that separator's three spaces.
+const OPENING_MESSAGE: &str = "Tab or Ctrl = SYMBOL SHIFT   -   arrows are set for games; \
+     F7 for the BASIC cursor keys   -   drop a .tap/.z80/.sna";
+
 /// Point size of the status text.
 const STATUS_TEXT: f32 = 16.0;
+
+/// The second line [`complain`] draws, under whatever went wrong.
+///
+/// A constant rather than an inline literal so that `mod tests` can measure it. It is the same
+/// class of string as [`OPENING_MESSAGE`] — a fixed instruction that has to fit the window it is
+/// drawn in — and the same gate should cover both.
+///
+/// Neither "on the command line" nor "in the query string" alone: this window is the same binary
+/// in both places, it cannot tell which it is in without a `#[cfg]` this crate does not have, and
+/// a person reading it can. Naming both is the honest form and it is also the useful one —
+/// somebody who reached a broken page needs the URL shape, and `docs/M8.md` Decision 3 flagged
+/// the old line for saying only the other.
+const COMPLAIN_ADVICE: &str =
+    "name one 16 KB .rom (48K) or two (128): on the command line, or as ?rom=path in the URL";
 
 fn window_conf() -> Conf {
     Conf {
@@ -76,7 +169,7 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let arguments = host::arguments();
-    let (rom_paths, media_paths) = partition(&arguments);
+    let (rom_paths, media_paths) = host::partition(&arguments, DEFAULT_ROM);
 
     let mut roms = Vec::with_capacity(rom_paths.len());
     for path in &rom_paths {
@@ -96,13 +189,27 @@ async fn main() {
 
     for path in media_paths {
         match load(&path).await {
-            Ok(bytes) => status.report(insert(&mut machine, &path, &bytes)),
+            Ok(bytes) => status.report(media::accept(&mut machine, &path, &bytes)),
             Err(message) => status.report(message),
         }
     }
 
     let mut pacer = Pacer::new();
     let mut meter = RateMeter::new(RATE_WINDOW, get_time());
+    let mut loss = LossMeter::new(LOSS_WINDOW, get_time());
+
+    // The machine's own clock decides its sample rate, and the two machines differ: 3,500,000
+    // against 3,546,900 T-states a second. `ay()` is how a frontend asks which it is holding —
+    // `Spectrum::model()` is still absent, and the AY's presence *is* the 128-ness, so this is
+    // the honest question rather than a workaround for a missing accessor.
+    let machine_hz = audio::cpu_hz(machine.ay().is_some());
+    // `None` until a device exists. In a browser that is after the first click or keystroke,
+    // because an `AudioContext` is suspended until the user has interacted with the page and no
+    // desktop browser can be argued out of it; on a desktop it is after the device opens.
+    let mut resampler: Option<Resampler> = None;
+    // Allocated once and refilled in place, like `Video`'s buffers and for the same reason:
+    // "a leak-shaped mistake rather than a slow one", fifty times a second.
+    let mut mixed: Vec<f32> = Vec::new();
 
     loop {
         for &(code, action) in keymap::HOTKEYS {
@@ -110,7 +217,16 @@ async fn main() {
                 act(action, &mut machine, &mut status);
             }
         }
-        keymap::apply(is_key_down, machine.keyboard_mut());
+        for file in get_dropped_files() {
+            status.report(accept(&mut machine, &file));
+        }
+        // Both devices are rebuilt from the host's state every frame. The joystick needs it
+        // more than the membrane does: it is active high and has no interlock, so a direction
+        // the host stops reporting — a lost window focus, a backgrounded browser tab — would
+        // otherwise stay pressed for the rest of the session.
+        let scheme = &keymap::ARROW_SCHEMES[status.arrows];
+        let joystick = keymap::apply_with(is_key_down, machine.keyboard_mut(), scheme);
+        *machine.joystick_mut() = joystick;
 
         // `try_from_secs_f32` rather than `from_secs_f32`: the latter panics on a negative or
         // non-finite argument, and `get_frame_time` is a number from a windowing system
@@ -119,51 +235,49 @@ async fn main() {
         for _ in 0..pacer.advance(elapsed) {
             machine.run_frame();
         }
-        meter.sample(get_time(), pacer.ran());
+        // One clock reading for both, so the figure and the colour describe the same second
+        // rather than two instants a few microseconds apart.
+        let now = get_time();
+        meter.sample(now, pacer.ran());
+        loss.sample(now, pacer.dropped());
+
+        // Polled every frame until a device appears, then built once for that exact rate.
+        if resampler.is_none() {
+            let device_hz = page::audio_rate();
+            if device_hz != 0 {
+                resampler = Some(Resampler::new(machine_hz, device_hz));
+            }
+        }
+        // Drained **every** frame whether or not anything is listening: the machine buffers two
+        // frames and then starts counting what it lost, and a consumer that stops taking would
+        // make `Spectrum::dropped_samples` climb for a reason that has nothing to do with audio.
+        let produced = machine.take_samples();
+        if let Some(resampler) = resampler.as_mut() {
+            mixed.clear();
+            resampler.feed(produced, &mut mixed);
+            // **The ceiling is enforced here, on the returned depth, for both targets.**
+            // Observed in a browser on 2026-09-01: `snd 10080` after four minutes — 210 ms of
+            // backlog and still climbing, because the emulator was running at 50.2 Hz against a
+            // device consuming exactly one second per second. A fifth of a percent is nothing
+            // per frame and is an unbounded latency over a session, which is the same
+            // self-amplifying shape `crate::pacing` refuses for frames.
+            //
+            // The desktop device caps its own ring as well; this cap is what gives the browser
+            // the same bound without a second copy of the number in JavaScript. Exceeding it
+            // drops one frame of audio — a click — which is the honest trade against a delay
+            // that grows for as long as the emulator is left running.
+            let ceiling = resampler.device_hz() * page::BUFFER_MILLISECONDS / 1000;
+            if status.audio_queued < 0 || status.audio_queued < ceiling as i32 {
+                status.audio_queued = page::audio_push(&mixed);
+            } else {
+                status.audio_queued -= mixed.len() as i32;
+            }
+        }
 
         video.draw(&machine);
-        status.draw(&machine, pacer, meter);
+        status.draw(&machine, pacer, meter, loss);
         next_frame().await;
     }
-}
-
-/// Split the command line into the ROMs to build from and the files to load afterwards.
-///
-/// ROM paths accumulate **in the order they were named**, because that order is what
-/// [`media::start`] reads the model off: one is a 48K, two are a 128 with the first paging in at
-/// reset. `--rom PATH` is accepted as well, because a path with no extension is otherwise
-/// unreachable, and it accumulates like any other.
-///
-/// > **This said *"the last `.rom` wins, which is what every other tool does with a repeated
-/// > option and needs no error of its own"*, and M7 took that option away.** The sentence was
-/// > right about repeated *options* and it stopped being right the moment a second ROM meant
-/// > something: on a machine that can be a 128, `a.rom b.rom` is not a person changing their
-/// > mind, it is a person naming a ROM pair. **This is the quiet kind of breaking change** — the
-/// > same argument, reinterpreted, with no signature to notice it by — so it is written down
-/// > here rather than left in a diff. What a repeated `--rom` no longer does is override;
-/// > what it does now is add, and a third one is [`media::Error::RomCount`] rather than a
-/// > silently dropped file.
-fn partition(arguments: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut roms = Vec::new();
-    let mut rest = Vec::new();
-    let mut expecting_rom = false;
-
-    for argument in arguments {
-        if expecting_rom {
-            roms.push(argument.clone());
-            expecting_rom = false;
-        } else if argument == "--rom" {
-            expecting_rom = true;
-        } else if media::kind_of(argument) == Some(Kind::Rom) {
-            roms.push(argument.clone());
-        } else {
-            rest.push(argument.clone());
-        }
-    }
-    if roms.is_empty() {
-        roms.push(DEFAULT_ROM.to_owned());
-    }
-    (roms, rest)
 }
 
 /// Read a file, as a message rather than as an error type.
@@ -172,21 +286,87 @@ fn partition(arguments: &[String]) -> (Vec<String>, Vec<String>) {
 /// returns a `String`: on `wasm32` it is an HTTP fetch whose failures do not map onto
 /// [`std::io::Error`], and the shell's only response to any of them is to put the text on the
 /// screen. See [`frontend::host`].
+///
+/// [`bundle::bytes`] is consulted first, which is what lets a standalone build need no files at
+/// all. It is a lookup in a slice of at most two entries and it is the only thing that
+/// distinguishes an embedded payload from a fetched one — everything downstream, from
+/// `media::kind_of` to `media::insert`, is handed the same name and the same bytes and is never
+/// told which it is holding.
 async fn load(path: &str) -> Result<Vec<u8>, String> {
+    if let Some(embedded) = bundle::bytes(path) {
+        return Ok(embedded.to_vec());
+    }
     macroquad::file::load_file(path)
         .await
         .map_err(|error| format!("cannot read {path}: {error}"))
 }
 
-/// Hand a loaded file to the machine and say what happened.
-fn insert(machine: &mut Spectrum, path: &str, bytes: &[u8]) -> String {
-    let Some(kind) = media::kind_of(path) else {
-        return format!("{path}: not a .rom, .tap, .z80 or .sna");
+/// Take a file the user dropped on the window and say what happened.
+///
+/// # The whole feature is two existing functions and a name
+///
+/// [`media::insert`] takes bytes somebody else fetched — its module says so in as many words,
+/// *"Nothing in this module performs I/O; every entry point takes bytes that somebody else
+/// fetched"* — and [`media::kind_of`] takes a name. A drop supplies both, so it needed neither
+/// a new path through the machine nor a new error. `docs/M8.md` Decision 5 makes the point that
+/// this was not arranged for: the design anticipated a byte source that is neither a command
+/// line nor a fetch, without being told one was coming.
+///
+/// **The name is the file's name and not a path, and in a browser it cannot be anything else.**
+/// `miniquad`'s drop handler reads `file.name` from the `DataTransfer` entry; there is no path,
+/// because a page is never told where a dropped file lives. That is all [`media::kind_of`]
+/// wants.
+///
+/// **This is [`media::Error::RomAfterStart`]'s first likely route.** It was reachable before
+/// only from `zx --rom a.rom b.rom`; dropping a `.rom` on a running page is a thing people will
+/// actually do, and the existing error is already the right answer — starting the emulator
+/// again is what swaps a ROM, and in a browser that is reloading the page.
+///
+/// # A hostile file holds the frame loop, and the question is how long
+///
+/// This runs on the frame thread. `#[macroquad::main]` has one, nothing here spawns another, and
+/// the whole chain — `get_dropped_files`, this function, [`media::insert`], the format's parser —
+/// is synchronous between two `next_frame().await`s. So a file that takes a long time to refuse
+/// *is* a frozen window for exactly that long, and `.tzx` is the first format where a small file
+/// can ask for a lot of work: a three-byte jump-to-itself spins until `crates/spectrum`'s block
+/// ceiling stops it at 16,777,216 executions.
+///
+/// **Measured 2026-09-01 rather than reasoned about, through this function, on the three
+/// pathological files `crates/spectrum/tests/tzx_hostile.rs` already builds:**
+///
+/// | File | `--release` | debug |
+/// |---|---|---|
+/// | a jump to itself (13 bytes) | **47.6 ms** — 2.4 frames | 716 ms — 36 frames |
+/// | a loop whose body jumps into itself (17 bytes) | 26.1 ms — 1.3 frames | 678 ms |
+/// | 65535 passes over a 65535-pulse tone (19 bytes) | 6.9 ms — 0.3 frames | 90 ms |
+///
+/// So it is bounded, and in the build a person actually runs the worst case is under a twentieth
+/// of a second — one dropped display frame, which is a hitch and not a hang. **Nothing is added
+/// here for it.** A worker thread, a progress indicator or a size limit would each be machinery
+/// bought against a 48 ms event, and `macroquad`'s drop handler hands over the bytes on the frame
+/// thread anyway. What makes this safe is the two ceilings next door; without them the same three
+/// bytes would be an unbounded hang and no amount of frontend care would help.
+///
+/// The readout tells the truth about it either way, which is worth stating because it did not
+/// used to. A stall this long is exactly what [`frontend::pacing::Pacer`] counts: in release it
+/// owes two frames, stays inside `MAX_CATCH_UP` and loses nothing, so the bar does not colour; in
+/// debug it owes 36, loses 32, and the bar goes red — and then, since 2026-09-01, **goes back to
+/// grey a second or two later**. Before that fix a single hostile drop would have left the status
+/// bar red for the rest of the session.
+fn accept(machine: &mut Spectrum, file: &DroppedFile) -> String {
+    let name = file
+        .path
+        .as_deref()
+        .and_then(std::path::Path::to_str)
+        .unwrap_or("dropped file");
+    // `bytes` is an `Option` on both targets and the `None` is reported rather than skipped: a
+    // drop that produced a name and no content is the browser or the window system failing at
+    // something the user watched themselves do, and silence would read as the emulator
+    // ignoring the gesture.
+    let Some(bytes) = file.bytes.as_deref() else {
+        return format!("{name}: dropped, but no bytes arrived");
     };
-    match media::insert(machine, kind, bytes) {
-        Ok(()) => format!("loaded {path}"),
-        Err(error) => format!("{path}: {error}"),
-    }
+    media::accept(machine, name, bytes)
 }
 
 /// Carry out a hotkey.
@@ -209,6 +389,21 @@ fn act(action: Hotkey, machine: &mut Spectrum, status: &mut Status) {
         Hotkey::Reset => {
             machine.reset();
             status.report("reset".to_owned());
+        }
+        // The arrows are a choice, so the choice needs a key and the current one has to be on
+        // the screen. A person who presses an arrow and sees nothing move concludes the
+        // emulator is broken — the same class as a drop that does nothing — and the only cure
+        // is that the mapping is visible and one keystroke from the one they want.
+        //
+        // **The hint, not just the name.** The status bar carries the name every frame and has
+        // room for nothing longer; this fires once, at the moment somebody asked the question,
+        // and is where a name like `5678` gets to say what it sends. A name nobody can decode
+        // is a readout that reports without informing, which is how the previous default stayed
+        // invisible while being wrong.
+        Hotkey::CycleArrows => {
+            status.arrows = (status.arrows + 1) % keymap::ARROW_SCHEMES.len();
+            let scheme = &keymap::ARROW_SCHEMES[status.arrows];
+            status.report(format!("arrows: {} - {}", scheme.name, scheme.hint));
         }
     }
 }
@@ -235,7 +430,7 @@ async fn complain(message: &str) {
         clear_background(BLACK);
         draw_text(message, 20.0, 40.0, STATUS_TEXT * 1.5, RED);
         draw_text(
-            "give one 16 KB .rom (48K) or two (128) on the command line",
+            COMPLAIN_ADVICE,
             20.0,
             40.0 + STATUS_TEXT * 2.0,
             STATUS_TEXT,
@@ -311,22 +506,35 @@ impl Video {
 /// The pacing readout, and whatever happened last.
 struct Status {
     visible: bool,
+    /// Which of [`keymap::ARROW_SCHEMES`] the arrow keys currently press.
+    arrows: usize,
+    /// Samples the device still has to play, or a negative number when there is none.
+    ///
+    /// On the readout because a silent emulator otherwise gives a person nothing to reason
+    /// from: a browser tab before its first click, a machine with no sound card and a bug in
+    /// the mixer all look identical from the outside. A number that climbs and falls says the
+    /// device is alive; `--` says there is not one.
+    audio_queued: i32,
     message: String,
     /// Reused so the per-frame path formats without allocating.
     line: String,
 }
 
 impl Status {
-    /// Visible, with nothing to say yet.
+    /// Visible, showing [`OPENING_MESSAGE`] until something else happens.
     ///
     /// Visible by default because the brief for this frontend is that a machine failing to
     /// keep 50 Hz should be *visible rather than silently drifting*, and a readout somebody
-    /// has to know to switch on is the silent case with extra steps.
+    /// has to know to switch on is the silent case with extra steps. The same argument is why
+    /// it opens with the keyboard hint rather than blank: a person who launched from a URL has
+    /// no other place to be told.
     fn new() -> Self {
         Self {
             visible: true,
-            message: String::new(),
-            line: String::with_capacity(64),
+            arrows: 0,
+            audio_queued: -1,
+            message: OPENING_MESSAGE.to_owned(),
+            line: String::with_capacity(128),
         }
     }
 
@@ -336,36 +544,100 @@ impl Status {
     }
 
     /// Draw the readout along the bottom of the window.
-    fn draw(&mut self, machine: &Spectrum, pacer: Pacer, meter: RateMeter) {
+    ///
+    /// # Two rows, because a dial and a sentence are different kinds of thing
+    ///
+    /// Five figures and a message did not fit across the window — [`OPENING_MESSAGE`] carries the
+    /// measurement, and the overflow was 42 characters — and they are read differently anyway: the
+    /// figures are glanced at, the sentence is read once. Separating them is also what lets the
+    /// colour mean something exact, because only the row carrying the pacing figures changes with
+    /// it.
+    fn draw(&mut self, machine: &Spectrum, pacer: Pacer, meter: RateMeter, loss: LossMeter) {
+        // Drawn **before** the visibility check, and `F1` does not hide it. A build that
+        // embeds a Sinclair ROM is a redistribution to whoever runs the binary, and Amstrad's
+        // permission asks that "the program/manual" carry the acknowledgement — for a
+        // double-clicked artefact the window is both, because there is no README on the path
+        // between the file and its user. `web/index.html` answers the same question the same
+        // way for the same reason: a permanent line of small text under the picture.
+        //
+        // A notice somebody has to switch on, or has to know a `--about` flag exists to find,
+        // is the silent case with extra steps — which is the argument `Status::new` already
+        // makes about the readout itself.
+        //
+        // It sits directly on top of whatever else is showing, so `F1` slides it down to the
+        // bottom rather than leaving it floating above an empty strip.
+        if let Some(notice) = bundle::acknowledgement() {
+            draw_row(if self.visible { 2.0 } else { 0.0 }, notice, GRAY);
+        }
+
         if !self.visible {
             return;
         }
+
+        draw_row(1.0, &self.message, LIGHTGRAY);
 
         self.line.clear();
         // Infallible: writing to a `String` cannot fail. The `Result` is there for writers
         // that can, and is discarded here rather than handled.
         let _ = write!(
             self.line,
-            "{:.1} Hz   dropped {}   frame {}   {}",
+            "{:.1} Hz   dropped {}   frame {}   snd {}   arrows {}",
             meter.hz(),
             pacer.dropped(),
             machine.frames(),
-            self.message,
+            if self.audio_queued < 0 {
+                "--".to_owned()
+            } else {
+                self.audio_queued.to_string()
+            },
+            keymap::ARROW_SCHEMES[self.arrows].name,
         );
 
-        let top = screen_height() - STATUS_HEIGHT;
-        draw_rectangle(
-            0.0,
-            top,
-            screen_width(),
-            STATUS_HEIGHT,
-            Color::new(0.0, 0.0, 0.0, 0.65),
-        );
-        // Red once frames are being lost: the count alone is easy to read past, and the
+        // Red while frames are being lost **now**: the count alone is easy to read past, and the
         // difference between "keeping up" and "not" is the one thing this bar is for.
-        let ink = if pacer.dropped() == 0 { LIGHTGRAY } else { RED };
-        draw_text(&self.line, 6.0, top + STATUS_TEXT, STATUS_TEXT, ink);
+        //
+        // The count stays lifetime and the colour does not, which is the whole of the fix. This
+        // read `pacer.dropped() == 0`, and that total never falls: one lost frame — and start-up
+        // very nearly guarantees one — held the bar red for the rest of a session that then ran
+        // perfectly. A running total answers *"has anything ever gone wrong"*; a colour is read as
+        // *"is something wrong now"*; [`LossMeter`] is the second question, and both numbers stay
+        // true. See [`frontend::pacing::LossMeter`].
+        draw_row(0.0, &self.line, ink(loss));
     }
+}
+
+/// The colour the pacing row is drawn in.
+///
+/// # A function rather than an expression, because a mutation survived
+///
+/// This was `let ink = if ... { LIGHTGRAY } else { RED };` inside [`Status::draw`], and putting
+/// the old cumulative test back — `pacer.dropped() == 0` — left **every** test in
+/// `tests/pacing_accounting.rs` green. Measured 2026-09-01, in an isolated clone: 123 passed, 0
+/// failed, with the defect fully restored.
+///
+/// Those tests grade [`LossMeter::keeping_up`] and they cannot grade the *wiring*, because
+/// `draw` needs a GPU and never runs under `cargo test`. So the one line that chooses between the
+/// two sources moved out of the function no test can reach and into one that `mod tests` calls
+/// directly — the same trade `pacing` makes by putting `keeping_up` in the library, applied one
+/// layer up. [`Color`] is a plain struct of four floats and needs no context to compare.
+fn ink(loss: LossMeter) -> Color {
+    if loss.keeping_up() { LIGHTGRAY } else { RED }
+}
+
+/// Draw one line of status text, `row` rows up from the bottom of the window.
+///
+/// The dark rectangle is what keeps the text legible over a bright border, and it is drawn per row
+/// rather than once behind the stack so that a row nobody asked for leaves no strip behind.
+fn draw_row(row: f32, text: &str, ink: Color) {
+    let top = screen_height() - STATUS_HEIGHT * (row + 1.0);
+    draw_rectangle(
+        0.0,
+        top,
+        screen_width(),
+        STATUS_HEIGHT,
+        Color::new(0.0, 0.0, 0.0, 0.65),
+    );
+    draw_text(text, STATUS_MARGIN, top + STATUS_TEXT, STATUS_TEXT, ink);
 }
 
 /// A Spectrum colour as a macroquad one.
@@ -375,4 +647,155 @@ impl Status {
 fn to_color(colour: spectrum::Colour) -> Color {
     let [red, green, blue] = colour.rgb();
     Color::from_rgba(red, green, blue, palette::OPAQUE)
+}
+
+/// Does the writing on the screen fit on the screen?
+///
+/// # The gap this closes, and the one it does not
+///
+/// `tests/on_screen_strings.rs` grades every status string this crate can hand a test for
+/// *drawable characters*, and its own header records what it cannot reach: *"It cannot cover
+/// `main.rs`'s own literals — `OPENING_MESSAGE` and the two lines `complain` draws — because they
+/// are private to a binary that needs a window ... it is a person's to run."* Nobody ran it, and
+/// [`OPENING_MESSAGE`] was 42 characters over the edge.
+///
+/// A binary target's unit tests are compiled and run by `cargo test` like any other, and a
+/// `#[cfg(test)] mod tests` inside the binary can see its private constants. So the check is a
+/// machine's now, and it needed no window, no new public item, and no library module.
+///
+/// It measures **width**, which is the property that failed, and it cannot see **height**,
+/// overlap, or whether the result looks right — the same line `crate::pacing` draws between the
+/// arithmetic and the observation, and it is not softened here either.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Logical pixels one character of the status font occupies.
+    ///
+    /// macroquad's default font is `ProggyClean.ttf`, and every glyph in it advances 896/2048 em —
+    /// it is monospaced, which is the only reason a character count is a width at all.
+    /// `draw_text` rasterises at `ceil(font_size * dpi_scale)` and divides the advance back down
+    /// by that same scale, and `screen_width` is likewise logical, so the figure is identical on
+    /// a retina display and a plain one: 896/2048 × 16 = **7.0** logical pixels. The font ships
+    /// no `kern` table and no GPOS, so there is no pair adjustment to add.
+    ///
+    /// Derived from the font's metrics rather than read from `measure_text`, which needs a GPU
+    /// context these tests do not have. That is this gate's honest limit and it is stated rather
+    /// than assumed away: it grades the arithmetic of the layout, not the picture.
+    const CHARACTER_WIDTH: f32 = 896.0 / 2048.0 * STATUS_TEXT;
+
+    /// The longest thing [`Status::draw`] can put in the `snd` field.
+    const WIDEST_QUEUE: i32 = i32::MAX;
+
+    /// A rate wider than the meter can ever report, so the bound below holds for any of them.
+    const WIDEST_RATE: f64 = 99_999.9;
+
+    /// Characters that fit across the window [`window_conf`] opens.
+    ///
+    /// The narrowest case and the only one worth gating: the window is resizable, so every size a
+    /// person can drag it to is one this already fits.
+    fn columns() -> usize {
+        let window = (FRAME_WIDTH as i32 * INITIAL_SCALE) as f32;
+        ((window - STATUS_MARGIN) / CHARACTER_WIDTH) as usize
+    }
+
+    fn assert_fits(what: &str, text: &str) {
+        let width = text.chars().count();
+        let room = columns();
+        assert!(
+            width <= room,
+            "{what} is {width} characters against a window holding {room}, so the last {} would \
+             be drawn off the right-hand edge where nobody can read them:\n{text}",
+            width.saturating_sub(room),
+        );
+    }
+
+    #[test]
+    fn the_opening_message_fits_the_row_it_is_drawn_on() {
+        // The defect this file was sent to find. Before the split it shared a row with the
+        // readout, and the two together came to 178 characters against a window holding 136.
+        assert_fits("OPENING_MESSAGE", OPENING_MESSAGE);
+    }
+
+    #[test]
+    fn the_readout_fits_at_every_value_it_can_hold() {
+        // A bound rather than a guess: `u64::MAX` frames and losses, `i32::MAX` queued samples,
+        // a rate no meter can reach, and whichever arrow scheme has the longest name. Nothing a
+        // running emulator can produce is wider than this, so a pass here is a pass for good
+        // rather than a pass for a plausible afternoon.
+        let widest = keymap::ARROW_SCHEMES
+            .iter()
+            .map(|scheme| scheme.name)
+            .max_by_key(|name| name.chars().count())
+            .expect("ARROW_SCHEMES is never empty");
+        let line = format!(
+            "{WIDEST_RATE:.1} Hz   dropped {}   frame {}   snd {WIDEST_QUEUE}   arrows {widest}",
+            u64::MAX,
+            u64::MAX,
+        );
+        assert_fits("the readout at its widest", &line);
+    }
+
+    #[test]
+    fn the_failure_screens_advice_fits() {
+        // `complain`'s other line is a path and an error and has no bound, so it is not gated
+        // here — that is reported rather than papered over. This one is fixed text and can be.
+        assert_fits("COMPLAIN_ADVICE", COMPLAIN_ADVICE);
+    }
+
+    #[test]
+    fn the_check_is_capable_of_failing() {
+        // A positive control, because `assert_fits` is otherwise a function that has only ever
+        // been shown to say yes — and it passes vacuously on an empty string. `on_screen_strings`
+        // carries the same control for the same reason.
+        let result = std::panic::catch_unwind(|| {
+            assert_fits("a deliberate overflow", &"x".repeat(columns() + 1));
+        });
+        assert!(
+            result.is_err(),
+            "assert_fits accepted a line one character wider than the window",
+        );
+    }
+
+    #[test]
+    fn the_readout_takes_its_colour_from_recent_losses_not_the_lifetime_total() {
+        // The wiring, which `tests/pacing_accounting.rs` cannot see. It grades `keeping_up`
+        // thoroughly and in both directions; what it cannot grade is that `draw` asks *that*
+        // rather than asking `Pacer::dropped` the way it used to. Restoring the old line left all
+        // 123 of its tests green, so this is the assertion that was missing rather than a second
+        // copy of one that was already there.
+        let mut loss = LossMeter::new(LOSS_WINDOW, 0.0);
+
+        loss.sample(0.1, 21);
+        assert_eq!(ink(loss), RED, "twenty-one frames lost and the bar is grey");
+
+        // The lifetime total is still 21 here and always will be. Only the colour lets go.
+        loss.sample(1.0, 21);
+        loss.sample(2.0, 21);
+        assert_eq!(
+            ink(loss),
+            LIGHTGRAY,
+            "two clean seconds after the last loss and the bar is still red — this is the latch",
+        );
+
+        // And the threshold's own boundary, because without it this test cannot tell
+        // `keeping_up` from a plain `recent() == 0` — the two agree on 0 and on 21 and differ
+        // only at 1, which is exactly where the decision about what deserves an alarm was made.
+        let mut single = LossMeter::new(LOSS_WINDOW, 0.0);
+        single.sample(0.1, 1);
+        assert_eq!(
+            ink(single),
+            LIGHTGRAY,
+            "one lost frame is a hiccup and must not colour the bar",
+        );
+    }
+
+    #[test]
+    fn a_character_is_seven_logical_pixels() {
+        // The number the whole gate rests on, pinned so that a change to `STATUS_TEXT` fails
+        // here — visibly, with the arithmetic in view — rather than quietly moving every budget
+        // above it.
+        assert!((CHARACTER_WIDTH - 7.0).abs() < f32::EPSILON);
+        assert_eq!(columns(), 136);
+    }
 }

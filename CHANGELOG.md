@@ -48,6 +48,67 @@ been labelled as such; nothing in them changed.
 > **evidence** register, not an API register. Pointing a reader asking *"did this break?"* at a
 > table answering *"is this tested?"* is the same conflation rejected above.
 
+## Unreleased — MEMPTR · `crates/z80` — an address latch that was nearly always zero
+
+### Changed
+
+- **`CpuState::wz` now carries a real address after almost every instruction**, where it was
+  written by exactly one site and was in practice zero. The one site was the `(IX+d)`/`(IY+d)`
+  effective-address computation; there are now twenty-eight, all behind the single writer
+  `Cpu::set_memptr` — every absolute load and store, the accumulator stores' three-instruction
+  quirk, the 16-bit arithmetic, both I/O groups, every jump, call, return and restart,
+  `EX (SP),HL`, `RLD`/`RRD`, all four block families including their repeat, and interrupt and
+  NMI acceptance. The count is a command, not a claim:
+  `grep -c 'self\.set_memptr(' crates/z80/src/instructions.rs crates/z80/src/lib.rs` reported
+  26 and 2 on 2026-09-01.
+
+- **`BIT n,(HL)`'s undocumented flag bits 3 and 5 change observably**, which is the half of this
+  a consumer meets without ever reading `wz`. Both memory forms of `BIT` take those two bits
+  from `wz`'s high byte. For the `(IX+d)` form that was already the instruction's own effective
+  address; for the `(HL)` form it was whatever the last *indexed* access had left, which in a
+  program touching nothing indexed is zero. `F` after `BIT n,(HL)` is therefore a different
+  value than it was, and `CpuState::af` reports the difference.
+
+### Why this is a change and not a break, and not an addition either
+
+The ruling is written out because neither of the easy answers is right, and because this file
+has already ruled once that a change with no compiler-visible signature can still be breaking.
+
+- **It is not breaking in the mechanical sense.** No item is added, removed, renamed or
+  retyped; `CpuState` has exactly the fields it had. Everything that compiled still compiles,
+  and `cargo-semver-checks` has nothing to report. That is necessary and not sufficient — the
+  M7 entry above turns on precisely the case where it is not sufficient.
+
+- **It is not an addition.** `wz` existed, `BIT n,(HL)`'s bits 3 and 5 existed, and both had
+  values before. What changed is *which* values. An `Added` entry claims a reader gains
+  something and loses nothing, and a reader who could previously assume `wz == 0` has lost that.
+
+- **It does not meet this file's own bar for the quiet breaking change, and the difference is
+  which side of the interface moved.** M7 reinterpreted the **caller's input**: `zx a.rom b.rom`
+  means something else now, so a habit that was correct became incorrect and the user is the one
+  who breaks. Here the caller's input is untouched. What moved is the **core's answer**, from
+  wrong to right — and against a contract this crate had already written down. `CpuState::wz`'s
+  own doc comment says a snapshot *must* carry it because *"`BIT n,(HL)` executed just after a
+  load is restored can report bits the loading machine never computed"*; that sentence describes
+  a live latch and was published while the latch was inert. `docs/STATUS.md` carried the gap as
+  an open row with a settling condition. **Delivering a fix the documentation already promised
+  is keeping a contract, not breaking one**, and filing it as breaking would put a defect and a
+  reinterpretation in the same category.
+
+### One consequence, named rather than waved past
+
+`crates/spectrum`'s `snapshot::UNPRESERVED` records that no `.z80` or `.sna` format carries
+`wz`, so the parser sets zero — and adds that it is *"observable only through the undocumented
+flag bits of a `BIT n,(IX+d)` executed before anything else sets it."* **That second half was
+true when it was written and is not now.** It was free while `wz` was nearly always zero in the
+running core as well as after a load: dropping a field that was zero anyway costs nothing
+observable. It is not free now. A running core maintains the latch, a load resets it, and the
+first `BIT n,(HL)` after the load can therefore report bits the saving machine never had —
+which is exactly the hazard `CpuState::wz`'s doc names, made reachable by this change rather
+than by anything in the snapshot layer. The snapshot layer is unchanged and its round trip is
+still green, because a field dropped in both directions is what that suite is built to catch;
+what has changed is the cost of the drop. Flagged here, not fixed here.
+
 ## Unreleased — M7 · `crates/frontend` — the shell learned there are two machines
 
 ### Changed — and one of these can break a command line without breaking a build

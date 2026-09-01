@@ -446,8 +446,17 @@ pub(crate) fn rra(a: u8, f: u8) -> (u8, u8) {
 /// because that adjacency is what stops the two drifting: `sbc16` and [`add16`] must agree
 /// on where the 16-bit half-carry lives, and `rlc` and [`rlca`] must agree on how a byte
 /// rotates. All of them are now wired up — the `CB` rotates, shifts, `SLL`, `BIT`, `RES`
-/// and `SET` to both the plain and the `DD`/`FD`-indexed forms, and [`neg`], [`adc16`] and
-/// [`sbc16`] to the `ED` decoder.
+/// and `SET` to both the plain and the `DD`/`FD`-indexed forms, and [`prefixed::neg`],
+/// [`prefixed::adc16`] and [`prefixed::sbc16`] to the `ED` decoder.
+///
+/// The three are qualified and the two above them are not, for a reason worth stating once
+/// rather than rediscovering: this is an **outer** doc comment, so its links resolve in the
+/// scope the item is *declared* in — `flags` — not inside the module being described.
+/// [`add16`] and [`rlca`] are `flags`'s own and resolve bare; everything belonging to
+/// `prefixed` needs the prefix. Written unqualified, all three were silently dead links —
+/// invisible to `cargo doc` because this module is `pub(crate)` and rustdoc renders private
+/// items only when asked, so the gate that catches them is
+/// `RUSTDOCFLAGS="-D warnings" cargo doc --document-private-items`.
 pub(crate) mod prefixed {
     use super::{
         ADD_SUBTRACT, BIT3, BIT5, BYTE_MAX, CARRY, HALF_CARRY, HALF_CARRY_16, LOW_12_BITS,

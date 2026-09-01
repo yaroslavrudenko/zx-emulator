@@ -414,3 +414,274 @@ fn a_snapshot_of_a_fresh_machine_is_the_machine_it_came_from() {
         assert!(page.iter().all(|&byte| byte == 0), "bank {bank}");
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// R1 over a 128's sound chip — and the blind spot a round trip has about it
+// ---------------------------------------------------------------------------------------
+
+/// Latch an AY register address, through the bus.
+///
+/// Direct rather than through an assembled `OUT`: this file grades the **applier**, and the
+/// port wiring is `m7_ay_ports.rs`'s subject. Driving the bus is how the rest of this file
+/// already sets the border.
+fn ay_select(machine: &mut Spectrum, register: u8) {
+    machine.ula_mut().out_port(0xFFFD, register);
+}
+
+/// Latch `register` and write `value` to it.
+fn ay_poke(machine: &mut Spectrum, register: u8, value: u8) {
+    ay_select(machine, register);
+    machine.ula_mut().out_port(0xBFFD, value);
+}
+
+/// A 128 holding two page-sized ROMs of `NOP`s.
+///
+/// No corpus: the applier never touches ROM, and a gate that runs on a bare clone is worth
+/// more than one that does not — the same reason [`machine`] builds its 48K the way it does.
+fn machine_128() -> Spectrum {
+    Spectrum::spectrum_128(&[0x00; PAGE_SIZE], &[0x00; PAGE_SIZE]).expect("two page-sized ROMs")
+}
+
+/// A 128 with a distinctive value in every one of the chip's fifteen registers, and a latch
+/// that is not zero.
+///
+/// Every value is `register + 1`, which is **chosen to survive its register's mask**: the
+/// narrowest register here keeps four bits, so nothing above 15 goes in. A first draft used
+/// `0x0A + register` and register 13 — the envelope shape, four bits wide — reduced `0x17` to
+/// `0x07`, which read as a round-trip failure and was a fixture failure. Mixing a masking
+/// question into a round-trip test makes each one look like the other; `m7_ay_ports.rs` owns
+/// the masks.
+///
+/// They are distinct and non-zero so that a permutation is visible and a dropped field does
+/// not look like a restored default.
+fn machine_with_a_configured_chip() -> Spectrum {
+    let mut machine = machine_128();
+    for register in 0..AY_REGISTERS {
+        ay_poke(&mut machine, register, register + 1);
+    }
+    ay_select(&mut machine, 7);
+    machine
+}
+
+/// Registers an AY-3-8912 has.
+const AY_REGISTERS: u8 = 15;
+
+#[test]
+fn r1_holds_for_a_128_and_covers_its_sound_chip() {
+    // `snapshot(restore(s)) == s` for a machine that has a chip. The fixture cannot come from
+    // a file — `snapshot::z80` still refuses the 128 hardware modes, which is step 9's work
+    // and not sound's — so it comes from a machine, which is what makes this R1 and not R3.
+    let source = machine_with_a_configured_chip();
+    let snapshot = source.snapshot();
+
+    let mut target = machine_128();
+    target
+        .restore(&snapshot)
+        .expect("both machines are 128s, so a restore cannot be refused");
+    assert_eq!(target.snapshot(), snapshot);
+}
+
+#[test]
+fn the_chips_registers_really_travel_and_are_not_dropped_at_both_ends() {
+    // **The defect R1 is structurally blind to**, and the reason this assertion exists beside
+    // it rather than instead of it: a `snapshot` that never wrote the chip and a `restore`
+    // that never read it would leave R1 entirely green, because both halves would be
+    // comparing the same absence. `docs/M6.md` names this shape — *"a field dropped in both
+    // directions is the one defect a round trip is green for"*.
+    //
+    // So the restore lands on a machine whose chip already holds **different** values, and
+    // what is asserted is that they became the snapshot's.
+    let snapshot = machine_with_a_configured_chip().snapshot();
+
+    // Rotated by eight rather than mirrored: `15 - r` would coincide with `r + 1` at `r = 7`,
+    // leaving one register the same on both sides and invisible to the comparison below.
+    let mut target = machine_128();
+    for register in 0..AY_REGISTERS {
+        ay_poke(&mut target, register, (register + 8) % AY_REGISTERS + 1);
+    }
+    ay_select(&mut target, 3);
+    let before: Vec<Option<u8>> = (0..AY_REGISTERS)
+        .map(|r| target.ay().and_then(|ay| ay.register(r)))
+        .collect();
+
+    target
+        .restore(&snapshot)
+        .expect("both machines are 128s, so a restore cannot be refused");
+
+    let after: Vec<Option<u8>> = (0..AY_REGISTERS)
+        .map(|r| target.ay().and_then(|ay| ay.register(r)))
+        .collect();
+    assert_ne!(
+        before, after,
+        "the target must have differed from the fixture, or this proves nothing"
+    );
+    for register in 0..AY_REGISTERS {
+        assert_eq!(
+            target.ay().and_then(|ay| ay.register(register)),
+            Some(register + 1),
+            "register {register}"
+        );
+    }
+    assert_eq!(
+        target.ay().map(spectrum::Ay::selected),
+        Some(7),
+        "and the address latch, which `.z80` version 3 carries at offset 38"
+    );
+}
+
+#[test]
+fn a_48k_snapshot_carries_no_chip_at_all() {
+    // Not zeros — nothing. A 48K does not contain the chip, and a snapshot that carried
+    // sixteen zero bytes for it would be describing hardware the machine lacks. It is also
+    // what keeps R1 exact on a 48K: there is no field for a restore to fail to put back.
+    let snapshot = machine().snapshot();
+    let mut target = machine();
+    target.restore(&snapshot).expect("both machines are 48K");
+    assert!(target.ay().is_none());
+    assert_eq!(target.snapshot(), snapshot);
+}
+
+#[test]
+fn a_restore_starts_the_chips_generators_from_power_on() {
+    // **A convention, not a measurement**, and it is written down because no format carries
+    // the state it discards: the tone counters' phases, the noise register's position and
+    // where the envelope had reached are in `.z80` version 3 nowhere. `Ay::restore` documents
+    // the choice and the reason — determinism, so a restored machine emits the same samples
+    // every time.
+    //
+    // What it costs is audible and small: a note held across a save resumes from the start of
+    // its envelope. What it buys is that this assertion can exist at all.
+    let mut source = machine_128();
+    ay_poke(&mut source, 11, 0x01); // a fast envelope
+    ay_poke(&mut source, 13, 0x0C); // rising, repeating
+    ay_poke(&mut source, 8, 0x10); // channel A follows it
+    source.run_frame();
+    let snapshot = source.snapshot();
+
+    let mut a = machine_128();
+    a.restore(&snapshot).expect("both are 128s");
+    let mut b = machine_128();
+    b.run_frames(7);
+    b.restore(&snapshot).expect("both are 128s");
+
+    // Two machines with entirely different histories, restored from one snapshot, must emit
+    // the same audio from the same starting point — which is only true because the generators
+    // are reset rather than carried.
+    let _ = a.take_samples();
+    let _ = b.take_samples();
+    a.run_frame();
+    b.run_frame();
+    assert_eq!(a.take_samples(), b.take_samples());
+}
+
+// ---------------------------------------------------------------------------------------
+// R3 over a 128 — the gate whose absence let a public item be wrong since M7
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_128_written_and_read_back_is_still_a_128() {
+    // **The narrowest failing case for a defect that had been in the tree since M7.**
+    // `snapshot::z80::write` emitted hardware-mode `0` — "48K" — for every model, so a 128
+    // snapshot became a 48K file. Loaded back, it restored into a 48K machine and the five
+    // banks a 48K does not have went with it.
+    //
+    // It is the *"silent last-write-wins"* `docs/M6.md` refused for duplicate pages, in the one
+    // direction nothing guarded: `Spectrum::restore`'s `ModelMismatch` refuses a 128 image
+    // entering a 48K machine, and that asymmetry is exactly why the other direction went
+    // unnoticed — one end had a gate and the other did not.
+    //
+    // The information was never missing. `Snapshot::model` has existed since M7 precisely so
+    // the applier could refuse a mismatch; the writer simply was not reading it.
+    let snapshot = machine_with_a_configured_chip().snapshot();
+    assert_eq!(snapshot.model(), spectrum::Model::Spectrum128);
+
+    let file = z80::write(&snapshot);
+    let read_back = z80::parse(&file).expect("our own file must parse");
+    assert_eq!(
+        read_back.model(),
+        spectrum::Model::Spectrum128,
+        "a 128 written and read back must still be a 128"
+    );
+    // Byte equality rather than `Snapshot` equality, and the reason is already in this file:
+    // `snapshot::UNPRESERVED` names three `CpuState` fields no format carries, and `q` is
+    // *derived from F* at parse — so a machine's snapshot and a parsed one differ in them by
+    // design. R3 is `write(...) == f` over bytes for exactly that reason.
+    assert_eq!(z80::write(&read_back), file, "R3, over a 128");
+}
+
+#[test]
+fn all_eight_banks_survive_the_file() {
+    // The consequence of the mislabelling rather than the label itself, and the half that
+    // actually loses data: the writer iterated the **48K's** three banks whatever the model,
+    // so five of a 128's eight were never written at all. Each bank is given a distinct
+    // fingerprint so a dropped one cannot look like a bank that happened to match.
+    let mut machine = machine_128();
+    for bank in 0..8_u8 {
+        let index = spectrum::memory::BankIndex::new(bank);
+        machine.memory_mut().bank_mut(index)[0] = 0xA0 | bank;
+        machine.memory_mut().bank_mut(index)[PAGE_SIZE - 1] = 0x50 | bank;
+    }
+    let snapshot = machine.snapshot();
+    let read_back = z80::parse(&z80::write(&snapshot)).expect("our own file must parse");
+
+    for bank in 0..8_u8 {
+        let index = spectrum::memory::BankIndex::new(bank);
+        let page = read_back
+            .bank(index)
+            .unwrap_or_else(|| panic!("bank {bank} was dropped"));
+        assert_eq!(page[0], 0xA0 | bank, "bank {bank}, first byte");
+        assert_eq!(page[PAGE_SIZE - 1], 0x50 | bank, "bank {bank}, last byte");
+    }
+}
+
+#[test]
+fn a_48ks_file_is_byte_for_byte_what_it_always_was() {
+    // The regression half. Teaching the writer about the 128 must not move a single byte of a
+    // 48K file — and a first cut did: it iterated banks in ascending order where the canonical
+    // form is **address** order (bank 5, then 2, then 0), which silently reordered the page
+    // blocks of every 48K file. `snapshot_vectors.rs` caught it at byte 88, the page number of
+    // the first block, which is why the order now lives beside the mapping rather than at the
+    // call site.
+    let file = z80::write(&fixture());
+    let read_back = z80::parse(&file).expect("our own file must parse");
+    assert_eq!(
+        z80::write(&read_back),
+        file,
+        "and writing it again is stable"
+    );
+    assert_eq!(file.get(34), Some(&0), "a 48K is still hardware mode 0");
+    assert_eq!(
+        file.get(88),
+        Some(&8),
+        "and the first page block is still bank 5, at 0x4000"
+    );
+}
+
+#[test]
+fn the_chip_survives_the_file_and_r15_is_written_as_zero() {
+    // The AY's half of the same round trip, plus the one byte no round trip can see. Offset 54
+    // describes `R15`, which an AY-3-8912 does not have — so a round trip over a file we wrote
+    // compares our zero against our zero and would be green whatever went there. It is
+    // asserted against the **bytes** instead, which is what `docs/M7.md` Decision 6 asks for.
+    let snapshot = machine_with_a_configured_chip().snapshot();
+    let file = z80::write(&snapshot);
+
+    // Offsets 38 and 39-54: the select latch, then fifteen registers and the absent sixteenth.
+    assert_eq!(file.get(38), Some(&7), "the last OUT to 0xFFFD");
+    for register in 0..AY_REGISTERS {
+        assert_eq!(
+            file.get(39 + usize::from(register)),
+            Some(&(register + 1)),
+            "register {register} at offset {}",
+            39 + register
+        );
+    }
+    assert_eq!(
+        file.get(54),
+        Some(&0),
+        "offset 54 is R15, which the chip does not have, and is written as zero"
+    );
+
+    let read_back = z80::parse(&file).expect("our own file must parse");
+    assert_eq!(z80::write(&read_back), file, "and the chip round-trips");
+}

@@ -213,6 +213,24 @@ impl Machine {
         t_states
     }
 
+    /// Offer a maskable interrupt, returning the T-states it consumed — zero if declined.
+    ///
+    /// Here rather than only in the core's own unit tests because interrupt acceptance loads
+    /// `MEMPTR`, and `memptr_rules.rs` grades that rule alongside the instructions' — the
+    /// register does not care which entry point wrote it.
+    pub fn interrupt(&mut self, data: u8) -> u32 {
+        let t_states = self.cpu.interrupt(data);
+        self.reported_t_states += t_states;
+        t_states
+    }
+
+    /// Raise a non-maskable interrupt, returning the T-states it consumed.
+    pub fn nmi(&mut self) -> u32 {
+        let t_states = self.cpu.nmi();
+        self.reported_t_states += t_states;
+        t_states
+    }
+
     /// The sum of what [`Cpu::step`] returned.
     ///
     /// This used to be described as "a second, independent account" of the T-state total,

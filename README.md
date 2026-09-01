@@ -1,15 +1,99 @@
 # zx-emulator
 
-A **ZX Spectrum 48K and 128** emulator written from scratch in Rust.
+A **ZX Spectrum 48K and 128** emulator written from scratch in Rust — the Z80 core, the ULA,
+contended memory, the tape, and the screen you are looking at.
 
-![Two frames from the emulator, side by side. On the left a 48K with a red border, showing zx-emulator printed in the ROM's own character set by a BASIC line typed through the keymap, above the ROM's own 0 OK, 0:1 report. On the right a 128 showing its boot menu: the rainbow, all five entries, and the 1986 Sinclair Research copyright.](docs/images/48k-and-128.png)
+![Cybernoid running in the emulator: a cavern walled in magenta and red alien masonry with yellow girders across it, a cyan status panel along the top carrying lives, a shield bar, a bomb count and a timer, and a scatter of small red and magenta enemies swarming down toward the player's ship at the lower left.](docs/images/cybernoid.png)
 
-> **Both frames are the emulator's output, placed at scale 1 and otherwise untouched** —
-> `Spectrum::render` into a `Frame`, then `palette::write_rgba`, which is the path the window
-> runs. The 48K on the left was typed at through the same keymap table the window presses; the
-> 128 on the right is its own boot menu, unassisted. The only pixels that are not the machine's
-> are the grey surround, in a value the ULA cannot emit. The commands, and why that grey is
-> unambiguous, are in [`docs/images/README.md`](docs/images/README.md).
+**_Cybernoid_, playing, on the 128.** The game arrives as a `.z80` snapshot, which lands *before*
+the first frame runs — and that is what makes this a picture of a game being played rather than of
+a menu: `1`, *START GAME* on the game's own screen, could be pressed through the same keymap table
+the window uses. The 600 frames after it are the game running with nobody at the keyboard, so
+every enemy on screen is where the game put it.
+
+> **Every pixel of every image here is the emulator's output, enlarged by 2 and otherwise
+> untouched** — `Spectrum::render` into a `Frame`, then `palette::write_rgba`, which is the path
+> the window runs. There is no surround, no caption and no margin in any file, so *"which pixels
+> are the machine's"* is not an argument but a program: `Colour::rgb` can emit exactly **fifteen**
+> RGB values, so anything else in a file is foreign and a checker decides it. The checker was
+> broken on purpose **three** times to show it can say no — most recently with a colour whose every
+> channel is legal and whose *combination* is not, which the two earlier breaks would have missed.
+> [`docs/images/README.md`](docs/images/README.md) has the commands, the checker and the breaks.
+
+---
+
+## Three more games
+
+![Manic Miner running in the emulator: the Central Cavern, a black cave framed by yellow brick walls and red platforms, with Miner Willy in yellow standing on a green conveyor at the centre. The cavern's name is on a yellow strip below it, then the AIR meter and the score, all inside the machine's own red border.](docs/images/central-cavern.png)
+
+**_Manic Miner_, playing, on a 48K, and it got there the long way.** `LOAD ""` typed through the
+same keymap table the window presses, then the tape played, then the ROM's own `LD-BYTES` read all
+six blocks off it — about three minutes of emulated time. **Nothing was pressed afterwards, and
+nothing could have been:** `zx-shot` presses every key *before* it starts the tape. This is one
+stop on the game's own attract loop, which tours the caverns while the title screen waits for an
+`ENTER` that never came.
+
+![The Cybernoid II loading screen: a green cavern floor under a black sky, crowded on both sides by magenta and red alien creatures, a blue-white orb burning at the top, and a large ship in the centre firing white beams past a small wreck in flames — framed by a border of tightly alternating blue and yellow horizontal stripes.](docs/images/cybernoid-ii.png)
+
+**_Cybernoid II_, half-arrived.** This screen was on the tape *as a screen*: one block carrying no
+header and exactly **6,912** bytes — 6,144 of pixels and 768 of colour, which is what a Spectrum
+has. The border is still striped because the other **40,191** bytes have not landed yet. Those
+stripes are the ROM's loader toggling the border as it decodes each bit, so they come out like
+this only if the border is modelled *below* frame resolution; written once per frame it would be a
+flat rectangle.
+
+![The Exolon loading screen: a close-up of an armoured spaceman against a flat yellow sky, in white and grey armour with red and green panels, a red sun flaring at the left and the word ROCK scrawled across the helmet — framed by a border of tightly alternating red and cyan horizontal stripes.](docs/images/exolon.png)
+
+**_Exolon_, whose picture was never on the tape.** Its three files are 125 bytes of BASIC and two
+blocks of code, for addresses 27000 and 28000 — nothing 6,912 bytes long, nothing aimed at the
+display file. **The picture is painted by code**, and 100 frames earlier it can be caught
+half-drawn with a *black* border, which is the tell: the ROM's loader never leaves the border
+alone. Here it is finished and the border is red and cyan — the ROM listening for the next block's
+pilot tone, which is a different part of `LD-BYTES` from the blue and yellow above.
+
+> **No game is distributed by this repository** — `testdata/**` is `.gitignore`d and nothing in
+> `testdata/games/` is committed. *Manic Miner* is Matthew Smith's, published by Bug-Byte Software
+> Ltd in 1983; *Cybernoid*, *Cybernoid II* and *Exolon* are Raffaele Cecco's, published by Hewson
+> Consultants Ltd in 1987 and 1988. **No permission covering these screenshots was found for any of
+> them.** For *Manic Miner*, two archives sharing one dataset contradict each other about this exact
+> file. For the three Hewson titles something better exists and is still not that: an archive
+> relays the publisher's *"no objection"* to **its own** downloads, which is not a permission for
+> screenshots taken by somebody else. [`docs/images/README.md`](docs/images/README.md) states all of
+> it in full, with the quotations, and separates it from the 128 menu below — which *is* covered, by
+> Amstrad's quoted ROM permission.
+
+---
+
+## The other machine, and the three minutes before a game appears
+
+The 128 first, then the tape a game arrives on, then what arrived — which is the order they have
+to happen in. All three are `zx-shot` output at scale 2, whole frames, nothing added.
+
+![The 128's boot menu: a white panel on a grey field, the word 128 above a rainbow stripe of red, yellow, green and cyan, the five entries Tape Loader, 128 BASIC, Calculator, 48 BASIC and Tape Tester with the first highlighted, and the 1986 Sinclair Research copyright below.](docs/images/128-menu.png)
+
+**The 128's own boot menu, unassisted.** The number of `--rom` arguments is what names the
+machine — two make a 128, editor ROM first — so this needed no `--model` flag and no key at all.
+The rainbow is the machine's signature and it is drawn by the ROM, not by anything here.
+
+![Manic Miner mid-load: a black screen carrying the word MANIC in chunky letters of red, yellow, green, cyan and magenta, framed by a border of tightly alternating blue and yellow horizontal stripes.](docs/images/tape-loading.png)
+
+**Three thousand frames into the tape.** Two things are worth naming. The stripes are the ROM's
+`LD-BYTES` toggling the border as it decodes each bit, so they come out right only if the border
+is modelled *below* frame resolution — written once per frame it would be a flat rectangle. And
+`MANIC` is not a bitmap: it is 256 bytes loaded straight into the attribute file at `0x5900`,
+which is why the letters are 8 × 8 blocks of flat colour.
+
+![The Manic Miner title screen: a cyan sky with a yellow sunrise, a tree, a green hillside, a house and a red car, above a red banner reading MANIC MINER starring Miner Willy and PRESS ENTER TO START, above a drawn piano keyboard, with the Bug-Byte 1983 copyright scrolling below it.](docs/images/title.png)
+
+**What the tape produced.** The same four keys, 7,750 frames later. The cavern above is one stop
+on the attract loop this screen starts when the `ENTER` it is asking for does not arrive — and it
+cannot arrive, because `zx-shot` presses every key *before* it starts the tape. **That ordering is
+also the limitation:** it is why *Exolon* and *Cybernoid II*, which have no attract loop, are shown
+loading rather than playing. [`docs/images/README.md`](docs/images/README.md) records that as a
+missing flag rather than a defect — together with the two games that were tried and left out, and
+why a picture nobody can regenerate would not have been worth having.
+
+---
 
 Not a port. Not a translation of an existing emulator. The CPU is implemented from the Z80
 hardware specification and from our own architecture; correctness is then proven against
@@ -53,7 +137,7 @@ arithmetic — with an external oracle instead of self-assessment.
 | **M5** | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | the machine boots, **on frame 87**, and **the gate work landed**: `crates/spectrum/tests/boot.rs` is a real `#[test]` that runs the ROM under `cargo test` and asserts the frame, alongside the other integration gates in that directory. Of the five mutations, **four were already red and one survived**. **Contention is no longer ungraded either**: `crates/spectrum/tests/timing_oracle.rs` grades the model against **68 rows measured on real Spectrums, 0 disagreeing**. See [`docs/STATUS.md`](docs/STATUS.md) for what M5's green does and does not mean, and [`docs/MACHINE.md`](docs/MACHINE.md) for the oracle's scope, which is narrower than the sentence sounds |
 | **M6** | Snapshots (`.z80` / `.sna`) and tape (`.tap`) | **T1 + T2 + T3** — *not* "a real game runs" | **merged.** A program written here, stored as a `.tap`, loaded by the real ROM's own `LD-BYTES` through the `EAR` bit, and executed — computing a value asserted to appear **nowhere in its own bytes**, so that *"the data arrived"* and *"it ran"* are separate claims. Design in [`docs/M6.md`](docs/M6.md); what it opened and closed is in [`docs/STATUS.md`](docs/STATUS.md) |
 | M7 | 128: paging, second ROM, AY-3-8912, **the beeper**, per-bank contention | **T1 + T2 + T3** — *not* "128-only software runs" | design in [`docs/M7.md`](docs/M7.md), in flight. **The memory half boots:** the 128 reaches its own `© 1986` copyright, draws all five menu entries, the highlight moves under `CAPS SHIFT`+`6`, and selecting *48 BASIC* reaches the `© 1982` message through ROM page 1 — the year changing is what makes that a claim about which ROM is executing |
-| M8 | WASM build | playable from a URL — the browser, **not** the sound | **the frontend already exists and runs natively.** `crates/frontend` is a macroquad window (`zx`) plus a headless screenshot binary (`zx-shot`), which is what took the picture at the top of this file; the run commands are under [Build and run](#build-and-run). What M8 still owes is the **browser**: `wasm32` is neither built nor run, and [`docs/STATUS.md`](docs/STATUS.md) carries that row rather than this one implying otherwise. Design in [`docs/M8.md`](docs/M8.md) |
+| M8 | WASM build | **T1 + T2 + T3** — a *build* gate, and ~~"playable from a URL"~~ cannot be one | **the browser build runs.** `wasm32-unknown-unknown` links, and on 2026-09-01 a served page booted the 48K to `© 1982 Sinclair Research Ltd` at **50.3 Hz, 0 dropped**, built a **128** from the query string alone, saved a `.z80` through a `Blob`, and restored it from a file dropped back onto the page. Each observation is recorded with its provenance in [`web/README.md`](web/README.md). Also landed: `crates/page` (the whole `unsafe` surface of this workspace, three blocks), a `bundled` feature that compiles a ROM and a game into one artefact, and drag-and-drop on both targets. Design in [`docs/M8.md`](docs/M8.md) |
 
 > **Two corrections to the rows above, both made 2026-09-01 rather than left to be inferred from
 > the design documents.**
@@ -159,9 +243,15 @@ crates/spectrum/    The machine: paged memory, ULA, contention, keyboard, screen
                     snapshots (`.z80`/`.sna`) and tape (`.tap`). No AY module yet — it is
                     M7 scope. This line lists the crate's remit, not its contents.
 crates/frontend/    macroquad frontend: the `zx` window, and `zx-shot`, which photographs a
-                    machine headlessly. Written to be portable to `wasm32` — no `cfg(target)`
-                    anywhere — but that build has not been run. This line said "native and
-                    WebAssembly", which read as though both existed.
+                    machine headlessly. Portable to `wasm32` — no `cfg(target)` anywhere, and
+                    `tests/portability.rs` asserts that rather than leaving it to habit. ~~"but
+                    that build has not been run"~~ — it has, and the page boots; see web/ below.
+crates/page/        The browser page's half of the frontend's host seam: the query string and
+                    the download. The **only** crate in this workspace that is not
+                    `unsafe_code = "forbid"`, and its entire unsafe surface is three blocks, one
+                    extern block and one attribute — a count `tests/unsafe_inventory.rs` asserts.
+web/                index.html, the vendored macroquad JS bundle, and the two scripts that
+                    build and gate the browser build. `sh web/build.sh` assembles target/web/.
 crates/testsupport/ The corpus-absence policy every gate shares. Test-only, never published.
 docs/               Architecture, the machine design, the M6 and M7 designs, the Z80
                     reference, the status register.
@@ -194,8 +284,27 @@ cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx -- testd
 cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx -- \
     testdata/roms/128-0.rom testdata/roms/128-1.rom
 
+# In a browser. Assembles target/web/, which is a directory any static server serves.
+# `file://` will NOT work — macroquad's load_file is an XMLHttpRequest, so the page must be
+# served over HTTP or the ROM never arrives and the emulator draws its "cannot read" screen.
+sh web/build.sh
+cd target/web && python3 -m http.server 8000     # or: cargo install basic-http-server
+# then http://localhost:8000/ — and the query string names files the way argv does:
+#   http://localhost:8000/?rom=testdata/roms/128-0.rom&rom=testdata/roms/128-1.rom
+#   http://localhost:8000/?snapshot=fire.z80
+
+# One artefact that boots straight into a game, with no arguments and no files to find.
+# The payload is NEVER committed: games live in gitignored testdata/games/, and this is
+# something you build on your own machine from a file you already have. The build FAILS if
+# the feature is on and the payload is missing, empty, or a format we cannot load.
+ZX_BUNDLE_ROM=testdata/roms/48.rom \
+ZX_BUNDLE_MEDIA=testdata/games/your.tap \
+cargo build --release --manifest-path crates/frontend/Cargo.toml --features bundled --bin zx
+
 cargo build                          # workspace
 cargo test                           # unit tests, FUSE vectors, the machine's integration gates
+sh web/gate.sh                       # M8's build gate: T1 + T2 + T3, and what it cannot see
+sh crates/frontend/gate-bundled.sh   # the bundled feature, against a payload it generates itself
 cargo test --release -p z80 --test zex_oracle -- --ignored    # zexdoc + zexall, ~90 s
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
@@ -203,9 +312,19 @@ cargo fmt --check
 
 **This section had no `run` line in it at all** until 2026-09-01, while being called *Build and
 run* — so the one thing a stranger wants from a README was the one thing the file did not say.
-`crates/frontend/src/main.rs` carries the key map: `Shift` and `Ctrl` are `CAPS SHIFT` and
-`SYMBOL SHIFT`, `F1`–`F6` are the emulator's own controls, and everything else the Spectrum
+`crates/frontend/src/main.rs` carries the key map: `Shift` is `CAPS SHIFT`, **`Ctrl` *or* `Tab`**
+is `SYMBOL SHIFT`, `F1`–`F6` are the emulator's own controls, and everything else the Spectrum
 prints on a key is reached the way the machine reaches it.
+
+**`Tab` is there because of browsers, and it matters most for the brackets.** `(` and `)` are
+`SYMBOL SHIFT`+`8` and `SYMBOL SHIFT`+`9` on the hardware, which is `Ctrl`+`8` and `Ctrl`+`9` —
+and a browser keeps those for switching tabs without offering them to the page at all, so
+`preventDefault` has nothing to cancel and the keystroke is simply gone. `Tab`+`8` and `Tab`+`9`
+work everywhere. `docs/M8.md` Decision 2 has the reasoning and what it costs.
+
+**Files can also be dragged onto the window**, on every target — `.tap`, `.z80` and `.sna` — and
+the status bar says which verb was applied, because a tape is inserted *stopped* and a drop that
+appears to do nothing is indistinguishable from a broken build.
 
 The second binary in that crate, **`zx-shot`, is headless** — it boots a machine, optionally types
 at it through the same keymap, and writes the screen to a file without opening a window, which is
@@ -335,6 +454,19 @@ The emulator is MIT OR Apache-2.0.
 
 **Amstrad have kindly given their permission for the redistribution of their copyrighted
 material but retain that copyright.**
+
+> **That note now has two more homes, and both were added because the permission asks for
+> *"the program/manual"* and the reader of a shipped artefact sees neither this file nor
+> `testdata/README.md`.** For a page served from a URL, **the page is both** — so it is visible
+> text under the canvas in `web/index.html`. For a `--features bundled` binary, **the window is
+> both** — so it is a permanent line under the picture that `F1` does not hide, and `zx-shot`
+> prints it. In the binary it appears only when the embedded ROM actually contains the bytes
+> `Sinclair`, because printing Amstrad's notice over a ROM they did not write would be a false
+> statement in the one place this repository is most careful not to make one.
+>
+> **A game is covered by none of this.** `--features bundled` embeds whatever it is pointed at,
+> and what it is pointed at is never committed: games live in gitignored `testdata/games/`, the
+> feature is off by default, and a default build neither needs a game nor looks for one.
 
 That sentence is not a paraphrase. The permission — Cliff Lawson of Amstrad plc, posted to
 `comp.sys.sinclair` on 31 August 1999 — asks in those words that *"the program/manual includes a

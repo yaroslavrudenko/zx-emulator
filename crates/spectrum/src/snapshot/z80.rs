@@ -30,9 +30,11 @@ use ::z80::{CpuState, InterruptMode};
 use super::reader::{Reader, Writer};
 use super::rle;
 use super::{
-    BANKS_48K, Error, IMAGE_LEN_48K, Snapshot, bank_for_page, frame_position, store_image,
+    Error, IMAGE_LEN_48K, Snapshot, bank_for_page_of, frame_position, pages_of, store_image,
 };
+use crate::ay::{self, Ay};
 use crate::memory::{BankIndex, PAGE_SIZE};
+use crate::model::Model;
 use crate::screen::Colour;
 use crate::timing::T_STATES_PER_FRAME;
 
@@ -50,7 +52,36 @@ const V3_EXTRA_HEADER_LEN: u16 = 54;
 const V3_EXTRA_HEADER_LEN_WITH_1FFD: u16 = 55;
 
 /// Sound-chip registers the additional header reserves room for, at offsets 39–54.
+///
+/// # Sixteen here, and the chip has fifteen
+///
+/// **The format reserves one byte more than the machine has a register for.** The 128's
+/// AY-3-8912 is a cut-down `-8910` with one I/O port rather than two, so `R15` does not exist
+/// — [`crate::ay`] carries the sourcing — while `.z80` version 3 reserves sixteen bytes
+/// regardless. `docs/M7.md` Decision 6 names the hazard exactly: whatever a model puts in the
+/// sixteenth *"round-trips perfectly and is invisible to every round trip"*, so it has to be
+/// decided rather than left to fall out of an array length.
+///
+/// **The ruling, made with the chip and recorded here where the bytes are: the writer emits
+/// zero at offset 54, and the reader discards it.** The byte describes a register the machine
+/// does not have, so there is no value to record — and zero is already what this writer emits
+/// for every other field describing absent hardware (offsets 35–38 on a 48K, and 58–85 on
+/// both machines).
+///
+/// **It cannot be gated by a round trip** and must be gated by a transcribed vector, because
+/// a round trip over a file *we* wrote compares our zero against our zero. `docs/M7.md` says
+/// so and `crates/spectrum/tests/m7_ay_ports.rs` grades the chip half — that `R15` is absent
+/// and a guest's read of it floats — from outside any round trip.
+///
+/// This constant stays at sixteen: it is the **format's** count and the format really does
+/// reserve sixteen. [`crate::ay::REGISTER_COUNT`] is the chip's, and the two being different
+/// numbers with different names is the point rather than an inconsistency.
 const AY_REGISTER_COUNT: usize = 16;
+
+// The two counts must differ by exactly the one register the format has and the chip does
+// not. An edit that quietly reconciled them would erase the distinction this file's comment
+// exists to preserve.
+const _: () = assert!(AY_REGISTER_COUNT == crate::ay::REGISTER_COUNT + 1);
 
 /// The page length that means "16384 bytes, stored uncompressed".
 ///
@@ -79,20 +110,56 @@ impl Version {
         }
     }
 
-    /// Whether hardware mode `mode` is a 48K **under this version's numbering**.
+    /// The machine hardware mode `mode` names **under this version's numbering**.
     ///
-    /// The two versions renumbered the modes, and the overlap is a trap: mode 3 is a
-    /// **128K** in version 2 and a *48K with a MGT interface* in version 3. Accepting 3
-    /// unconditionally would load a 128 snapshot as a 48K and quietly lose five banks.
+    /// The two versions renumbered the modes, and the overlap is the trap `docs/M6.md`
+    /// flagged and `docs/M7.md` calls the highest-risk line in the parser: **mode 3 is a
+    /// 128K in version 2 and a 48K with an M.G.T. interface in version 3.** Accepting it
+    /// unconditionally loads a 128 snapshot as a 48K and quietly loses five banks.
     ///
     /// Modes 1 and 3 are 48Ks with a peripheral whose ROM this crate does not model; their
-    /// RAM is a 48K's RAM, so they load, and the peripheral is ignored rather than refused.
-    const fn is_48k(self, mode: u8) -> bool {
-        match self {
+    /// RAM is a 48K's RAM, so they load and the peripheral is ignored rather than refused.
+    /// The same goes for a 128 with a peripheral.
+    ///
+    /// # The version 3 128K number has a second witness, which it did not have when it was
+    /// transcribed
+    ///
+    /// `docs/M7.md` warned: *"Transcribe it; do not infer it from the v2 value, because
+    /// renumbering is the whole hazard."* It was transcribed from the format description by
+    /// M6's implementer. It is now **corroborated from a file nobody here wrote**: the 128
+    /// timing suite fetched at M7's step 0, `timing_tests-128k_v1.0.z80`, is a version 3 file
+    /// carrying hardware mode **4**, and it is unmistakably a 128 program — its own BASIC
+    /// prints `** MUST RUN IN 48k MODE **` and its header's `0x7FFD` is `0x30`. A number read
+    /// out of a third party's file is a different lineage from a number read out of a
+    /// document.
+    const fn model(self, mode: u8) -> Option<Model> {
+        match (self, mode) {
             // 0 = 48K, 1 = 48K + Interface I, 2 = SamRam, 3 = 128K, 4 = 128K + Interface I.
-            Self::V2 => matches!(mode, 0 | 1),
-            // 0 = 48K, 1 = 48K + Interface I, 2 = SamRam, 3 = 48K + M.G.T., 4 = 128K, ...
-            Self::V3 => matches!(mode, 0 | 1 | 3),
+            (Self::V2, 0 | 1) => Some(Model::Spectrum48K),
+            (Self::V2, 3 | 4) => Some(Model::Spectrum128),
+            // 0 = 48K, 1 = 48K + Interface I, 2 = SamRam, 3 = 48K + M.G.T., 4 = 128K,
+            // 5 = 128K + Interface I, 6 = 128K + M.G.T.
+            (Self::V3, 0 | 1 | 3) => Some(Model::Spectrum48K),
+            (Self::V3, 4..=6) => Some(Model::Spectrum128),
+            // 2 is SamRam on both, which is a different machine rather than a peripheral.
+            _ => None,
+        }
+    }
+
+    /// The hardware-mode byte this version writes for `model`.
+    ///
+    /// Only version 3 is written, so only its numbering appears here — but the parameter is
+    /// kept rather than assumed, because a writer that hard-coded a number would be the same
+    /// silent mislabelling in the other direction.
+    const fn hardware_mode(self, model: Model) -> u8 {
+        // No `_` arm, deliberately. `Model` is `#[non_exhaustive]` to downstream crates and
+        // exhaustive **here**, so a variant added later is a compile error in this function
+        // rather than a machine silently written out as a 48K — which is the exact defect this
+        // whole table exists to close, one model along.
+        match (self, model) {
+            (Self::V2 | Self::V3, Model::Spectrum48K) => 0,
+            (Self::V2, Model::Spectrum128) => 3,
+            (Self::V3, Model::Spectrum128) => 4,
         }
     }
 }
@@ -126,9 +193,16 @@ pub fn parse(bytes: &[u8]) -> Result<Snapshot, Error> {
 pub fn write(snapshot: &Snapshot) -> Vec<u8> {
     let mut bytes = Vec::new();
     write_header(&mut bytes, snapshot);
-    for entry in &BANKS_48K {
-        if let Some(page) = snapshot.bank(BankIndex::new(entry.bank)) {
-            write_page_block(&mut bytes, entry.page, page);
+    // **Every bank the *model* has, not the three a 48K has.** This iterated `BANKS_48K`
+    // unconditionally, so a 128 snapshot was written as a 48K file carrying three of its
+    // eight banks — five lost, silently, with a header that claimed 48K so nothing
+    // downstream could tell. It is the *"silent last-write-wins"* `docs/M6.md` refused for
+    // duplicate pages, in the one direction `Spectrum::restore`'s `ModelMismatch` does not
+    // cover: the refusal guards a 128 image entering a 48K machine, and nothing guarded a 128
+    // machine leaving as a 48K file.
+    for (bank, number) in pages_of(snapshot.model()) {
+        if let Some(page) = snapshot.bank(bank) {
+            write_page_block(&mut bytes, number, page);
         }
     }
     bytes
@@ -257,17 +331,24 @@ fn parse_v2_or_v3(header: &Header, mut reader: Reader<'_>) -> Result<Snapshot, E
 
     let pc = extra.u16_le()?; // 32 — the real program counter
     let hardware = extra.u8()?; // 34
-    if !version.is_48k(hardware) {
-        return Err(Error::UnsupportedHardware { mode: hardware });
-    }
+    let model = version
+        .model(hardware)
+        .ok_or(Error::UnsupportedHardware { mode: hardware })?;
 
     // 35-54 describe hardware a 48K does not have. They are read by name rather than
     // skipped by a computed distance, so the code says what it is stepping over.
-    let _paging = extra.u8()?; // 35: last OUT to 0x7FFD, on a 128
+    let paging = extra.u8()?; // 35: last OUT to 0x7FFD, on a 128
     let _interface_1 = extra.u8()?; // 36: 0xFF if the Interface I ROM is paged
     let _emulation = extra.u8()?; // 37: R-register and LDIR emulation flags
-    let _ay_selected = extra.u8()?; // 38: last OUT to 0xFFFD
-    extra.skip(AY_REGISTER_COUNT)?; // 39-54: the sound chip's registers
+    let ay_selected = extra.u8()?; // 38: last OUT to 0xFFFD
+    // Fifteen of the sixteen: `take` borrows the bytes the header really carries, and the
+    // sixteenth is stepped over by name below rather than silently included in a slice sized
+    // to the format. `R15` is the one the chip does not have.
+    let ay_registers: [u8; ay::REGISTER_COUNT] = extra
+        .take(ay::REGISTER_COUNT)? // 39-53
+        .try_into()
+        .map_err(|_| Error::UnsupportedHardware { mode: hardware })?;
+    extra.skip(AY_REGISTER_COUNT - ay::REGISTER_COUNT)?; // 54: `R15`, which does not exist
 
     let frame_t_state = match version {
         // The 23-byte additional header ends at offset 54, one byte short of the low word.
@@ -282,17 +363,76 @@ fn parse_v2_or_v3(header: &Header, mut reader: Reader<'_>) -> Result<Snapshot, E
     let mut cpu = header.cpu;
     cpu.pc = pc;
     let mut snapshot = Snapshot::new(cpu, header.border, frame_t_state);
+    // The model has to be set **before** the page blocks, because which bank a page number
+    // names depends on it — and getting that backwards is the five-lost-banks defect in a
+    // different disguise.
+    snapshot.set_model(model, paging_for(model, paging));
+    if model.has_ay() {
+        // Fifteen of the sixteen bytes. The sixteenth describes `R15`, which an AY-3-8912
+        // does not have; `AY_REGISTER_COUNT`'s comment carries the ruling and the reason a
+        // round trip cannot gate it.
+        let mut ay = Ay::new();
+        ay.restore(ay_selected, &ay_registers);
+        snapshot.set_ay(&ay);
+    }
     while !reader.is_empty() {
-        read_page_block(&mut reader, &mut snapshot)?;
+        read_page_block(&mut reader, &mut snapshot, model)?;
+    }
+    // **The bank-set guard, redesigned as `docs/M7.md` Decision 7 says it must be.** M6 closed
+    // the dropped-bank seam by comparing the parser's bank set against *the set the slot map
+    // exposes*, and on a 128 that premise dissolves — banks legitimately exist outside the slot
+    // map, which is what makes `Memory::bank` unavoidable. So the comparison is against the set
+    // the **model** has.
+    //
+    // It is not a formality: a file claiming hardware mode 4 while carrying a 48K's page
+    // numbers parses into a 128 snapshot holding three banks of eight, and a restore would
+    // then leave five banks as whatever the target machine happened to have — the same silent
+    // half-load the `ModelMismatch` refusal exists to prevent, arriving through the parser
+    // instead.
+    //
+    // **Scoped to the machines whose loss nothing else can see, which is the whole argument.**
+    // On a 48K all three banks are always addressable, so a missing one shows up the moment
+    // anything reads that address — M6's slot-map guard is still the right instrument there and
+    // this pass does not move it. On a 128 five of eight banks have no address at all, so a
+    // missing one is invisible by construction. That asymmetry is exactly why `docs/M7.md` says
+    // the guard had to be *redesigned* rather than kept, and it is why this is not simply
+    // applied to both.
+    for &bank in model.banks().iter().filter(|_| model != Model::Spectrum48K) {
+        let bank = BankIndex::new(bank);
+        if snapshot.bank(bank).is_none() {
+            return Err(Error::MissingPage {
+                page: pages_of(model)
+                    .into_iter()
+                    .find(|&(carried, _)| carried == bank)
+                    .map_or(0, |(_, page)| page),
+            });
+        }
     }
     Ok(snapshot)
 }
 
+/// The paging byte to record for `model`.
+///
+/// A 48K's `0x7FFD` byte in a file is meaningless — the machine has no paging port — so the
+/// machine's own fixed value is used rather than whatever the file happened to carry. That
+/// keeps a hostile 48K file from putting a `Snapshot` into a state `Spectrum::snapshot` would
+/// never produce, which is what makes `snapshot(restore(s)) == s` exact rather than nearly so.
+const fn paging_for(model: Model, from_file: u8) -> u8 {
+    match model {
+        Model::Spectrum48K => Model::Spectrum48K.paging_port_at_reset(),
+        _ => from_file,
+    }
+}
+
 /// Read one version 2/3 page block: a length word, a page number, and the data.
-fn read_page_block(reader: &mut Reader<'_>, snapshot: &mut Snapshot) -> Result<(), Error> {
+fn read_page_block(
+    reader: &mut Reader<'_>,
+    snapshot: &mut Snapshot,
+    model: Model,
+) -> Result<(), Error> {
     let length = reader.u16_le()?;
     let number = reader.u8()?;
-    let bank = bank_for_page(number).ok_or(Error::UnknownPage { page: number })?;
+    let bank = bank_for_page_of(model, number).ok_or(Error::UnknownPage { page: number })?;
     // The alternative is a silent last-write-wins, which loads a machine built from two
     // different snapshots of the same bank.
     if snapshot.bank(bank).is_some() {
@@ -346,21 +486,33 @@ fn write_header(bytes: &mut Vec<u8>, snapshot: &Snapshot) {
 
     bytes.extend_from_slice(&V3_EXTRA_HEADER_LEN.to_le_bytes()); // 30
     bytes.extend_from_slice(&cpu.pc.to_le_bytes()); // 32
-    bytes.push(HARDWARE_MODE_48K); // 34
-    bytes.push(0); // 35: last OUT to 0x7FFD — a 48K has no paging port
+    let model = snapshot.model();
+    bytes.push(Version::V3.hardware_mode(model)); // 34
+    // A 48K's byte 35 and its sound-chip bytes describe hardware it does not have, and zero
+    // is what this writer emits for every such field — offsets 36, 37 and the whole of 58-85
+    // included. A 128's are its real state.
+    let has_ay = model.has_ay();
+    bytes.push(if has_ay { snapshot.paging_port() } else { 0 }); // 35: last OUT to 0x7FFD
     bytes.push(0); // 36: no Interface I
     bytes.push(0); // 37: no R or LDIR emulation
-    bytes.push(0); // 38: last OUT to 0xFFFD — a 48K has no sound chip
-    bytes.extend_from_slice(&[0; AY_REGISTER_COUNT]); // 39-54
+    bytes.push(snapshot.ay().map_or(0, |ay| ay.selected)); // 38: last OUT to 0xFFFD
+    for index in 0..AY_REGISTER_COUNT {
+        // Fifteen registers into sixteen bytes: offset 54 describes `R15`, which the chip
+        // does not have, so it is written as zero. See `AY_REGISTER_COUNT`, which carries the
+        // ruling and the reason a round trip is blind to it.
+        bytes.push(
+            snapshot
+                .ay()
+                .and_then(|ay| ay.registers.get(index).copied())
+                .unwrap_or(0),
+        ); // 39-54
+    }
     bytes.extend_from_slice(&low_t_state.to_le_bytes()); // 55
     bytes.push(high_t_state); // 57
     // 58-85: Spectator, MGT, Multiface, the ROM/RAM flags and the joystick maps. All of it
     // describes hardware or an emulator preference, none of it is a 48K's state.
     bytes.extend_from_slice(&[0; TRAILING_EXTRA_HEADER_LEN]);
 }
-
-/// Hardware mode 0, in both version 2's and version 3's numbering: a plain 48K.
-const HARDWARE_MODE_48K: u8 = 0;
 
 /// Additional-header bytes after the T-state counter, offsets 58–85.
 const TRAILING_EXTRA_HEADER_LEN: usize = 28;
@@ -569,21 +721,61 @@ mod tests {
 
     #[test]
     fn the_versions_disagree_about_hardware_mode_three() {
-        // Mode 3 is a 128K in version 2 and a 48K with a MGT interface in version 3.
-        // Accepting it unconditionally would load a 128 snapshot as a 48K.
-        assert!(!Version::V2.is_48k(3), "mode 3 is a 128K in version 2");
-        assert!(
-            Version::V3.is_48k(3),
-            "mode 3 is a 48K + M.G.T. in version 3"
-        );
+        // **The highest-risk line in this parser**, and the whole reason the mode table is
+        // per-version. Mode 3 is a 128K in version 2 and a 48K with an M.G.T. interface in
+        // version 3, so accepting it unconditionally loads a 128 snapshot as a 48K and loses
+        // five banks — and mislabelling it in the *writer* loses them just as quietly, which
+        // is the defect this table was extended to close.
+        assert_eq!(Version::V2.model(3), Some(Model::Spectrum128));
+        assert_eq!(Version::V3.model(3), Some(Model::Spectrum48K));
+
+        // The full table, both versions, as two disjoint lists rather than a rule — because
+        // the renumbering means there is no rule.
         for mode in [0, 1] {
-            assert!(Version::V2.is_48k(mode));
-            assert!(Version::V3.is_48k(mode));
+            assert_eq!(Version::V2.model(mode), Some(Model::Spectrum48K));
+            assert_eq!(Version::V3.model(mode), Some(Model::Spectrum48K));
         }
-        for mode in [2, 4, 5, 6, 7, 9, 12, 255] {
-            assert!(!Version::V2.is_48k(mode), "v2 mode {mode}");
-            assert!(!Version::V3.is_48k(mode), "v3 mode {mode}");
+        for mode in [3, 4] {
+            assert_eq!(
+                Version::V2.model(mode),
+                Some(Model::Spectrum128),
+                "v2 {mode}"
+            );
         }
+        for mode in [4, 5, 6] {
+            assert_eq!(
+                Version::V3.model(mode),
+                Some(Model::Spectrum128),
+                "v3 {mode}"
+            );
+        }
+        // SamRam on both, and everything above the table on neither.
+        for mode in [2, 7, 9, 12, 255] {
+            assert_eq!(Version::V2.model(mode), None, "v2 mode {mode}");
+            assert_eq!(Version::V3.model(mode), None, "v3 mode {mode}");
+        }
+    }
+
+    #[test]
+    fn the_mode_the_writer_emits_is_the_mode_the_reader_reads_back() {
+        // The defect, as its narrowest possible failing case: the writer emitted a constant
+        // `0` for every model, so a 128 came back as a 48K. This is what would have caught it
+        // before anything wrote a file.
+        for model in [Model::Spectrum48K, Model::Spectrum128] {
+            for version in [Version::V2, Version::V3] {
+                assert_eq!(
+                    version.model(version.hardware_mode(model)),
+                    Some(model),
+                    "{version:?} {model}"
+                );
+            }
+        }
+        // And the two versions really do disagree about which byte that is, which is what
+        // makes a shared constant wrong rather than merely inelegant.
+        assert_ne!(
+            Version::V2.hardware_mode(Model::Spectrum128),
+            Version::V3.hardware_mode(Model::Spectrum128)
+        );
     }
 
     #[test]

@@ -433,6 +433,79 @@ notice is not the guard. The guard is that an *undeclared* absence moves the pas
 
 ---
 
+## `testdata/tzx/` and `testdata/games/` — `.tzx` tapes, and the one corpus with no fetch
+
+`.tzx` is the format that can carry a **turbo loader** — per-block pilot, sync and bit
+timings — which is what `.tap` cannot express at any speed and what most commercial titles
+are distributed as. `crates/spectrum/tests/tzx_corpus.rs` sweeps both directories for `*.tzx`
+and grades every file it finds.
+
+### There is no fetch command here, and that is the finding rather than an omission
+
+Every other corpus in this file is fetched from a named URL with a recorded SHA-256. This one
+is not, and the reason is worth stating plainly rather than leaving as a blank section:
+
+- **The `.tzx` files that exist in the wild are games**, and game images may not be
+  redistributed — the same rule that keeps `testdata/games/` gitignored and empty.
+- **The sources this workspace already uses have none.** `MrKWatkins/EmulatorTestSuites`,
+  which supplies the `.tap` corpus and the timing suite, was enumerated in full on 2026-09-01:
+  2178 files, **zero** `.tzx`. So the obvious place to point a `curl` at does not have one.
+
+### So this sweep is opportunistic, and it says so
+
+It is the **one** corpus here that does *not* use `crates/testsupport`'s absence policy. That
+policy makes a missing corpus a failure naming the fetch, and it is right everywhere else —
+but there is no fetch to name, so applying it would make every fresh clone fail with
+instructions nobody can follow. That is a worse failure than the one the policy guards
+against.
+
+| | |
+|---|---|
+| files present | every one must parse, on **both** models — and the ROM's own `LD-BYTES` must load the first standard-speed block of every file that reaches one, with **at least one file reaching one** |
+| no files | the sweep **prints that it verified nothing** and passes |
+
+The second row is a deliberate departure from this file's one-convention rule, and it is
+recorded in `docs/M6.md` rather than only here. **Drop any `.tzx` into either directory and it
+is graded immediately** — including a game, which is the case this exists for.
+
+### The floor in the first row, and why it is not `every file`
+
+Added 2026-09-01, after the sweep was measured doing less than its green suggested. With the two
+local games present it reported *"the ROM loaded the first block of **1 of 2** files"* and exited
+**0**; with a corpus it could grade nothing in at all it reported *"0 of 1"* and **still exited
+0**. A sweep that covers half of what it is handed, and says so only in a line nothing asserts on,
+is the shape `docs/STATUS.md` records three times.
+
+Two changes, and they close different halves:
+
+- **The scan walks the metadata preamble.** `MarioBros.tzx` opens with an archive-info block and a
+  text description, and the scan only ever looked at file offset 10 — so it was skipped in
+  silence. The block IDs that carry **no signal** are stepped over, from the format description's
+  own length column, transcribed in the test rather than read from the module under test. Blocks
+  that carry signal are never stepped over: starting a load mid-tape would report a pass for a
+  file the sweep never reached.
+- **`loaded > 0` when the corpus is non-empty.** Deliberately not `loaded == files.len()` — a file
+  whose first signal block is a *turbo* one genuinely cannot be graded by `LD-BYTES`, and
+  demanding otherwise would make a legitimate corpus red. Such a file is now named **with the
+  block ID that stopped the walk** rather than counted.
+
+The floor sits after the absent-corpus return, so the departure in the second row is untouched: an
+absent corpus still skips, because there is still no fetch to name. What the floor catches is the
+other failure — a corpus that is **present and not actually graded**.
+
+### What it grades that nothing else can
+
+Every other `.tzx` gate builds its bytes in the test, so a shared misreading of the block
+framing sits on both sides of the comparison and is invisible. `docs/STATUS.md` records that
+measured rather than assumed: the whole third-party *snapshot* corpus stayed **green** under a
+symmetric mutation.
+
+A file somebody else's tool wrote breaks that symmetry, and this sweep uses the strongest break
+available — **the real ROM loads the block, and checks its parity byte.** The file is theirs,
+the loader is Sinclair's, and neither is ours.
+
+---
+
 ## `testdata/roms/` — the Sinclair ROMs
 
 **This is the one directory here that is committed.** The rule at the top of this file —

@@ -132,7 +132,8 @@
 //!   regression once something works."* It is not dressed up as more than that.
 
 use macroquad::input::KeyCode;
-use spectrum::{Key, Keyboard};
+use spectrum::joystick::Direction;
+use spectrum::{Joystick, Key, Keyboard};
 
 /// What one host key does to the membrane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +189,17 @@ pub const BINDINGS: &[(KeyCode, Binding)] = &[
     (KeyCode::LeftControl, Binding::Membrane(Key::SymbolShift)),
     (KeyCode::RightShift, Binding::Alias(Key::CapsShift)),
     (KeyCode::RightControl, Binding::Alias(Key::SymbolShift)),
+    // A **third** alias for `SYMBOL SHIFT`, and the only row in this table that is here
+    // because of a browser. `docs/M8.md` Decision 2: `Ctrl`+`8` and `Ctrl`+`9` are `(` and
+    // `)`, a browser keeps them for switching tabs and does not offer them to the page, and
+    // `preventDefault` cannot reach a shortcut the page never receives. `Tab` is unbound in
+    // both tables, sits under the left little finger next to `Q`, and — the reason it is
+    // `Tab` and not some other spare key — miniquad's own `gl.js` already `preventDefault`s
+    // sapp keycode 258 with the comment `// tab - for UI`, so the browser's own use of it
+    // (moving focus off the canvas, which would end keyboard input for the session) is
+    // suppressed by the shipped bundle. `Ctrl`+`Tab` stays the browser's, which is correct:
+    // that is a browser action and not a combination anybody types on a Spectrum.
+    (KeyCode::Tab, Binding::Alias(Key::SymbolShift)),
     // ---- the two keys that are their own legend ----------------------------------------
     (KeyCode::Enter, Binding::Membrane(Key::Enter)),
     (KeyCode::Space, Binding::Membrane(Key::Space)),
@@ -335,6 +347,296 @@ pub const BINDINGS: &[(KeyCode, Binding)] = &[
     ), // /
 ];
 
+/// The four host keys an [`ArrowScheme`] redirects.
+///
+/// In [`BINDINGS`] order, so that [`apply_with`] can match a scheme's fields to them positionally
+/// without a second table saying which is which.
+const ARROW_KEYS: [KeyCode; 4] = [KeyCode::Left, KeyCode::Down, KeyCode::Up, KeyCode::Right];
+
+/// The Kempston directions the four [`ARROW_KEYS`] drive, in the same order.
+///
+/// Positional, so the two arrays cannot drift into disagreement without the compiler noticing
+/// the length.
+const ARROW_DIRECTIONS: [Direction; 4] = [
+    Direction::Left,
+    Direction::Down,
+    Direction::Up,
+    Direction::Right,
+];
+
+/// What the cursor keys press on the machine.
+///
+/// # A PC's arrows cannot map to one thing and be right, and that is a fact about the games
+///
+/// **The Spectrum has no arrow keys.** Nothing is printed on the membrane that means *move
+/// left*, so there is no printed meaning for the founding rule to follow, and games do not
+/// agree. Three camps, and this project has evidence for two of them:
+///
+/// - **The cursor keys** — physically `CAPS SHIFT` + `5`/`6`/`7`/`8`, which is what the arrows
+///   printed on those keys mean. Every game advertising *"cursor"* control reads these.
+/// - **Arbitrary letters**, chosen per game. **Manic Miner is here**: it reads `Q`–`P` for left
+///   and right and the bottom row for jump, read out of the game's own text at `0x9D31` rather
+///   than recalled. So the game the owner actually wants to play is **unreachable** through the
+///   cursor chord, whatever else is true.
+/// - **A Kempston joystick**, which is a separate port rather than the membrane, and which
+///   `crates/spectrum` does not have at all.
+///
+/// **So a single fixed mapping is wrong for some large fraction of any collection**, and the
+/// two ways of hiding that are both worse than admitting it: binding the arrows to the cursor
+/// chord alone leaves Manic Miner dead, and pressing *both* the cursor chord and a letter set
+/// at once — which several emulators do — means a game that happens to read `6` for something
+/// else sees it held down every time somebody walks left.
+///
+/// The honest answer is the one `docs/M8.md` Decision 13 takes: **the arrows are a choice, the
+/// choice is one keystroke away, and the current choice is on the screen.** That is not a
+/// cop-out; the alternative is a mapping that silently does the wrong thing on half the games.
+///
+/// # It is still one table and one path
+///
+/// A scheme replaces what four host keys do and nothing else. [`apply_with`] is the only
+/// function that presses anything, [`BINDINGS`] is still the only place the other fifty-three
+/// rows live, and both targets run the same code — the property that made four byte sources one
+/// `partition` and drag-and-drop one implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArrowScheme {
+    /// What to show a person who wants to know what the arrows currently do.
+    ///
+    /// **It names the audience, not just the keys, and that is the fix for a real defect.** The
+    /// first version of this table called the `CAPS SHIFT` chord `"cursor"` — which is correct
+    /// terminology and was read by the owner as *"the arrow keys"*, i.e. as the general answer
+    /// rather than as the editor's. He was looking straight at the name of the thing that was
+    /// wrong and it told him nothing. A name that says *who a scheme is for* is what the status
+    /// bar is worth having.
+    pub name: &'static str,
+
+    /// One line saying what this scheme sends and who it suits, shown when `F7` selects it.
+    ///
+    /// Separate from [`ArrowScheme::name`] because the two are read at different moments: the
+    /// name sits on the status bar every frame and has to be short, and this is shown once, at
+    /// the instant somebody asked the question by pressing the key.
+    ///
+    /// **ASCII only** — `tests/on_screen_strings.rs` records why: the status bar's font draws
+    /// anything else as an empty box, and that reached a user before a gate did.
+    pub hint: &'static str,
+
+    /// What the four arrow keys reach.
+    pub target: ArrowTarget,
+}
+
+/// What an [`ArrowScheme`] drives.
+///
+/// Two variants because a Kempston joystick is **not the membrane**: it is a separate port, read
+/// with `IN A,(31)` rather than by pulling an address line low. That is what makes it the
+/// cleanest arrow target available — a game reading the joystick cannot collide with anything
+/// another game reads on the keyboard, and vice versa — and it is also why it cannot be
+/// expressed as a [`Binding`].
+///
+/// It is still one input path: [`apply_with`] is the only function that presses anything, it
+/// rebuilds **both** devices from scratch every frame, and the variant only decides which of the
+/// two it writes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrowTarget {
+    /// Four membrane bindings, in the order of [`ARROW_KEYS`]: left, down, up, right.
+    Membrane([Binding; 4]),
+
+    /// The Kempston port.
+    ///
+    /// **Active high, and with no interlock** — the hardware allows left and right at once, so
+    /// nothing here prevents it either. `release_all` every frame is what stops a direction
+    /// sticking when the window loses focus, which is the same discipline `apply` already
+    /// applies to the membrane and for the same reason: a stuck direction is indistinguishable
+    /// from a broken emulator.
+    Kempston,
+
+    /// Four membrane bindings **and** the Kempston port, from the same keypress.
+    ///
+    /// # Why driving two devices at once is safe here and is not safe on the membrane
+    ///
+    /// This module already refuses to press *two membrane mappings* at once, and
+    /// [`apply_with`] says why in as many words: a game that happens to read `6` for something
+    /// else would see it held down every time somebody walks left. **That argument is about
+    /// two things sharing one device, and it does not carry over to this variant**, because
+    /// Kempston is not the membrane — it is a separate port, read with `IN A,(31)` rather than
+    /// by pulling an address line low. `crate::keymap`'s own [`ArrowTarget::Kempston`] doc and
+    /// `spectrum::joystick`'s header both state the property this rests on: *a game reading the
+    /// joystick cannot collide with anything another game reads on the keyboard, and vice
+    /// versa*.
+    ///
+    /// So the port half is collision-free **by construction**, and the risk of the pair is
+    /// exactly the risk of its membrane half alone — which is the argument for combining rather
+    /// than choosing. `tests/keymap_under_a_game.rs` asserts the two halves stay in their own
+    /// devices.
+    ///
+    /// # It is a superset, measured rather than argued
+    ///
+    /// Manic Miner, run from `testdata/games/ManicMiner.tap` on 2026-09-01, reads **both**: the
+    /// bare digit and the port produce byte-identical machine state after an identical hold, and
+    /// discarding the joystick instead of handing it to the machine makes the port branch
+    /// identical to holding nothing at all. A game reads one or the other, so a scheme that
+    /// sends both reaches strictly more titles than either half — at no cost on a game that
+    /// reads only one, which is what "identical" above measures.
+    Both([Binding; 4]),
+}
+
+/// A chord under `CAPS SHIFT`, which is how the machine's own cursor keys are typed.
+const fn cursor(key: Key) -> Binding {
+    Binding::Chord {
+        shift: Key::CapsShift,
+        key,
+    }
+}
+
+/// Every arrow mapping, in the order `F7` cycles them.
+///
+/// # These are read out of the games, not chosen
+///
+/// Six games from the owner's own collection were disassembled on 2026-09-01 — the movement
+/// routines decoded from memory, not the instruction text, because **the instruction text is
+/// wrong about at least one of them**. What that found:
+///
+/// | Game | What it reads | How that was established |
+/// |---|---|---|
+/// | **Manic Miner** | Left `Q E T U O`, right `W R Y I P` — *interleaved*, not two halves — **and plain `5`/`8`**, and `7`/`0` for jump, and the whole bottom row for jump | Decoded at `0x8BFB`–`0x8C7F`, byte-identical across five images |
+/// | **Cybernoid II** | Defaults `O` left, `P` right, `Q` up, `SPACE` fire; redefinable | Four decoded key slots at `0x2181`–`0x219F` |
+/// | **Cybernoid I** | Same engine, same menu; this snapshot's slots all read `6` | Decoded; the defaults are not recoverable from it |
+/// | **Exolon** | Redefinable; one default readable, key `O` | Decoded at `0x2056` |
+/// | **Mario Bros** | **Nothing fixed.** It scans all eight half-rows into a buffer and redefines | Decoded at `0xB79F` |
+/// | **Batty** | Nothing readable — body is compressed, 7.97 bits/byte | Measured entropy |
+///
+/// **Three of the six read no fixed keys at all**, which settles the design question on its own:
+/// there is no single mapping to find, and the emulator's job is to be able to deliver *any*
+/// key so that a game's own redefine menu works.
+///
+/// # The default was chosen against the wrong thing, and this records the correction
+///
+/// The machine's own cursor keys are `CAPS SHIFT` + `5`/`6`/`7`/`8`, and that is what the arrows
+/// must do in BASIC — it is the printed meaning, and it is what [`BINDINGS`] has always said.
+///
+/// **But a game reading "cursor keys" reads the bare digit**, and pressing the chord presses
+/// `CAPS SHIFT` as well. For Manic Miner that is not a harmless extra: its jump routine is
+/// `LD BC,7EFEh : IN A,(C)`, and `B = 0x7E` pulls A8 and A15 low **together**, merging the row
+/// that contains `CAPS SHIFT` into the read. Holding the cursor chord to walk therefore makes
+/// Willy jump.
+///
+/// **All of that was written here, in this file, before the defect shipped — and the chord was
+/// still made the default.** The reason given was that it *"is what `BINDINGS` says, so a build
+/// that never touches `F7` behaves exactly as it did before schemes existed"*. That reasoning
+/// weighed continuity with a previous build against being able to play, and continuity is not
+/// something anybody asked for. The owner asked for the cursor keys to be the way he plays
+/// games; the first thing he reported was *"whatever key I press, he jumps"*.
+///
+/// **The lesson is not "we forgot".** The hazard was identified, documented in full, and gated
+/// against — `tests/keymap_under_a_game.rs` asserted that the cursor scheme trips the jump read
+/// **and shipped that as the default anyway**, because the gate graded the scheme rather than
+/// the choice of default. A predicted hazard placed behind a key the user has to know to press
+/// is an unshipped fix. So the default is now the scheme that works in a game, and the chord is
+/// one `F7` away for the editor.
+///
+/// Measured on 2026-09-01, from `.agent-workspace/manic-miner/probes/mm-from-tape.z80`, two runs
+/// of the same deterministic machine over the same 12 frames, one with an arrow held:
+///
+/// | Scheme | `Right` held | What moved |
+/// |---|---|---|
+/// | `cursor` | walks **and jumps** | the same three bytes `SPACE` moves, every time |
+/// | this default | walks | the walk bytes only; the jump bytes untouched |
+///
+/// # Why the default sends the digits *and* the port
+///
+/// A game reads the keyboard or it reads Kempston, and nothing can know which in advance —
+/// three of the six games disassembled read no fixed keys at all. The port cannot collide with
+/// the membrane ([`ArrowTarget::Both`] sets out why), so sending both covers strictly more
+/// titles than either half at no cost to the other. Manic Miner reads both, and the two produce
+/// identical state.
+///
+/// **What was rejected:** Kempston *alone* as the default. It collides with nothing, but it
+/// reaches nothing on a game that does not read the port — which is a control that silently does
+/// the wrong thing wearing the other mask, and this project has already fixed a drop that
+/// silently did nothing for that exact reason. It stays in the cycle for the game that needs the
+/// port without the digits.
+pub const ARROW_SCHEMES: &[ArrowScheme] = &[
+    ArrowScheme {
+        // **The default.** The digits without `CAPS SHIFT`, so nothing trips a merged-row jump
+        // read, plus the port, which no keyboard read can see. `5` left, `8` right, `7` jump on
+        // Manic Miner; the port for everything that offers a joystick.
+        name: "5678 + Kempston",
+        hint: "arrows send 5/6/7/8 and the Kempston port - what most games read",
+        target: ArrowTarget::Both([
+            Binding::Membrane(Key::Num5),
+            Binding::Membrane(Key::Num6),
+            Binding::Membrane(Key::Num7),
+            Binding::Membrane(Key::Num8),
+        ]),
+    },
+    CURSOR_KEYS,
+    ArrowScheme {
+        // Cybernoid II's decoded defaults, and the commonest arbitrary set there is. `O` and
+        // `P` are also in Manic Miner's left and right groups respectively, so this plays that
+        // too — `Q` is the one to avoid there, because Manic Miner reads `Q` as **left**.
+        name: "QAOP",
+        hint: "arrows send Q/A/O/P - the commonest hand-picked set",
+        target: ArrowTarget::Membrane([
+            Binding::Membrane(Key::O),
+            Binding::Membrane(Key::A),
+            Binding::Membrane(Key::Q),
+            Binding::Membrane(Key::P),
+        ]),
+    },
+    ArrowScheme {
+        // Sinclair joystick 1 as plain keys: 6 left, 7 right, 8 down, 9 up. Both Cybernoid
+        // games and Exolon offer an "INTERFACE 2" option that reads exactly these.
+        name: "Sinclair 1",
+        hint: "arrows send 6/7/8/9 - for a game offering INTERFACE 2",
+        target: ArrowTarget::Membrane([
+            Binding::Membrane(Key::Num6),
+            Binding::Membrane(Key::Num8),
+            Binding::Membrane(Key::Num9),
+            Binding::Membrane(Key::Num7),
+        ]),
+    },
+    ArrowScheme {
+        // Sinclair joystick 2: 1 left, 2 right, 3 down, 4 up.
+        name: "Sinclair 2",
+        hint: "arrows send 1/2/3/4 - INTERFACE 2, second stick",
+        target: ArrowTarget::Membrane([
+            Binding::Membrane(Key::Num1),
+            Binding::Membrane(Key::Num3),
+            Binding::Membrane(Key::Num4),
+            Binding::Membrane(Key::Num2),
+        ]),
+    },
+    ArrowScheme {
+        // The port on its own. The default already includes it; this is here for the game that
+        // reads the port *and* reads a bare digit for something else, where the digits have to
+        // go. Last in the cycle because it reaches nothing on a game that ignores the port.
+        name: "Kempston only",
+        hint: "arrows send the Kempston port and no key at all",
+        target: ArrowTarget::Kempston,
+    },
+];
+
+/// The arrows as the machine's own: `CAPS SHIFT` with `5`/`6`/`7`/`8`.
+///
+/// # Named, rather than being whichever row of [`ARROW_SCHEMES`] happens to be first
+///
+/// This is the one scheme that is not a preference: it is what the legend prints on those keys,
+/// what [`BINDINGS`] says, and what [`apply`] must keep doing. `zx-shot` types BASIC through
+/// `apply`, and `tests/keymap_table.rs` grades the table through it — so `apply` has to mean
+/// *the table*, permanently, and not *the current default*, which is a thing that changes.
+///
+/// Those two were the same value until the default moved, and a constant that is only correct
+/// while two unrelated decisions happen to agree is a defect waiting for the next edit. One
+/// definition, referenced from both places, so they cannot drift apart.
+const CURSOR_KEYS: ArrowScheme = ArrowScheme {
+    name: "cursor (BASIC)",
+    hint: "arrows send CAPS SHIFT + 5/6/7/8 - the editor's cursor keys",
+    target: ArrowTarget::Membrane([
+        cursor(Key::Num5),
+        cursor(Key::Num6),
+        cursor(Key::Num7),
+        cursor(Key::Num8),
+    ]),
+};
+
 /// Something the *emulator* does, as opposed to something the machine does.
 ///
 /// # The tape is three keys and not a toggle, which is a finding rather than a preference
@@ -374,6 +676,11 @@ pub enum Hotkey {
     RewindTape,
     /// Press the reset button.
     Reset,
+    /// Point the arrow keys at the next mapping in [`ARROW_SCHEMES`].
+    ///
+    /// A runtime choice rather than a build-time one because the right answer is a property of
+    /// the **game**, and one artefact is meant to run more than one game.
+    CycleArrows,
 }
 
 /// Host keys the emulator keeps for itself.
@@ -390,6 +697,7 @@ pub const HOTKEYS: &[(KeyCode, Hotkey)] = &[
     (KeyCode::F4, Hotkey::StopTape),
     (KeyCode::F5, Hotkey::RewindTape),
     (KeyCode::F6, Hotkey::Reset),
+    (KeyCode::F7, Hotkey::CycleArrows),
 ];
 
 /// Set `keyboard` to exactly what `is_down` reports, and nothing else.
@@ -407,13 +715,67 @@ pub const HOTKEYS: &[(KeyCode, Hotkey)] = &[
 /// that this function — the one piece of the keymap with behaviour rather than data — can be
 /// driven from a test without a window. The gate that presses `,` and asserts `SYMBOL SHIFT`
 /// and `N` come down together exists because of this seam.
-pub fn apply(mut is_down: impl FnMut(KeyCode) -> bool, keyboard: &mut Keyboard) {
+pub fn apply(is_down: impl FnMut(KeyCode) -> bool, keyboard: &mut Keyboard) {
+    // **[`CURSOR_KEYS`], not `ARROW_SCHEMES[0]`, and the difference is the whole point.** This
+    // function means *the [`BINDINGS`] table*: `zx-shot` types BASIC through it, and
+    // `tests/keymap_table.rs` grades the table through it. `ARROW_SCHEMES[0]` means *the
+    // window's current default*, which moved the day a game turned out to need a different one.
+    // Pointing this at the default made those two decisions the same decision, so changing the
+    // one silently changed the other — in a binary this file does not own.
+    //
+    // `CURSOR_KEYS` is a membrane scheme, so the returned joystick is always released and
+    // discarding it loses nothing. A caller wanting a scheme uses [`apply_with`].
+    let _ = apply_with(is_down, keyboard, &CURSOR_KEYS);
+}
+
+/// [`apply`], with the arrow keys pointed at `scheme` instead of at their [`BINDINGS`] rows.
+///
+/// The four host keys in [`ARROW_KEYS`] take their binding from `scheme`; every other row comes
+/// from `BINDINGS` exactly as before. **They are replaced rather than added to**: pressing both
+/// the cursor chord and a letter set is what makes a game that reads `6` for something else see
+/// it held down every time somebody walks left, and that failure is silent and looks like a bug
+/// in the game.
+///
+/// [`CURSOR_KEYS`] reproduces the `BINDINGS` rows exactly, so calling this with it is the same
+/// thing as calling [`apply`] — which is what lets every existing gate keep grading the table
+/// rather than the scheme.
+pub fn apply_with(
+    mut is_down: impl FnMut(KeyCode) -> bool,
+    keyboard: &mut Keyboard,
+    scheme: &ArrowScheme,
+) -> Joystick {
+    // **The joystick is returned rather than mutated, and that is not a style choice.**
+    // `Spectrum` hands out `keyboard_mut` and `joystick_mut` separately, so a function taking
+    // both would need two simultaneous `&mut` borrows of the same machine and would not
+    // compile. Building a fresh `Joystick` and handing it back is also the more honest shape:
+    // *rebuilt from the host's state every frame* is literally what a returned value is.
+    //
+    // It matters more here than for the membrane. Kempston is **active high** and has no
+    // interlock, so a direction the host stops reporting — a lost window focus, a backgrounded
+    // browser tab — would stay pressed for the rest of the session under any design that
+    // tracked edges. `Joystick::default()` is every direction released.
     keyboard.release_all();
+    let mut joystick = Joystick::default();
+
     for &(code, binding) in BINDINGS {
-        if is_down(code) {
-            binding.press(keyboard);
+        if !is_down(code) {
+            continue;
+        }
+        let arrow = ARROW_KEYS.iter().position(|&key| key == code);
+        match (arrow, scheme.target) {
+            (Some(index), ArrowTarget::Membrane(bindings)) => bindings[index].press(keyboard),
+            (Some(index), ArrowTarget::Kempston) => joystick.press(ARROW_DIRECTIONS[index]),
+            // Two devices, one keypress. Safe only because they *are* two devices: see
+            // [`ArrowTarget::Both`] for why this is not the both-at-once the paragraph above
+            // refuses, which is two mappings sharing the membrane.
+            (Some(index), ArrowTarget::Both(bindings)) => {
+                bindings[index].press(keyboard);
+                joystick.press(ARROW_DIRECTIONS[index]);
+            }
+            (None, _) => binding.press(keyboard),
         }
     }
+    joystick
 }
 
 /// The bound host key `name` refers to, matched case-insensitively.

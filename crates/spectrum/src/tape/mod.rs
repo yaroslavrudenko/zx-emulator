@@ -43,6 +43,14 @@
 //! untouched — which is the same argument `crate::snapshot` makes for keeping the machine's
 //! state rather than a file format as its canonical type.
 //!
+//! > **That prediction was cashed in, and it held.** [`tzx`] landed as a converter:
+//! > [`Tape`] gained no field, no method and no variant to accommodate it, and nothing in
+//! > [`crate::ula`] was touched. What the two converters do share — *"most significant bit
+//! > first, two equal half-periods per bit"*, *"a data block is a pilot tone, a sync pair,
+//! > then those bits"*, and the ceiling on how large a train may grow — lives once, in
+//! > [`signal`], because `.tzx`'s standard-speed block **is** a `.tap` block and its
+//! > turbo-speed block is the same shape with the numbers read from the file instead.
+//!
 //! Materialising every pulse costs about 16 `u32`s per data byte plus the pilot tone, so a
 //! 48 KB tape is a few megabytes. `docs/ARCHITECTURE.md` makes performance a non-goal and
 //! nothing here is on a hot path; a lazy generator would save the memory and cost a state
@@ -56,7 +64,10 @@
 //! moves the clock **and** the tape, and every `Clock::advance` call site routes through it —
 //! one place, so the two cannot drift.
 
+mod reader;
+mod signal;
 pub mod tap;
+pub mod tzx;
 
 use std::fmt;
 
@@ -85,10 +96,130 @@ pub enum Error {
     /// The flag byte is what decides the pilot tone's length, so a block without one cannot
     /// be converted into a signal at all. Refused rather than skipped: a file this malformed
     /// is one we have misparsed, and saying so beats playing a tape that is missing a block.
+    ///
+    /// Shared by [`tap`] and by [`tzx`]'s standard-speed block, which is the same block in a
+    /// different wrapper and has the same reason to refuse.
     #[error("the block at offset {offset} declares a length of zero")]
     EmptyBlock {
         /// Where the two-byte length word begins.
         offset: usize,
+    },
+
+    /// The file does not open with `ZXTape!` and the end-of-text marker.
+    #[error("that is not a .tzx file: it does not begin with the ZXTape! signature")]
+    NotATzxFile,
+
+    /// A `.tzx` major revision this converter does not claim to handle.
+    ///
+    /// The minor number is carried in the message but is never the reason: the format requires
+    /// a program to accept any *minor* revision above its own, and an unhandled block within
+    /// one is refused by ID instead.
+    #[error("this is a .tzx revision {major}.{minor}, and only major revision 1 is supported")]
+    UnsupportedVersion {
+        /// The file's major revision.
+        major: u8,
+        /// The file's minor revision.
+        minor: u8,
+    },
+
+    /// A block ID the format description does not define.
+    ///
+    /// Refused rather than skipped by the format's general extension rule, because that rule
+    /// only covers blocks added after revision 1.10 — so applying it to an unrecognised ID
+    /// would skip an arbitrary span of the file and play a wrong train in silence.
+    #[error("unknown .tzx block ID {id:#04X} at offset {offset}")]
+    UnknownBlock {
+        /// Where the block's ID byte is.
+        offset: usize,
+        /// The ID byte.
+        id: u8,
+    },
+
+    /// A block whose extent or whose contents this converter cannot determine.
+    ///
+    /// Two different situations, deliberately one error, because the consequence is identical
+    /// and so is what a user can do about it: the tape cannot be played and the block is
+    /// named. `0x16` and `0x17` have a length the format description gives two incompatible
+    /// answers for; `0x18` and `0x19` have a knowable length and carry **signal**, so skipping
+    /// them would drop part of the tape rather than part of its metadata.
+    #[error("unsupported .tzx block ID {id:#04X} at offset {offset}")]
+    UnplayableBlock {
+        /// Where the block's ID byte is.
+        offset: usize,
+        /// The ID byte.
+        id: u8,
+    },
+
+    /// A structural block where the format does not allow one.
+    ///
+    /// A loop end with no loop open, a return with no call in progress, or a nesting the
+    /// format forbids.
+    #[error("misplaced .tzx block ID {id:#04X} at offset {offset}")]
+    MisplacedBlock {
+        /// Where the block's ID byte is.
+        offset: usize,
+        /// The ID byte.
+        id: u8,
+    },
+
+    /// A `Used bits in the last byte` field outside the format's range of 1 to 8.
+    #[error("the block at offset {offset} plays {bits} bits of its last byte, not 1 to 8")]
+    UsedBitsOutOfRange {
+        /// Where the field is.
+        offset: usize,
+        /// What it said.
+        bits: u8,
+    },
+
+    /// A jump, call or loop that leaves the file.
+    #[error("the block at offset {offset} jumps to block {target} of {blocks}")]
+    JumpOutOfRange {
+        /// Where the jumping block's ID byte is.
+        offset: usize,
+        /// How many blocks the file has.
+        blocks: usize,
+        /// Where it wanted to go. Signed, because a backward jump that overshoots is negative.
+        target: i64,
+    },
+
+    /// The file asks for a longer tape than this crate will build.
+    ///
+    /// **This is the allocation bound**, and it is what makes a `.tzx` loop block safe: three
+    /// bytes can ask for a body to be replayed 65535 times, which is a train sized from the
+    /// file rather than from the file's length. Reaching the ceiling is this value rather than
+    /// an allocation.
+    #[error("the block at offset {offset} would take the tape past {limit} half-periods")]
+    TapeTooLong {
+        /// Where the block that overflowed the tape begins.
+        offset: usize,
+        /// The ceiling.
+        limit: usize,
+    },
+
+    /// A single half-period longer than a `u32` of T-states.
+    ///
+    /// Only a direct recording can ask for one, by multiplying a sample count by a sample
+    /// rate. Refused rather than saturated: a half-period of twenty minutes is a file we have
+    /// misread, not a tape.
+    #[error("the block at offset {offset} asks for a half-period longer than a u32 of T-states")]
+    PulseTooLong {
+        /// Where the block begins.
+        offset: usize,
+    },
+
+    /// The file's jumps and loops never reached its end.
+    ///
+    /// **This is the termination bound**, and it is separate from [`Error::TapeTooLong`]
+    /// because a block can be replayed forever while emitting nothing — a jump to itself, or a
+    /// loop over blocks that carry no signal — so the tape's length would never grow to catch
+    /// it. Unlike every other loop in this crate, progress here is not structural: a jump
+    /// revisits a block without consuming any input, so this is a budget and is named as one.
+    #[error("the block at offset {offset} was still playing after {limit} blocks")]
+    TooManyBlocksPlayed {
+        /// Where the block being played when the budget ran out begins.
+        offset: usize,
+        /// The budget.
+        limit: usize,
     },
 }
 
@@ -230,9 +361,12 @@ mod tests {
     ///
     /// Listed rather than globbed, because a file that quietly stopped being scanned would be
     /// indistinguishable from a file with nothing to find.
-    const SOURCES: [(&str, &str); 2] = [
+    const SOURCES: [(&str, &str); 5] = [
         ("tape/mod.rs", include_str!("mod.rs")),
+        ("tape/reader.rs", include_str!("reader.rs")),
+        ("tape/signal.rs", include_str!("signal.rs")),
         ("tape/tap.rs", include_str!("tap.rs")),
+        ("tape/tzx.rs", include_str!("tzx.rs")),
     ];
 
     /// The production half of `source` — everything above its `#[cfg(test)]` module.
@@ -250,19 +384,31 @@ mod tests {
         // attacker-controlled block lengths, so the requirement is not "do not panic on the
         // inputs we tested"; it is that the constructs are absent.
         //
-        // The sibling gate in `snapshot/mod.rs` also scans for slice **indexing**, with a
-        // scanner that has its own failing cases. That scanner is inside another module's
-        // test tree and is not reachable from here; lifting it into a shared test helper is
-        // the right fix and is left for whoever next owns both modules. Until then this file
-        // asserts the half a substring search can decide, and `tap.rs`'s exhaustive
-        // truncation sweep asserts the behaviour — the two are not substitutes.
-        const FORBIDDEN: [&str; 6] = [
+        // The sibling half of this gate — the scan for slice **indexing** — is now
+        // `there_is_no_indexing_anywhere_in_the_tape_module`, below. It was left open when
+        // `tap.rs` was the only parser here, with a note that lifting it was *"the right fix
+        // and is left for whoever next owns both modules"*; `.tzx` reads thirty fields across
+        // twenty block types out of attacker-controlled bytes, which is what made the cursor
+        // worth having and the gate worth writing.
+        //
+        // It is a second scanner rather than a shared one, because `snapshot/`'s counts over
+        // `snapshot/`'s five files and this one counts over `tape/`'s five. A shared helper
+        // would make one bug in the scanner turn both gates green at once, which is the
+        // failure mode `docs/STATUS.md` records under a gate that verifies nothing.
+        // The last two are slice calls rather than panic macros, and they are here because the
+        // indexing scanner below cannot see them: `a.split_at(n)` panics when `n > a.len()` and
+        // is not an index expression, so `tape/`'s totality claim had a hole exactly the width of
+        // the one construct a wrong length in a file would reach. The trailing `(` is what keeps
+        // `.split_at(` from also matching the total `.split_at_checked(` that `Reader::take` uses.
+        const FORBIDDEN: [&str; 8] = [
             ".unwrap()",
             ".expect(",
             "panic!(",
             "todo!(",
             "unimplemented!(",
             "unreachable!(",
+            ".split_at(",
+            ".copy_from_slice(",
         ];
         for (name, source) in SOURCES {
             for (number, line) in production(source).lines().enumerate() {
@@ -289,6 +435,86 @@ mod tests {
             assert!(
                 production(source).len() < source.len(),
                 "{name} has no `#[cfg(test)]` module, so the scanner is reading all of it"
+            );
+        }
+    }
+
+    /// Lines holding an index expression, as `(line number, line)`.
+    ///
+    /// An index expression is a `[` **immediately** preceded by an identifier character, a `)`
+    /// or a `]` — which is what `a[i]`, `f()[i]` and `a[i][j]` look like, and what `[u8; N]`,
+    /// `&[u8]`, `from_le_bytes([..])` and `#[derive(..)]` do not. Comments are stripped first,
+    /// so a doc link cannot be mistaken for one.
+    fn indexing_sites(source: &str) -> Vec<(usize, String)> {
+        source
+            .lines()
+            .enumerate()
+            .filter_map(|(number, line)| {
+                let code = line.split("//").next().unwrap_or(line);
+                let characters: Vec<char> = code.chars().collect();
+                let indexed = characters.windows(2).any(|pair| {
+                    matches!(pair, [before, '['] if before.is_alphanumeric()
+                        || *before == '_'
+                        || *before == ')'
+                        || *before == ']')
+                });
+                indexed.then(|| (number + 1, code.trim().to_owned()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_indexing_scanner_can_tell_an_index_from_an_array_type() {
+        // The gate below is only worth running if this function distinguishes the two, so it
+        // has its own failing cases in **both** directions. Without the positive ones it would
+        // be a scanner that finds nothing while asserting that nothing is there, which is this
+        // project's own recurring failure — a count of zero and an absence of the subject are
+        // the same observation.
+        for indexing in [
+            "self.pulses[index]",
+            "let flag = block[0];",
+            "value.to_le_bytes()[0]",
+            "table[row][column] = 1;",
+            "SIGNATURE[0]",
+        ] {
+            assert_eq!(
+                indexing_sites(indexing).len(),
+                1,
+                "{indexing:?} is an index expression"
+            );
+        }
+        for innocent in [
+            "fn f(bytes: &[u8]) -> [u8; 2] {",
+            "const SIGNATURE: [u8; 7] = *b\"ZXTape!\";",
+            "Ok(u32::from_le_bytes([low, middle, high, 0]))",
+            "#[derive(Debug, Clone, Copy)]",
+            "blocks: &'a [Block<'a>],",
+            "// self.pulses[index] in a comment",
+            "/// A doc link to [`Reader::take`] and a pulses[0] mention",
+        ] {
+            assert_eq!(
+                indexing_sites(innocent),
+                Vec::<(usize, String)>::new(),
+                "{innocent:?} is not an index expression"
+            );
+        }
+    }
+
+    #[test]
+    fn there_is_no_indexing_anywhere_in_the_tape_module() {
+        // `docs/M6.md` Decision 6, as a property of the source rather than a sentence in a doc
+        // comment. Slice indexing is one of the three panic sources a hostile file can reach in
+        // safe Rust, and this crate builds with `panic = "abort"` in release — so a `.tzx` with
+        // a wrong length would not be a caught error but a dead process.
+        //
+        // Structural impossibility beats a passing test, so this asserts the structure;
+        // `tzx.rs`'s exhaustive truncation sweep and `tests/tzx_hostile.rs` assert the
+        // behaviour, and the two are not substitutes for each other.
+        for (name, source) in SOURCES {
+            assert_eq!(
+                indexing_sites(production(source)),
+                Vec::<(usize, String)>::new(),
+                "{name} indexes a slice; route it through Reader instead"
             );
         }
     }
