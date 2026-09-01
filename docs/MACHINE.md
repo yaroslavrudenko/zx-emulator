@@ -49,6 +49,27 @@ in**, not of the address range, so the check happens per access against the curr
 `Memory` must keep the bank index **provably in range** — a newtype or a mask at the point of use.
 Measured at M1: an unproven index costs 6.6 % in bounds checks, and it is free to avoid.
 
+> **The 6.6 % is falsified, and the sentence is left standing because the decision it justified
+> has shipped and someone will come looking for the number.** The decision itself is unchanged —
+> `BankIndex`/`RomIndex` mask on construction and at the point of use, and
+> `crates/spectrum/src/memory.rs` builds on that. What is wrong is its stated **price**.
+>
+> `benches/step.rs` now *measures* the difference instead of quoting it: `PagedRam<MASKED>` is
+> one bus with one line of difference — `banks[self.slots[slot]]` against
+> `banks[self.slots[slot] & 3]`. The masking does what it claims, verified in the emitted
+> assembly: all four `panic_bounds_check` sites on the access paths sit in the `MASKED = false`
+> instantiation and the masked one has none. **And it buys nothing measurable.** Over four runs
+> the masked variant was *slower* in three; the spread within one variant (±1.4 %) is larger than
+> the difference between them and the sign does not hold. A 6.6 % effect would be ~10 µs on a
+> ~148 µs workload and it is not there. Numbers, command and dates are in
+> [`ARCHITECTURE.md`](ARCHITECTURE.md)'s *Measured* section and **only** there.
+>
+> So *"it is free to avoid"* survives and *"an unproven index costs 6.6 %"* does not. The bank
+> index stays provable because a masked index is clearer and cannot be got wrong, not because it
+> was bought with a measured 6.6 %. **Nobody should spend a newtype at M7 expecting to buy back
+> time.** The original claim's method was never recorded, which is why it could only be re-taken
+> rather than defended — the class is written up in [`STATUS.md`](STATUS.md).
+
 ## Decision 4 — the ULA is the second clock, and it is the hard part
 
 The ULA both *draws* and *stalls*. Those are one mechanism seen from two sides: the screen address
@@ -87,6 +108,40 @@ Ranked by how much they actually prove:
    remains, as an example; it is no longer the gate. The mutation verdicts above were measured
    before it landed and are left as they were recorded — they are what the *boot gate* proves, and
    `crates/spectrum/src/lib.rs` carries the current coverage table.
+
+   **What those verdicts are worth was then re-measured, and the finding got smaller and
+   sharper.** Re-run at `2157331` against the pre-gate lib target — baseline 72 passed, no
+   `tests/` directory, each mutation's landing asserted before its verdict — **four of the five
+   were already red** from unit tests inside `src`, which an example nothing calls never involved:
+
+   | Mutation | Verdict, pre-gate | Failing tests |
+   |---|---|---|
+   | `/INT` never asserted | **RED** | 5 |
+   | Keyboard reports every key held | **RED** | 7 |
+   | ROM slot made writable | **RED** | 1 |
+   | Contention removed entirely | **RED** | 13 |
+   | Contention phase off by one | **GREEN** | — |
+
+   **The contention phase is the only survivor of the five.** A permutation of the keyboard
+   matrix survives too and is the other reason `keyboard_matrix.rs` exists, but it **is not among
+   the five above**; a cold review found it separately. So the honest before-picture is not "five
+   properties were ungraded" but this: **the machine's behaviour was tested in isolation and never
+   through the machine**, and the contention phase and the matrix wiring had no gate in any form.
+   That is a smaller claim than the five green rows suggest and a more precise one, and it is what
+   makes the two surviving mutations the significant ones —
+   `crates/spectrum/tests/contention_phase.rs` and `keyboard_matrix.rs` exist because nothing
+   anywhere could see those two properties.
+
+   > **This passage said *"three of the five"*, *"only two mutations survived"*, and — worst —
+   > *"which three were already red is not recorded here and is not derived here",* naming the
+   > command that would derive it.** All three sentences are replaced above by the derivation
+   > itself. The hedge is the part worth noticing: it correctly identified that the figure was
+   > un-derived, printed the one-line command that settles it, and then the figure was quoted for
+   > three documents anyway. **Naming what would settle a claim is not a substitute for settling
+   > it**, particularly when the cost is one command. `STATUS.md` records the class.
+
+   `STATUS.md`'s M5 section carries the full account, and the ten mutations that turn today's
+   seven gates red.
 2. **A known-timing test program** — the Spectrum community's contention test suites report
    measured T-state counts for the machine to print. That is the closest thing to an oracle
    available, and it is a real one: a number to compare, not a picture to squint at.
@@ -105,10 +160,22 @@ the failure this project keeps catching.
 
 | | Goal | Gate |
 |---|---|---|
-| **M5** | 48K: paged memory, ULA screen, keyboard, 50 Hz interrupt | boots to the copyright message |
+| **M5** | 48K: paged memory, ULA screen, keyboard, 50 Hz interrupt | **seven gates in `crates/spectrum/tests/`** — boot **and the frame it lands on**, the 50 Hz interrupt line, the 40 × 8 keyboard matrix, ROM write protection through all three write paths, contention magnitude (the whole read-modify-write family), contention phase, and the four-case I/O rule through a real `Cpu<Ula>` |
 | M6 | `.z80`/`.sna` snapshots, `.tap` tape | a real game runs |
 | M7 | 128: paging, second ROM, AY-3-8912, per-bank contention | 128-only software runs |
 | M8 | WASM + macroquad | playable from a URL |
+
+> **The M5 row said *"boots to the copyright message"*, and that is corrected here rather than
+> quietly widened.** It was the whole gate at commit `2157331` — and this document's own
+> verification plan, three sections above, records what M5 then measured about it: the boot check
+> grades the memory map's read side and the screen, five mutations left it green, and at that
+> commit **nothing ran it at all**, because it was an example. `bf8414d` shipped six real gates
+> and ten mutations proven to turn them red, and `io_contention.rs` has since made it seven —
+> closing one of the *Still ungraded* rows in the process. This was the last line in the file
+> still implying
+> the single-gate picture, which is precisely how a corrected finding gets un-corrected: the
+> narrative section is rewritten and the summary table, which is what people actually read, is
+> not. [`STATUS.md`](STATUS.md)'s M5 section carries the gate table and the mutation verdicts.
 
 Contention lands at M5 for the 48K and is extended at M7. It is not deferred: the entire `tick`
 contract exists for it, and a machine built without it would have to be rebuilt rather than
@@ -180,6 +247,18 @@ one internal cycle at the address it has just read.** That is the read-modify-wr
 `INC`/`DEC (HL)` and `(IX+d)`/`(IY+d)`, the `CB` bit/rotate/shift group on memory, and
 `EX (SP),HL`/`IX`/`IY`. Longer internal runs resolved, and so did every opcode fetch.
 
+> **"0 to 6" is the *isolated stall*, not the error — read it with the correction two sections
+> below before acting on it.** The sentence above is left as it was recorded, because this project
+> corrects loudly rather than deleting quietly and because a reader who has already acted on that
+> number needs to find out. But 0–6 is what `delay(t)` charges a single cycle *taken alone*, and
+> that is a different quantity from what the heuristic actually got wrong. **The net observable
+> error on `INC (HL)`, swept over all 448 start positions, was 0 or 1 T-state and never more** —
+> dropping a stall opens the following cycle earlier, where the pattern charges most of it
+> straight back. Conflating the two is not cosmetic: it is what made 30 a plausible answer for
+> `INC (HL)`'s contended cost at phase 0, where the machine cycles give 26. See *The machine has
+> taken it, and the deferral is retired*, below, and *A missing stall cannot be added to a total*
+> in [`STATUS.md`](STATUS.md).
+
 ### The fix landed in the CPU
 
 `crates/z80/src/bus.rs` carries the sixth method, defaulted exactly as the quoted paragraph
@@ -222,6 +301,15 @@ rather than 0, so four of the five came straight back. **A missing stall cannot 
 because every stall shifts the ones after it** — the same property `ula.rs` already spells out for
 the four-case I/O pattern, applied one cycle at a time. Anyone re-deriving this from a claimed
 residual rather than from the machine cycles will land on 30, and 30 is wrong.
+
+Phase 0 is not a lucky case: **swept over all 448 start positions, the heuristic's total for
+`INC (HL)` was wrong by 0 or 1 T-state and never more.** So the recorded residual's "0 to 6" is not
+an error bound at any phase — it is the isolated stall, and the two quantities should never be
+written as one number. The sweep is carried here from [`STATUS.md`](STATUS.md) and
+[`CHANGELOG.md`](../CHANGELOG.md), which both record it; **it was not re-derived in this pass**,
+and it is no longer reproducible from the crate, because comparing the two totals requires the
+heuristic that `machine_cycle.rs` held and that file is deleted. Whoever wants it independent must
+re-implement the deferral against the current `Ula` and re-sweep.
 
 The change is a correctness fix and is justified on that ground alone; `ARCHITECTURE.md`'s position
 that performance is a non-goal is not in tension with it. Measured against the real ROM, the boot
