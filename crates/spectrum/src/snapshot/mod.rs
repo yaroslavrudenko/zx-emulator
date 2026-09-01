@@ -86,7 +86,6 @@ use crate::ay::{self, Ay};
 use crate::memory::{BANK_COUNT, BankIndex, PAGE_SIZE};
 use crate::model::Model;
 use crate::screen::Colour;
-use crate::timing::T_STATES_PER_FRAME;
 
 /// A snapshot of one machine offered to another.
 ///
@@ -269,8 +268,8 @@ pub enum Error {
 /// Three fields are public because there is no invariant to protect, following
 /// [`CpuState`](::z80::CpuState)'s own precedent — *"every combination of these values is a
 /// state a real Z80 can be in"*. [`Colour::new`] wraps into range, and a `frame_t_state` at
-/// or above [`T_STATES_PER_FRAME`] is absorbed by the clock's documented rollover, so
-/// neither can hold a value that means nothing.
+/// or above the frame length is absorbed by the clock's documented rollover, so neither can
+/// hold a value that means nothing.
 ///
 /// The banks are private because *which* bank indices are meaningful is a property of the
 /// model, and the parser is where that is decided: a `Snapshot` that reaches the machine
@@ -283,9 +282,11 @@ pub struct Snapshot {
     pub border: Colour,
     /// T-states into the frame.
     ///
-    /// Values at or above [`T_STATES_PER_FRAME`] roll over when applied, as the clock does
-    /// everywhere else. Both parsers reduce into range anyway, so a hostile file cannot put
-    /// a number here that means nothing.
+    /// **Which frame is [`Snapshot::model`]'s** — 69888 T-states on a 48K and 70908 on a 128 —
+    /// and reading that as always the 48K's is what threw away the last 1020 T-states of every
+    /// 128 saved there. Values at or above it roll over when applied, as the clock does
+    /// everywhere else. Both parsers reduce into range anyway, so a hostile file cannot put a
+    /// number here that means nothing.
     pub frame_t_state: u32,
     /// One page per RAM bank the file carried, `None` for a bank it did not.
     banks: [Option<Box<[u8; PAGE_SIZE]>>; BANK_COUNT],
@@ -457,12 +458,19 @@ fn digest(page: &[u8]) -> u64 {
     })
 }
 
-/// Reduce a file-derived frame position into range.
+/// Reduce a frame position into `model`'s frame.
 ///
 /// Both parsers end here, so `frame_t_state` is a frame position by construction rather than
 /// by the file's good behaviour.
-const fn frame_position(t_state: u32) -> u32 {
-    t_state % T_STATES_PER_FRAME
+///
+/// **The frame is the model's, and reducing into the wrong one loses a real position rather
+/// than normalising a nonsensical one.** A 128's frame is 70908 T-states and a 48K's is
+/// 69888, so this took the 48K constant and folded the 1020 T-states a 128 has and a 48K does
+/// not back to the top of the frame — a machine standing at 69888 came out standing at 0. It
+/// is the mislabelled-model defect one field along: a constant that is right for one machine
+/// applied to both, invisible to any round trip because the two ends shared it.
+const fn frame_position(model: Model, t_state: u32) -> u32 {
+    t_state % model.timing().frame_t_states()
 }
 
 /// Bytes of RAM a 48K holds: `0x4000`–`0xFFFF`.
@@ -593,6 +601,9 @@ fn store_image(snapshot: &mut Snapshot, image: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The 48K's frame, by its published name, so the one assertion that separates the two
+    // models names the constant that used to stand for both.
+    use crate::timing::T_STATES_PER_FRAME;
 
     /// Every production source file of this module.
     ///
@@ -735,14 +746,24 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_position_is_always_inside_a_frame() {
-        assert_eq!(frame_position(0), 0);
+    fn a_frame_position_is_always_inside_that_models_frame() {
+        // Both models, because the 48K's frame is the constant this used to reduce *every*
+        // model into — so a 128 asserted only at positions a 48K also has would be green with
+        // the defect still in place. The two rows differ at exactly one place, and it is the
+        // 1020 T-states only a 128 has.
+        for model in [Model::Spectrum48K, Model::Spectrum128] {
+            let frame = model.timing().frame_t_states();
+            assert_eq!(frame_position(model, 0), 0, "{model}");
+            assert_eq!(frame_position(model, frame - 1), frame - 1, "{model}");
+            assert_eq!(frame_position(model, frame), 0, "{model}");
+            assert_eq!(frame_position(model, u32::MAX), u32::MAX % frame, "{model}");
+        }
+        // The one position that separates the two: a 128 stands there and a 48K wraps.
         assert_eq!(
-            frame_position(T_STATES_PER_FRAME - 1),
-            T_STATES_PER_FRAME - 1
+            frame_position(Model::Spectrum128, T_STATES_PER_FRAME),
+            T_STATES_PER_FRAME
         );
-        assert_eq!(frame_position(T_STATES_PER_FRAME), 0);
-        assert_eq!(frame_position(u32::MAX), u32::MAX % T_STATES_PER_FRAME);
+        assert_eq!(frame_position(Model::Spectrum48K, T_STATES_PER_FRAME), 0);
     }
 
     #[test]

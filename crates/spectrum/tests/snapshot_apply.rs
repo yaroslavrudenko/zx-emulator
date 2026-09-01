@@ -657,6 +657,155 @@ fn a_48ks_file_is_byte_for_byte_what_it_always_was() {
     );
 }
 
+// ---------------------------------------------------------------------------------------
+// The 128's frame, which is 1020 T-states longer than a 48K's and was encoded as one
+// ---------------------------------------------------------------------------------------
+
+/// A 128's frame length, transcribed from the format description rather than asked of the
+/// crate: *"a total of 69888 (70908) T states per frame"*, the parenthesis being 128K mode.
+const FRAME_128: u32 = 70_908;
+
+/// The value a 128's low T-state counter starts each quarter at, from the same sentence:
+/// *"the low T state counter counts down from 17471 to 0 (17726 in 128K modes)"*.
+const TOP_OF_THE_128S_COUNTDOWN: u16 = 17_726;
+
+/// T-states in one quarter of a 128's frame — one more than the countdown's top, because
+/// counting down from 17726 **to 0 inclusive** is 17727 values.
+const QUARTER_128: u32 = TOP_OF_THE_128S_COUNTDOWN as u32 + 1;
+
+#[test]
+fn the_transcribed_128_frame_is_the_frame_the_machine_actually_runs() {
+    // The fixture checking itself before anything is built on it, exactly as
+    // `the_fixture_can_separate_a_permutation` does. Every expectation below is derived from
+    // `FRAME_128`, so a wrong transcription would make each of them agree with the other and
+    // with nothing else.
+    assert_eq!(
+        machine_128().ula().clock().timing().frame_t_states(),
+        FRAME_128,
+        "the transcribed 128 frame and the machine's own must be the same number"
+    );
+    assert_eq!(QUARTER_128 * 4, FRAME_128, "four quarters make the frame");
+    assert_ne!(
+        FRAME_128, T_STATES_PER_FRAME,
+        "if the two frames coincided, encoding one as the other would be invisible"
+    );
+}
+
+#[test]
+fn a_128s_frame_position_survives_the_file() {
+    // **The 1020 T-states a 128's frame has and a 48K's does not.** The counter was encoded
+    // against the 48K frame whatever the model, so a position at or past 69888 — an ordinary
+    // position for a 128, which is a fifth of the way through its last quarter — was reduced
+    // modulo the *wrong* frame on the way out and came back as a position 1020 earlier.
+    //
+    // It is the mislabelled-model defect's quieter sibling: the writer had one machine's
+    // geometry hard-coded and the reader had the same one, so the two agreed with each other
+    // and with no 128 ever built.
+    for position in [T_STATES_PER_FRAME, T_STATES_PER_FRAME + 1, FRAME_128 - 1] {
+        let mut snapshot = machine_128().snapshot();
+        snapshot.frame_t_state = position;
+
+        let read_back = z80::parse(&z80::write(&snapshot)).expect("our own file must parse");
+        assert_eq!(
+            read_back.frame_t_state, position,
+            "a 128 standing at {position} must still be standing there after a round trip"
+        );
+    }
+}
+
+#[test]
+fn the_128s_counter_matches_the_other_half_of_the_format_descriptions_sentence() {
+    // The paragraph `snapshot::z80` quotes gives **two** sets of numbers and only the first
+    // was implemented: *"the low T state counter counts down from 17471 to 0 (17726 in 128K
+    // modes), which make a total of 69888 (70908) T states per frame."*
+    //
+    // These six positions are worked out by hand from that sentence with no reference to the
+    // encoder, which is the only kind of expectation that can see the defect at all: our
+    // writer and our reader share the constant, so `parse(write(s)) == s` is green for every
+    // position below 69888 while every file we write is displaced by `255 x (quarter + 1)` in
+    // anybody else's emulator — +255, +510, +765 or +1020, never zero, as `encode_t_states`'s
+    // own documentation derives. The maximum is the fourth quarter's, not the third's.
+    let cases = [
+        // "Just after the ULA generates its once-in-every-20-ms interrupt, it is 3", with the
+        // countdown at its top — which on a 128 is 17726 rather than 17471.
+        (0_u32, TOP_OF_THE_128S_COUNTDOWN, 3_u8),
+        // One T-state in is one step down from the top.
+        (1, TOP_OF_THE_128S_COUNTDOWN - 1, 3),
+        // "increased by one every 5 emulated milliseconds", counting up modulo 4, so each
+        // quarter boundary restarts the countdown and advances the high byte.
+        (QUARTER_128, TOP_OF_THE_128S_COUNTDOWN, 0),
+        (2 * QUARTER_128, TOP_OF_THE_128S_COUNTDOWN, 1),
+        (3 * QUARTER_128, TOP_OF_THE_128S_COUNTDOWN, 2),
+        // "counts down ... to 0": the last T-state of the frame is the bottom of the fourth
+        // quarter's countdown.
+        (FRAME_128 - 1, 0, 2),
+    ];
+    for (position, low, high) in cases {
+        let mut snapshot = machine_128().snapshot();
+        snapshot.frame_t_state = position;
+        let file = z80::write(&snapshot);
+
+        // Offsets 55-56 are the low word and 57 the high byte, little-endian.
+        let mut expected = low.to_le_bytes().to_vec();
+        expected.push(high);
+        assert_eq!(
+            file.get(55..58),
+            Some(&expected[..]),
+            "frame position {position} on a 128"
+        );
+    }
+}
+
+#[test]
+fn a_paged_128s_memory_map_survives_the_file() {
+    // **The byte every 128 gate so far left at zero.** `0x7FFD` is the machine's whole memory
+    // map — which bank sits at 0xC000, which of the two screens the ULA draws, which of the
+    // two ROMs is paged — and a writer that emitted a constant 0 for it would pass every
+    // assertion in this file, because nothing here had ever moved it off its reset value.
+    // `docs/STATUS.md`'s *"zero is the one value that makes a positive false claim"* applies
+    // exactly: a snapshot of a machine that has never paged cannot tell a carried byte from a
+    // dropped one.
+    //
+    // So the source machine is paged somewhere no reset value reaches, with all four fields of
+    // the byte distinguishable: bank 3 at 0xC000, the shadow screen selected, the 48 BASIC ROM
+    // paged, and paging still unlocked.
+    const BANK: u8 = 3;
+    const SHADOW_SCREEN: u8 = 0x08;
+    const ROM_1: u8 = 0x10;
+    const PAGED: u8 = BANK | SHADOW_SCREEN | ROM_1;
+
+    let mut source = machine_128();
+    source.ula_mut().out_port(0x7FFD, PAGED);
+    assert_ne!(
+        source.memory().slots(),
+        machine_128().memory().slots(),
+        "the source must have paged, or this proves nothing"
+    );
+
+    let snapshot = source.snapshot();
+    let file = z80::write(&snapshot);
+    assert_eq!(
+        file.get(35),
+        Some(&PAGED),
+        "offset 35 is the last OUT to 0x7FFD, and it is the whole memory map"
+    );
+
+    let mut target = machine_128();
+    target
+        .restore(&z80::parse(&file).expect("our own file must parse"))
+        .expect("both machines are 128s");
+    assert_eq!(
+        target.memory().slots(),
+        source.memory().slots(),
+        "the restored machine must be arranged the way the saved one was"
+    );
+    assert_eq!(
+        target.memory().screen_bank(),
+        source.memory().screen_bank(),
+        "including which of the two screens the ULA draws"
+    );
+}
+
 #[test]
 fn the_chip_survives_the_file_and_r15_is_written_as_zero() {
     // The AY's half of the same round trip, plus the one byte no round trip can see. Offset 54

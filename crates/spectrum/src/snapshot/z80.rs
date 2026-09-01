@@ -19,11 +19,16 @@
 //!
 //! # The T-state counter is the highest-risk field in the design
 //!
-//! It is not a plain frame position: the frame is four quarters of 17472 T-states, the low
-//! word counts *down* within the quarter, and the high byte is the quarter's index shifted by
-//! three because it reads 3 at the top of the frame. `encode_t_states` in this module carries
-//! the derivation, the format description's own sentence, and the two independent checks that
-//! settle it — because its own exhaustive round trip provably cannot.
+//! It is not a plain frame position: the frame is four quarters, the low word counts *down*
+//! within the quarter, and the high byte is the quarter's index shifted by three because it
+//! reads 3 at the top of the frame. `encode_t_states` in this module carries the derivation,
+//! the format description's own sentence, and the two independent checks that settle it —
+//! because its own exhaustive round trip provably cannot.
+//!
+//! **And the quarter is a different length on each machine** — 17472 T-states on a 48K, 17727
+//! on a 128 — which this file had as one constant until the sentence's own parenthesis was
+//! read properly. A 128's position was written against a 48K's quarters and read back the same
+//! way, so every round trip agreed and every file disagreed with every other emulator.
 
 use ::z80::{CpuState, InterruptMode};
 
@@ -36,7 +41,6 @@ use crate::ay::{self, Ay};
 use crate::memory::{BankIndex, PAGE_SIZE};
 use crate::model::Model;
 use crate::screen::Colour;
-use crate::timing::T_STATES_PER_FRAME;
 
 /// Bytes in the header every version begins with.
 const V1_HEADER_LEN: usize = 30;
@@ -356,7 +360,9 @@ fn parse_v2_or_v3(header: &Header, mut reader: Reader<'_>) -> Result<Snapshot, E
         Version::V3 => {
             let low = extra.u16_le()?; // 55
             let high = extra.u8()?; // 57
-            decode_t_states(low, high)
+            // `model` and not a constant: the quarters this pair counts are a quarter of
+            // *this* machine's frame, and the two machines' frames differ by 1020 T-states.
+            decode_t_states(model, low, high)
         }
     };
 
@@ -456,7 +462,10 @@ fn read_page_block(
 /// Emit the 30-byte header and the 54-byte version 3 additional header.
 fn write_header(bytes: &mut Vec<u8>, snapshot: &Snapshot) {
     let cpu = &snapshot.cpu;
-    let (low_t_state, high_t_state) = encode_t_states(snapshot.frame_t_state);
+    let model = snapshot.model();
+    // The counter divides *this machine's* frame into quarters, and the two machines' frames
+    // are different lengths — so the model is read here rather than at offset 34 alone.
+    let (low_t_state, high_t_state) = encode_t_states(model, snapshot.frame_t_state);
     // The shared header, the two-byte length field, and the additional header it declares.
     bytes.reserve(V1_HEADER_LEN + 2 + usize::from(V3_EXTRA_HEADER_LEN));
 
@@ -486,7 +495,6 @@ fn write_header(bytes: &mut Vec<u8>, snapshot: &Snapshot) {
 
     bytes.extend_from_slice(&V3_EXTRA_HEADER_LEN.to_le_bytes()); // 30
     bytes.extend_from_slice(&cpu.pc.to_le_bytes()); // 32
-    let model = snapshot.model();
     bytes.push(Version::V3.hardware_mode(model)); // 34
     // A 48K's byte 35 and its sound-chip bytes describe hardware it does not have, and zero
     // is what this writer emits for every such field — offsets 36, 37 and the whole of 58-85
@@ -548,14 +556,26 @@ const fn low_byte(pair: u16) -> u8 {
 /// Quarters of a frame the T-state counter divides the frame into.
 const QUARTERS_PER_FRAME: u32 = 4;
 
-/// T-states in one quarter of a frame: 17472 on a 48K.
-const QUARTER_T_STATES: u32 = T_STATES_PER_FRAME / QUARTERS_PER_FRAME;
+/// T-states in one quarter of `model`'s frame: 17472 on a 48K and 17727 on a 128.
+///
+/// **A function of the model and not a constant, because the sentence it comes from gives two
+/// numbers.** This was `T_STATES_PER_FRAME / 4` — the 48K's — for every machine, so a 128's
+/// frame position was encoded against a quarter **255 T-states too short**, and the error
+/// accumulated one quarter at a time. Our own reader shared the constant, which is precisely
+/// why every round trip stayed green while every file we wrote placed a 128 somewhere it had
+/// not been, in anybody else's emulator.
+const fn quarter_t_states(model: Model) -> u32 {
+    model.timing().frame_t_states() / QUARTERS_PER_FRAME
+}
 
-// The format description says the low counter runs "from 17471 to 0", which is 17472 values,
-// and that four of them "make a total of 69888 T states per frame". Both halves have to hold
-// or the encoding does not tile the frame.
-const _: () = assert!(QUARTER_T_STATES * QUARTERS_PER_FRAME == T_STATES_PER_FRAME);
-const _: () = assert!(QUARTER_T_STATES == 17472);
+// The format description says the low counter runs "from 17471 to 0 (17726 in 128K modes)",
+// which is 17472 and 17727 values, and that four of them "make a total of 69888 (70908) T
+// states per frame". Both halves have to hold, for both machines, or the encoding does not
+// tile the frame — and the 128 row is the one that was missing.
+const _: () = assert!(quarter_t_states(Model::Spectrum48K) == 17472);
+const _: () = assert!(quarter_t_states(Model::Spectrum128) == 17727);
+const _: () = assert!(quarter_t_states(Model::Spectrum48K) * QUARTERS_PER_FRAME == 69888);
+const _: () = assert!(quarter_t_states(Model::Spectrum128) * QUARTERS_PER_FRAME == 70908);
 
 /// Encode a frame position as the version 3 counter pair, `(low, high)`.
 ///
@@ -566,32 +586,63 @@ const _: () = assert!(QUARTER_T_STATES == 17472);
 /// > milliseconds. In these 1/200s intervals, the low T state counter counts down from 17471
 /// > to 0 (17726 in 128K modes), which make a total of 69888 (70908) T states per frame."*
 ///
-/// So the frame is four quarters of 17472 T-states; the low word counts **down** within the
-/// quarter, and the high byte is the quarter's index shifted by three because it reads 3 at
-/// the top of the frame rather than 0.
+/// So the frame is four quarters — of 17472 T-states on a 48K and **17727 on a 128** — the low
+/// word counts **down** within the quarter, and the high byte is the quarter's index shifted by
+/// three because it reads 3 at the top of the frame rather than 0.
+///
+/// # The parenthesis is the whole of the 128, and it was read past
+///
+/// Every number in that sentence comes in a pair, and this function took the first of each and
+/// applied it to both machines: `T_STATES_PER_FRAME / 4`, the 48K's quarter, whatever
+/// [`Snapshot::model`] said. Two things followed, and only one of them is visible from inside
+/// this crate.
+///
+/// **A 128 position at or past 69888 was lost.** [`frame_position`] reduced into the 48K frame,
+/// so the last 1020 T-states of a 128's frame — an ordinary place for a machine to be, a fifth
+/// of the way through its last quarter — wrapped to the top of the frame. That one a round trip
+/// *can* see, and `tests/snapshot_apply.rs` now does.
+///
+/// **Every other 128 position was misplaced for every reader but us**, by `255 x (quarter + 1)`
+/// — computed over all 69888 surviving positions, that is exactly +255, +510, +765 or +1020
+/// T-states, 17472 positions each, and never zero. Our writer and our reader shared the
+/// constant, so `parse(write(s)) == s` was green for all of them; a conformant emulator
+/// dividing the same file into 17727-T-state quarters reads a different position out of the
+/// same two bytes. Nothing symmetric can see that, which is why the gate for it is the
+/// hand-derived one below rather than the sweep.
 ///
 /// # How this was settled, since its own round trip cannot settle it
 ///
-/// An exhaustive sweep of all 69888 positions grades this function against
-/// [`decode_t_states`] and nothing else — if both halves encode the same wrong scheme it is
-/// green and every file we write is unreadable elsewhere. Two things break that symmetry, and
-/// they agree:
+/// An exhaustive sweep over every position of both frames — 69888 on a 48K and 70908 on a
+/// 128, each machine graded against its own — pits this function against [`decode_t_states`]
+/// and nothing else: if both halves encode the same wrong scheme it is green and every file we
+/// write is unreadable elsewhere. Two things break that symmetry, and they agree:
 ///
-/// 1. **Three positions computed by hand from the sentence above**, not from this code, and
-///    asserted in `the_counter_matches_the_format_descriptions_own_sentence`: position 0 is
-///    *just after the interrupt*, so `high` is 3 and `low` is at the top of its countdown,
-///    17471; position 17472 begins the next 5 ms interval, so `high` has advanced to 0; and
-///    position 69887 is the last T-state, so `low` has counted down to 0 with `high` at 2.
+/// 1. **Six positions per machine computed by hand from the sentence above**, not from this
+///    code, and asserted in `the_counter_matches_the_format_descriptions_own_sentence`:
+///    position 0 is *just after the interrupt*, so `high` is 3 and `low` is at the top of its
+///    countdown — 17471 on a 48K and **17726 on a 128**; each of the three later quarter
+///    boundaries begins the next 5 ms interval, so the countdown restarts at that top with
+///    `high` advanced to 0, then 1, then 2; the frame's last T-state — 69887 or **70907** —
+///    has `low` counted down to 0 with `high` at 2; and one T-state in is one step down from
+///    the top. Both expected values are transcribed from the sentence's two halves by the test
+///    module's `frame_of` and `top_of_the_countdown` rather than read out of
+///    [`quarter_t_states`], so nothing here is graded by its own subject. That test then
+///    asserts the two machines encode position 0 **differently** — the one claim a loop over a
+///    single model structurally cannot contain, and the claim whose absence let a 128 divided
+///    into a 48K's quarters pass every gate in this file.
 /// 2. **`libspectrum`, the FUSE project's snapshot library**, computes
 ///    `low = quarter_states - (tstates % quarter_states) - 1` and
 ///    `high = ((tstates / quarter_states) + 3) % 4`, and reads back
 ///    `(((high + 1) % 4) + 1) * quarter_states - (low + 1)`. That is an **independent
-///    implementation** of the same paragraph, and the expressions below are algebraically
-///    identical to it.
+///    implementation** of the same paragraph — with `quarter_states` a parameter of the machine
+///    there, as it now is here — and the expressions below are algebraically identical to it.
 ///
-/// Both are in the suite, and both were **proven able to fail**: shifting the high byte's
-/// origin from three to zero in *both* directions leaves the exhaustive sweep green over all
-/// 69888 positions and turns those two red.
+/// Both are in the suite, and both were **proven able to fail** — on the narrower gate they
+/// then were, which is the range that verdict belongs to. At M6 the sweep covered the 48K's
+/// 69888 positions alone and the hand-worked list was three of them on that machine, and
+/// shifting the high byte's origin from three to zero in *both* directions left that sweep
+/// green and turned those two red. `docs/M6.md`'s mutation table records the run; nothing
+/// records one taken since the gates grew the second machine.
 ///
 /// **What does *not* settle it, measured rather than assumed:** the third-party corpus. Under
 /// that same mutation `tests/snapshot_corpus.rs` stayed **green**, because everything it
@@ -600,63 +651,123 @@ const _: () = assert!(QUARTER_T_STATES == 17472);
 /// foreign file proves the field is *readable*, not that our arithmetic on it is right. The
 /// only instrument that would is a human loading one of our files in another emulator, which
 /// is observation, is not automated, and has not been done.
-const fn encode_t_states(frame_t_state: u32) -> (u16, u8) {
-    let position = frame_position(frame_t_state);
-    let quarter = position / QUARTER_T_STATES;
+const fn encode_t_states(model: Model, frame_t_state: u32) -> (u16, u8) {
+    let quarter_states = quarter_t_states(model);
+    let position = frame_position(model, frame_t_state);
+    let quarter = position / quarter_states;
     // The low word counts down, so it is the room left in this quarter.
-    let low = QUARTER_T_STATES - 1 - (position % QUARTER_T_STATES);
-    // INVARIANT: `low <= 17471` and `quarter <= 3`, so both casts are lossless.
+    let low = quarter_states - 1 - (position % quarter_states);
+    // INVARIANT: `low <= 17726` and `quarter <= 3`, so both casts are lossless.
     (low as u16, ((quarter + 3) % QUARTERS_PER_FRAME) as u8)
 }
 
-/// Decode the version 3 counter pair back into a frame position.
+/// Decode the version 3 counter pair back into a frame position on `model`.
 ///
 /// Total over every `(low, high)` a file can hold, including the ones no conformant writer
 /// produces: `high` is taken modulo 4 as the format describes, and a `low` beyond the
 /// quarter's length is folded back into the frame rather than underflowing. Under
 /// `overflow-checks = true` an underflow here would be an abort, so the addition below is
 /// what makes the subtraction total rather than a comment promising it cannot happen.
-const fn decode_t_states(low: u16, high: u8) -> u32 {
+///
+/// **The model is a parameter for the same reason it is one in [`encode_t_states`], and this
+/// is the end that made the defect invisible.** Both ends divided the frame into the 48K's
+/// quarters, so they agreed with each other over every 128 file this crate produced and read
+/// — the exact shape `docs/M6.md` Decision 7 says a round trip cannot see.
+const fn decode_t_states(model: Model, low: u16, high: u8) -> u32 {
+    let frame = model.timing().frame_t_states();
+    let quarter_states = quarter_t_states(model);
     let quarter = ((high as u32) + 1) % QUARTERS_PER_FRAME;
-    let count_up_from = quarter * QUARTER_T_STATES + (QUARTER_T_STATES - 1);
-    // `count_up_from` is at most 69887 and `low` at most 65535, so one whole frame of
-    // headroom is enough for the subtraction to stay non-negative, and the remainder
-    // removes it again.
-    (count_up_from + T_STATES_PER_FRAME - (low as u32)) % T_STATES_PER_FRAME
+    let count_up_from = quarter * quarter_states + (quarter_states - 1);
+    // `count_up_from` is below the frame and `low` is at most 65535, which is below either
+    // machine's frame, so one whole frame of headroom keeps the subtraction non-negative and
+    // the remainder removes it again.
+    (count_up_from + frame - (low as u32)) % frame
 }
+
+// The headroom argument above is only sound while a `u16` cannot exceed a frame. Both frames
+// are comfortably over 65535, and a machine whose frame was not would need a different
+// expression rather than a larger comment.
+const _: () = assert!(Model::Spectrum48K.timing().frame_t_states() > u16::MAX as u32);
+const _: () = assert!(Model::Spectrum128.timing().frame_t_states() > u16::MAX as u32);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Both machines, because the counter's geometry is per-model and every gate below was
+    /// written when it was a constant.
+    const MODELS: [Model; 2] = [Model::Spectrum48K, Model::Spectrum128];
+
+    /// The frame length each model's counter divides, transcribed from the format
+    /// description's *"69888 (70908) T states per frame"* rather than read from
+    /// [`crate::timing`] — so a sweep over it is not bounded by the number it is grading.
+    const fn frame_of(model: Model) -> u32 {
+        match model {
+            Model::Spectrum48K => 69888,
+            Model::Spectrum128 => 70908,
+        }
+    }
+
+    /// The value each model's low counter starts a quarter at, transcribed from the same
+    /// sentence: *"counts down from 17471 to 0 (17726 in 128K modes)"*.
+    ///
+    /// **Read from the sentence and not from [`quarter_t_states`], which is the whole point.**
+    /// A first cut at generalising these gates wrote `quarter_t_states(model) - 1` here, and
+    /// that is the tautology `snapshot/mod.rs`'s own header warns about — an expectation
+    /// computed by its subject, green for any quarter length the encoder happens to use.
+    const fn top_of_the_countdown(model: Model) -> u16 {
+        match model {
+            Model::Spectrum48K => 17471,
+            Model::Spectrum128 => 17726,
+        }
+    }
+
+    // The two transcriptions have to tile: counting down from the top **to zero inclusive** is
+    // one more value than the top, and four of those quarters are the frame.
+    const _: () = assert!((top_of_the_countdown(Model::Spectrum48K) as u32 + 1) * 4 == 69888);
+    const _: () = assert!((top_of_the_countdown(Model::Spectrum128) as u32 + 1) * 4 == 70908);
+
     #[test]
     fn the_counter_matches_the_format_descriptions_own_sentence() {
-        // Three positions worked out by hand from the quoted paragraph, with no reference to
-        // `encode_t_states`. This is the only assertion in the file that can see a wrong
-        // formula; the exhaustive sweep below cannot.
-        let cases = [
-            // "Just after the ULA generates its once-in-every-20-ms interrupt, it is 3" —
-            // and the low counter is at the top of its countdown.
-            (0_u32, 17471_u16, 3_u8),
-            // "increased by one every 5 emulated milliseconds", counting up modulo 4, so the
-            // second quarter reads 0 and its countdown restarts.
-            (QUARTER_T_STATES, 17471, 0),
-            (2 * QUARTER_T_STATES, 17471, 1),
-            (3 * QUARTER_T_STATES, 17471, 2),
-            // "counts down from 17471 to 0": the last T-state of the frame is the bottom of
-            // the fourth quarter's countdown.
-            (T_STATES_PER_FRAME - 1, 0, 2),
-            // One T-state into the frame is one step down from the top.
-            (1, 17470, 3),
-        ];
-        for (position, low, high) in cases {
-            assert_eq!(
-                encode_t_states(position),
-                (low, high),
-                "frame position {position}"
-            );
-            assert_eq!(decode_t_states(low, high), position);
+        // Six positions per machine, worked out by hand from the quoted paragraph with no
+        // reference to `encode_t_states`. This is the only assertion in the file that can see
+        // a wrong formula; the exhaustive sweep below cannot.
+        //
+        // **Every number in that sentence is a pair, and the second of each is the 128's.**
+        for model in MODELS {
+            let top = top_of_the_countdown(model);
+            let quarter = frame_of(model) / QUARTERS_PER_FRAME;
+            let cases = [
+                // "Just after the ULA generates its once-in-every-20-ms interrupt, it is 3" —
+                // and the low counter is at the top of its countdown.
+                (0_u32, top, 3_u8),
+                // "increased by one every 5 emulated milliseconds", counting up modulo 4, so
+                // the second quarter reads 0 and its countdown restarts.
+                (quarter, top, 0),
+                (2 * quarter, top, 1),
+                (3 * quarter, top, 2),
+                // "counts down ... to 0": the last T-state of the frame is the bottom of the
+                // fourth quarter's countdown.
+                (frame_of(model) - 1, 0, 2),
+                // One T-state into the frame is one step down from the top.
+                (1, top - 1, 3),
+            ];
+            for (position, low, high) in cases {
+                assert_eq!(
+                    encode_t_states(model, position),
+                    (low, high),
+                    "{model} at frame position {position}"
+                );
+                assert_eq!(decode_t_states(model, low, high), position, "{model}");
+            }
         }
+        // The two rows must not coincide, or a 128 encoded as a 48K passes both of them —
+        // which is exactly what happened, and what the loop above could not have caught while
+        // it ran over one model.
+        assert_ne!(
+            encode_t_states(Model::Spectrum48K, 0),
+            encode_t_states(Model::Spectrum128, 0)
+        );
     }
 
     #[test]
@@ -664,20 +775,25 @@ mod tests {
         // The FUSE project's snapshot library, transcribed as its own expressions rather
         // than as a call to ours. An independent implementation of the same paragraph is a
         // stronger check than our own inverse, because it cannot share our misreading.
-        for position in 0..T_STATES_PER_FRAME {
-            let quarter_states = i64::from(T_STATES_PER_FRAME) / 4;
-            let tstates = i64::from(position);
-            let libspectrum_low = quarter_states - (tstates % quarter_states) - 1;
-            let libspectrum_high = ((tstates / quarter_states) + 3) % 4;
-            assert_eq!(
-                encode_t_states(position),
-                (libspectrum_low as u16, libspectrum_high as u8),
-                "frame position {position}"
-            );
+        //
+        // Its `quarter_states` is a **parameter of the machine** there as here, which is the
+        // detail this crate had flattened into a constant.
+        for model in MODELS {
+            for position in 0..frame_of(model) {
+                let quarter_states = i64::from(frame_of(model)) / 4;
+                let tstates = i64::from(position);
+                let libspectrum_low = quarter_states - (tstates % quarter_states) - 1;
+                let libspectrum_high = ((tstates / quarter_states) + 3) % 4;
+                assert_eq!(
+                    encode_t_states(model, position),
+                    (libspectrum_low as u16, libspectrum_high as u8),
+                    "{model} at frame position {position}"
+                );
 
-            let read_back =
-                (((libspectrum_high + 1) % 4) + 1) * quarter_states - (libspectrum_low + 1);
-            assert_eq!(i64::from(position), read_back);
+                let read_back =
+                    (((libspectrum_high + 1) % 4) + 1) * quarter_states - (libspectrum_low + 1);
+                assert_eq!(i64::from(position), read_back, "{model}");
+            }
         }
     }
 
@@ -686,11 +802,18 @@ mod tests {
         // Exhaustive on the one axis there is, and cheap. It grades the pair against each
         // other and **cannot tell you the formula is right** — which is why the two tests
         // above exist and why this one is not the evidence.
-        for position in 0..T_STATES_PER_FRAME {
-            let (low, high) = encode_t_states(position);
-            assert_eq!(decode_t_states(low, high), position, "position {position}");
-            assert!(low <= 17471, "position {position} encoded low {low}");
-            assert!(high < 4, "position {position} encoded high {high}");
+        for model in MODELS {
+            let top = top_of_the_countdown(model);
+            for position in 0..frame_of(model) {
+                let (low, high) = encode_t_states(model, position);
+                assert_eq!(
+                    decode_t_states(model, low, high),
+                    position,
+                    "{model} at position {position}"
+                );
+                assert!(low <= top, "{model} at {position} encoded low {low}");
+                assert!(high < 4, "{model} at {position} encoded high {high}");
+            }
         }
     }
 
@@ -698,11 +821,14 @@ mod tests {
     fn every_counter_a_file_can_hold_decodes_to_a_frame_position() {
         // Hostile input: `low` can be anything a `u16` holds and `high` anything a `u8`
         // does. Under `overflow-checks = true` the obvious subtraction aborts; this asserts
-        // that it does not, over the whole space rather than over the legal part of it.
-        for high in 0..=u8::MAX {
-            for low in 0..=u16::MAX {
-                let position = decode_t_states(low, high);
-                assert!(position < T_STATES_PER_FRAME, "low {low} high {high}");
+        // that it does not, over the whole space rather than over the legal part of it — and
+        // over both machines, since the frame it lands inside is the model's.
+        for model in MODELS {
+            for high in 0..=u8::MAX {
+                for low in 0..=u16::MAX {
+                    let position = decode_t_states(model, low, high);
+                    assert!(position < frame_of(model), "{model} low {low} high {high}");
+                }
             }
         }
     }
@@ -710,12 +836,14 @@ mod tests {
     #[test]
     fn the_high_counter_is_read_modulo_four() {
         // "counts up modulo 4" — so a file holding 7 means the same as one holding 3.
-        for high in 0..=u8::MAX {
-            assert_eq!(
-                decode_t_states(1234, high),
-                decode_t_states(1234, high % 4),
-                "high {high}"
-            );
+        for model in MODELS {
+            for high in 0..=u8::MAX {
+                assert_eq!(
+                    decode_t_states(model, 1234, high),
+                    decode_t_states(model, 1234, high % 4),
+                    "{model} high {high}"
+                );
+            }
         }
     }
 
