@@ -168,8 +168,8 @@ Ranked by how much they actually prove:
    > three documents anyway. **Naming what would settle a claim is not a substitute for settling
    > it**, particularly when the cost is one command. `STATUS.md` records the class.
 
-   `STATUS.md`'s M5 section carries the full account, and the ten mutations that turn today's
-   seven gates red.
+   `STATUS.md`'s M5 section carries the full account, and the ten mutations that turn the gates
+   of that pass red.
 2. **A known-timing test program** — the Spectrum community's contention test suites report
    measured T-state counts for the machine to print. That is the closest thing to an oracle
    available, and it is a real one: a number to compare, not a picture to squint at.
@@ -646,6 +646,20 @@ an accident.
 > **publish the command, not the number.** [`ARCHITECTURE.md`](ARCHITECTURE.md)'s *Measured*
 > section makes the same point at length and its own text names the temptation: *"a live count of
 > files in another crate's test directory is a claim that rots on someone else's commit."*
+>
+> > **That pass corrected the table row and left the prose headings carrying the same integer**,
+> > which is the propagation defect this very block is about, surviving one step inside its own
+> > correction. Three sites were still asserting *seven* on 2026-09-01 after it: this file's own
+> > sentence four hundred lines above, and both of [`STATUS.md`](STATUS.md)'s M5 headings — the
+> > milestone heading and *"Seven gates, and ten mutations that turn them red"*. All three now say
+> > **"the gates of that pass"**, which is what the figure always meant: the set that existed when
+> > the mutation table below it was run, not a live count of the directory. The scoped uses were
+> > left alone deliberately — *"there were **seven** gates in it when this table was written"* is
+> > dated to its own run and is the form the rule asks for, not an instance of the defect.
+> >
+> > **Two further gates had already superseded the seven before any of this** — `frame_boundary.rs`
+> > and `block_interrupt.rs`, in `STATUS.md`'s *Two more gates* section, which is a heading that
+> > states its own arithmetic against a number the document above it had stopped tracking.
 >
 > **3. The M6 and M7 rows said *"a real game runs"* and *"128-only software runs"*.** Both are
 > tier **T4** — observation, manual, corpus-dependent, and unautomatable in a repository that may

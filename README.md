@@ -2,6 +2,15 @@
 
 A **ZX Spectrum 48K and 128** emulator written from scratch in Rust.
 
+![Two frames from the emulator, side by side. On the left a 48K with a red border, showing zx-emulator printed in the ROM's own character set by a BASIC line typed through the keymap, above the ROM's own 0 OK, 0:1 report. On the right a 128 showing its boot menu: the rainbow, all five entries, and the 1986 Sinclair Research copyright.](docs/images/48k-and-128.png)
+
+> **Both frames are the emulator's output, placed at scale 1 and otherwise untouched** —
+> `Spectrum::render` into a `Frame`, then `palette::write_rgba`, which is the path the window
+> runs. The 48K on the left was typed at through the same keymap table the window presses; the
+> 128 on the right is its own boot menu, unassisted. The only pixels that are not the machine's
+> are the grey surround, in a value the ULA cannot emit. The commands, and why that grey is
+> unambiguous, are in [`docs/images/README.md`](docs/images/README.md).
+
 Not a port. Not a translation of an existing emulator. The CPU is implemented from the Z80
 hardware specification and from our own architecture; correctness is then proven against
 public conformance suites rather than against somebody else's source.
@@ -41,10 +50,10 @@ arithmetic — with an external oracle instead of self-assessment.
 | M2 | `CB` / `ED` / `DD` / `FD` prefixes | FUSE vectors green in full | **1045/1045** — merged |
 | M3 | Documented behaviour | `zexdoc` passes | **67/67 first run** — merged |
 | M4 | Undocumented flags | **`zexall` passes** — CPU complete | **67/67**, made a gate with its limits stated — merged |
-| **M5** | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | the machine boots, **on frame 87**, and **the gate work landed**: `crates/spectrum/tests/boot.rs` is a real `#[test]` that runs the ROM under `cargo test` and asserts the frame, alongside the other integration gates in that directory. Of the five mutations, **four were already red and one survived**. See [`docs/STATUS.md`](docs/STATUS.md) for what M5's green does and does not mean |
+| **M5** | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | the machine boots, **on frame 87**, and **the gate work landed**: `crates/spectrum/tests/boot.rs` is a real `#[test]` that runs the ROM under `cargo test` and asserts the frame, alongside the other integration gates in that directory. Of the five mutations, **four were already red and one survived**. **Contention is no longer ungraded either**: `crates/spectrum/tests/timing_oracle.rs` grades the model against **68 rows measured on real Spectrums, 0 disagreeing**. See [`docs/STATUS.md`](docs/STATUS.md) for what M5's green does and does not mean, and [`docs/MACHINE.md`](docs/MACHINE.md) for the oracle's scope, which is narrower than the sentence sounds |
 | **M6** | Snapshots (`.z80` / `.sna`) and tape (`.tap`) | **T1 + T2 + T3** — *not* "a real game runs" | **merged.** A program written here, stored as a `.tap`, loaded by the real ROM's own `LD-BYTES` through the `EAR` bit, and executed — computing a value asserted to appear **nowhere in its own bytes**, so that *"the data arrived"* and *"it ran"* are separate claims. Design in [`docs/M6.md`](docs/M6.md); what it opened and closed is in [`docs/STATUS.md`](docs/STATUS.md) |
 | M7 | 128: paging, second ROM, AY-3-8912, **the beeper**, per-bank contention | **T1 + T2 + T3** — *not* "128-only software runs" | design in [`docs/M7.md`](docs/M7.md), in flight. **The memory half boots:** the 128 reaches its own `© 1986` copyright, draws all five menu entries, the highlight moves under `CAPS SHIFT`+`6`, and selecting *48 BASIC* reaches the `© 1982` message through ROM page 1 — the year changing is what makes that a claim about which ROM is executing |
-| M8 | WASM build | playable from a URL — the browser, **not** the sound | design in [`docs/M8.md`](docs/M8.md) |
+| M8 | WASM build | playable from a URL — the browser, **not** the sound | **the frontend already exists and runs natively.** `crates/frontend` is a macroquad window (`zx`) plus a headless screenshot binary (`zx-shot`), which is what took the picture at the top of this file; the run commands are under [Build and run](#build-and-run). What M8 still owes is the **browser**: `wasm32` is neither built nor run, and [`docs/STATUS.md`](docs/STATUS.md) carries that row rather than this one implying otherwise. Design in [`docs/M8.md`](docs/M8.md) |
 
 > **Two corrections to the rows above, both made 2026-09-01 rather than left to be inferred from
 > the design documents.**
@@ -87,24 +96,38 @@ arithmetic — with an external oracle instead of self-assessment.
 >
 > The rule that follows is cheap and absolute: *a correction is not landed until you have grepped
 > for every other copy of what you corrected.* Every fact in these documents costs seconds to
-> sweep across `docs/`, `README.md`, `CHANGELOG.md` and `testdata/`. **That sweep was run for this
-> correction and did not come back clean**: `docs/MACHINE.md:358` still asserts *"five mutations
-> left it green"* as fact, inside a correction block written after the figure was known to be
-> wrong. It is left for that file's owner rather than edited from here, and it is named so it
-> cannot go quiet again.
+> sweep across `docs/`, `README.md`, `CHANGELOG.md` and `testdata/`.
+>
+> > **Correction — this paragraph said the sweep *"did not come back clean"* and named
+> > `docs/MACHINE.md:358` as still asserting *"five mutations left it green"*. Both halves are
+> > false, and the second was pointed at the wrong line.** Re-swept 2026-09-01:
+> > `grep -rn "five mutations" docs/ README.md` puts `MACHINE.md`'s only two hits at **`:616`**,
+> > which states *"four of five mutations were already red"*, and **`:628`**, which is the block
+> > retracting the old wording. `docs/MACHINE.md:358` is prose introducing the timing oracle and
+> > has nothing to do with mutations. **The file this note was holding open had already closed
+> > it** — so the note outlived the defect it named. That is the same failure one turn later: a
+> > correction can go stale exactly as a claim can, and it is the harder one to catch, because it
+> > wears the costume of a fix.
 >
 > **The row above deliberately carries no gate count**, and that is not vagueness — it is the same
-> lesson applied one step earlier. `ls -1 crates/spectrum/tests/*.rs | wc -l` returned **13** on
-> 2026-09-01 while this note was being written, and **14** a few minutes later, before it was
-> finished; 6 of them are committed and the rest landed that same day. A bare integer here would
-> have been stale before the paragraph containing it was, which is this exact defect for the third
-> time. **Count the directory — the command is in this sentence.** `docs/MACHINE.md`'s milestone
-> table says *"seven gates"*, which was true when written and is the number to check first.
+> lesson applied one step earlier. That integer moved repeatedly on 2026-09-01 while this was
+> being written — `docs/MACHINE.md` records the trail — so any number here would have been stale
+> before the sentence containing it was, which is this exact defect for the third time.
+> **Count the directory: the command below is the answer, and no integer written beside it can be.**
 >
-> > **`MACHINE.md`'s M5 row no longer says seven.** It now carries the command
-> > (`ls -1 crates/spectrum/tests/*.rs | wc -l`) instead of an answer, and records that the integer
-> > moved 13 → 14 → 16 → 19 on 2026-09-01 while the correction was being written. The sentence
-> > above is left standing because it is what a reader should still do; only its example moved.
+> ```sh
+> ls -1 crates/spectrum/tests/*.rs | wc -l
+> ```
+>
+> > **This is where that rule was broken by the paragraph teaching it.** The text above used to
+> > carry the integers the command had returned that morning, plus a count of how many were
+> > committed, and then asserted that *"`docs/MACHINE.md`'s milestone table says seven gates …
+> > and is the number to check first."* Every one of those was stale within the day, and the
+> > `seven gates` claim was already false when written — a nested note three lines below it said
+> > so, so this file contradicted itself on screen and sent the reader to the wrong document.
+> > `MACHINE.md`'s M5 row carries the command, not an answer. `grep -rn "seven gates" docs/`
+> > now finds the live copies in **`docs/STATUS.md`**, in its M5 headings; those are that file's
+> > to correct and are named here so they cannot go quiet.
 
 > **Correction — the M6 and M7 rows said *"a real game runs"* and *"128-only software runs"*, and
 > both name tier T4.** M6 has since merged; the row is corrected rather than quietly widened.
@@ -135,7 +158,10 @@ crates/z80/         Z80 CPU core. No memory, no I/O, no allocation.
 crates/spectrum/    The machine: paged memory, ULA, contention, keyboard, screen, timing,
                     snapshots (`.z80`/`.sna`) and tape (`.tap`). No AY module yet — it is
                     M7 scope. This line lists the crate's remit, not its contents.
-crates/frontend/    macroquad frontend — native and WebAssembly.
+crates/frontend/    macroquad frontend: the `zx` window, and `zx-shot`, which photographs a
+                    machine headlessly. Written to be portable to `wasm32` — no `cfg(target)`
+                    anywhere — but that build has not been run. This line said "native and
+                    WebAssembly", which read as though both existed.
 crates/testsupport/ The corpus-absence policy every gate shares. Test-only, never published.
 docs/               Architecture, the machine design, the M6 and M7 designs, the Z80
                     reference, the status register.
@@ -162,12 +188,29 @@ cycle-accurate contention possible. It landed at M5.
 ## Build and run
 
 ```bash
+# A window with a Spectrum in it. One .rom is a 48K, two are a 128 with the editor ROM first;
+# .tap goes in the drive and .z80 / .sna are restored over the top, named in any order.
+cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx -- testdata/roms/48.rom
+cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx -- \
+    testdata/roms/128-0.rom testdata/roms/128-1.rom
+
 cargo build                          # workspace
 cargo test                           # unit tests, FUSE vectors, the machine's integration gates
 cargo test --release -p z80 --test zex_oracle -- --ignored    # zexdoc + zexall, ~90 s
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+**This section had no `run` line in it at all** until 2026-09-01, while being called *Build and
+run* — so the one thing a stranger wants from a README was the one thing the file did not say.
+`crates/frontend/src/main.rs` carries the key map: `Shift` and `Ctrl` are `CAPS SHIFT` and
+`SYMBOL SHIFT`, `F1`–`F6` are the emulator's own controls, and everything else the Spectrum
+prints on a key is reached the way the machine reaches it.
+
+The second binary in that crate, **`zx-shot`, is headless** — it boots a machine, optionally types
+at it through the same keymap, and writes the screen to a file without opening a window, which is
+what makes it usable over SSH and what produced the picture at the top of this file. Its commands
+are in [`docs/images/README.md`](docs/images/README.md).
 
 **`cargo test` does not run the `zex` exercisers**, and that line used to say it did. At 5.8
 billion instructions each they are `#[ignore]`d and release-only — ~43 s each in release, ~20
@@ -195,8 +238,16 @@ Requires Rust **1.98+** (edition 2024) — `rust-version` and `edition` in the w
 ## Test data
 
 `testdata/` is gitignored with explicit un-ignore rules, not wholesale. `git ls-files testdata/`
-returns exactly `.gitkeep`, `README.md` and `roms/48.rom`; the ROM is the only *corpus* exception.
-Fetch the rest locally:
+returns `.gitkeep`, `README.md` and the three Sinclair ROMs — `roms/48.rom`, `roms/128-0.rom` and
+`roms/128-1.rom`. Those are the only *corpus* exceptions. Fetch the rest locally:
+
+> **This said the command returned *"exactly `.gitkeep`, `README.md` and `roms/48.rom`"*, and M7
+> committed the 128's pair.** `testdata/README.md` was corrected when they landed and this file was
+> not — the propagation defect described above, happening this time to a **licensing** claim rather
+> than a technical one, which is the class where the sentence *is* the thing being relied on. A file
+> list that has gone stale reads exactly like a file list that is complete, so it fails silently in
+> the direction of claiming less than the repository actually redistributes. Run the command; do not
+> trust this paragraph either.
 
 | Directory | Contents | Committed? |
 |---|---|---|
@@ -204,7 +255,7 @@ Fetch the rest locally:
 | `testdata/zex/` | `zexdoc.com`, `zexall.com` | no — third-party conformance binaries |
 | `testdata/roms/48.rom` | the Sinclair 48K ROM | **yes** — under the permission quoted in `testdata/README.md`, which is also where the SHA-1, the CRC-32 and the fetch commands are. A subtly wrong ROM is the one corpus failure no harness here would explain |
 | `testdata/snapshots/`, `testdata/tapes/`, `testdata/timing/` | third-party `.z80`/`.sna`, `.tap` and the 48K timing suite | no — fetched; each is the *external* check on our reading of a format, or of the machine's timing |
-| `testdata/roms/` — 128 ROMs | Sinclair 128 editor + 48 BASIC | absent — needed at M7, and adding one is now a **deliberate** act |
+| `testdata/roms/128-0.rom`, `128-1.rom` | Sinclair 128 editor + 48 BASIC | **yes** — committed at M7, on the same permission, which names *"Spectrum 48/128"* outright. Sizes, SHA-1s and CRC-32s are in `testdata/README.md`, taken from the committed bytes. Adding a *further* ROM stays a **deliberate** act: `.gitignore` un-ignores each one by name |
 
 > **The 128-ROM row said they *"will be committed by default when added: the un-ignore rule is
 > `!testdata/roms/*.rom`, not one path"*, and `.gitignore` no longer works that way.** The glob was
@@ -249,7 +300,7 @@ These are enforced, not aspirational:
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crate boundaries, the five load-bearing design decisions, the 48K↔128 differences, milestones, and the *Measured* section — every performance and codegen claim with the command that produced it |
 | [`docs/MACHINE.md`](docs/MACHINE.md) | The machine from M5 onward: why it owns the clock, the ULA as the second clock, the verification plan, and **the timing oracle** — 68 rows measured on real Spectrums, and the precise statement of what its green does and does not settle |
 | [`docs/M6.md`](docs/M6.md) | The M6 design — `.z80`/`.sna` snapshots and `.tap` tape. Each decision carries its class of evidence, plus **ruling** for a choice no evidence forces. *This table and the `docs/` line in Layout both omitted it while the file existed and ran to hundreds of lines; nothing in the repository linked to it at all.* |
-| [`docs/M7.md`](docs/M7.md) | The M7 design — the 128: paging, the second ROM, the AY-3-8912, per-bank contention. **In flight and unmerged**; its gate is T1+T2+T3 on the same four-tier scheme M6 uses |
+| [`docs/M7.md`](docs/M7.md) | The M7 design — the 128: paging, the second ROM, the AY-3-8912, per-bank contention. **The memory half has landed and is on `main`** — the 128 boots, and `crates/spectrum/tests/m7_*.rs` are its gates; what is still in flight is the AY and the beeper. Its gate is T1+T2+T3 on the same four-tier scheme M6 uses. *(This row said **"in flight and unmerged"**, which stopped being true when the M7 memory commit merged — `git diff main..m5-followup` is empty.)* |
 | [`docs/Z80-REFERENCE.md`](docs/Z80-REFERENCE.md) | Register file, flag semantics, the undocumented 3/5 bits and register Q, `DAA`, instruction timing, prefix traps, interrupts |
 | [`docs/STATUS.md`](docs/STATUS.md) | **What is currently true**, and the only register of what is open. Also the catalogue of this project's own failures — read it before trusting a number anywhere else |
 

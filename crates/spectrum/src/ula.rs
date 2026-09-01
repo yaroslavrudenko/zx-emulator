@@ -525,7 +525,17 @@ impl Bus for Ula {
     fn out_port(&mut self, port: u16, value: u8) {
         self.begin_port_cycle(port);
         if port & ULA_PORT_SELECT == 0 {
-            // Bits 3 and 4 are `MIC` and the speaker. Discarded until M6 and M8 want them.
+            // Bits 3 and 4 are `MIC` and the speaker, and both are still dropped.
+            //
+            // This line used to say *"discarded until M6 and M8 want them"*. `M8.md` Decision 9
+            // quotes it verbatim while overruling it: **the beeper is M7's**. It is bit 4 of the
+            // same `0xFE` write this function already takes the border out of bits 0-2 of, and
+            // being audible does not make it a frontend concern — M8 owns the audio *device* and
+            // the resampling to a host rate, not the source.
+            //
+            // So this is an **open finding, not a deferral**: M7 has landed and the bit is still
+            // dropped. (`MIC` is tape *save*. M6 loaded, and no milestone has claimed saving, so
+            // that half of the sentence named a milestone that was never going to want it.)
             self.border = Colour::new(value & BORDER_MASK);
         }
         if port & PAGING_PORT_SELECT == 0 {

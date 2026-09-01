@@ -168,10 +168,13 @@ next has a `Cpu<Ula>` positioned at a chosen frame phase.
 > The first clause is nonetheless **true and now proven**, from Zilog's own *Z80 CPU User Manual*
 > (UM008011-0816, Figure 5): the address bus carries `PC` for T1–T2 and the refresh address for
 > T3–T4, and **this core does not do that** — `Cpu::fetch_opcode` drives `PC` for all four. The
-> divergence costs nothing, and not only because our contention model cannot see it: the same manual
-> says `/WAIT` is sampled *"during T2 and every subsequent automatic WAIT state"* and nowhere else,
-> so a Spectrum — which charges contention by holding `/WAIT` — **cannot** stall an M1 on whatever
-> its second half is driving. Measured as well as derived: driving `PC, PC, IR, IR` leaves 290/290,
+> divergence costs nothing, and not only because our contention model cannot see it: the hardware
+> applies contention at **T1 of a machine cycle and nowhere else**, so M1's second half is never
+> separately contended on any address. (An earlier revision of this block derived that from the
+> Z80's `/WAIT` sampling rule and asserted the Spectrum contends via `/WAIT`; the sources disagree
+> about which pin the ULA pulls, and the corrected sourcing — including the snow effect, which is
+> the measured half — is in [`Z80-REFERENCE.md`](Z80-REFERENCE.md).) Measured as well as derived:
+> driving `PC, PC, IR, IR` leaves 290/290,
 > 1045/1045 and all 68 rows of the hardware timing oracle unmoved. The per-T-state table with its
 > evidence classes is in [`Z80-REFERENCE.md`](Z80-REFERENCE.md), where hardware rules live; the
 > disposition, the mutation table and the two files that pin the M1 interior are on

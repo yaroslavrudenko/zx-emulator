@@ -30,6 +30,17 @@
 //! at all. Here `I` and `R` are chosen so `IR` is `0x4006` and cannot be confused with any
 //! program, operand or stack address — a core that used the wrong source fails these tests
 //! even though it would pass the corpus.
+//!
+//! > **The last clause is true of most of the corpus and not of all of it — counted, 2026-09-01.**
+//! > Ten vectors do separate `IR` from the program stream, and a core that used the wrong source
+//! > would fail them: the eight `RST`s (`c7`, `cf`, `d7`, `df`, `e7`, `ef`, `f7`, `ff`) run at
+//! > `PC` = `0x6d33`, so `c7`'s internal cycle at `4 MC 0001` is `IR` and could not be `PC`+1;
+//! > and `ed57`/`ed5f` carry `I` = `0x1e`/`0xd7`, so their internal cycles land at `1e19`/`d7f5`.
+//! > No vector carries both a non-zero `PC` and a non-zero `I`. So the honest version of the
+//! > paragraph above is: **1325 of 1335 vectors are degenerate on this axis, ten are not, and
+//! > these tests are stronger than the ten** — they separate `IR` from the program stream, the
+//! > stack, *and* the operand addresses simultaneously, on every instruction rather than on ten.
+//! > The claim being defended survives; the "would pass the corpus" flourish was too broad.
 
 mod common;
 

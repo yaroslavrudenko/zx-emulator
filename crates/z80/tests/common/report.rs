@@ -277,12 +277,38 @@ pub fn compare_memory(expected: &[MemoryBlock], read: impl Fn(u16) -> u8) -> Vec
 ///
 /// **Why the corpus cannot see it, stated exactly.** `tests.expected` carries 1335 vectors,
 /// **1335 `MC` events at T=0 and zero at T=1, T=2 or T=3** — the interior of the M1 fetch
-/// every vector opens with. The two vectors with a non-zero `I` show what the corpus *does*
-/// resolve: `ed57` (`I`=`0x1e`, `R`=`0x17`) records `0 MC 0000`, `4 MC 0001`, `8 MC 1e19`.
-/// The `MC` opening the **second** M1 is at `0001` — `PC`, not `IR`, which would have been
-/// `1e18` — so the corpus does pin the *first* T-state of a fetch to `PC` and is decisive
-/// about it. The internal cycle at T=8 is at `1e19`, unmistakably `{I, R}`. Between them,
-/// the fetch's own T2–T4: never named, in any vector.
+/// every vector opens with. The fetch's own T2–T4 are never named, in any vector.
+///
+/// That is a statement about the *M1 interior* and must not be read as "the corpus is blind
+/// to `IR`". It is emphatically not. Counted over `tests.in`, 2026-09-01: **8 vectors carry a
+/// non-zero `PC`** (`c7`, `cf`, `d7`, `df`, `e7`, `ef`, `f7`, `ff` — the eight `RST`s, all at
+/// `PC`=`0x6d33`) and **2 carry a non-zero `I`** (`ed57`, `ed5f`); no vector carries both. Each
+/// group separates `IR` from `PC` on the T-states it *does* name, from opposite directions:
+///
+/// - `c7` records `0 MC 6d33`, `4 MR 6d33 c7`, **`4 MC 0001`**, then the two stack writes. The
+///   internal cycle is at `0001` = `{I, R}`, and `PC`+1 would be `6d34`. A core spending that
+///   T-state on `PC` fails here — and passes on the 1327 vectors that start at `0x0000`, where
+///   `IR` and `PC`+1 both happen to be `0x0001`.
+/// - `ed57` (`I`=`0x1e`, `R`=`0x17`) records `0 MC 0000`, **`4 MC 0001`**, `8 MC 1e19`. The `MC`
+///   opening the **second** M1 is at `0001` = `PC`, not `IR` (which would be `1e18`) — so the
+///   corpus pins the *first* T-state of a fetch to `PC` and is decisive about it. The internal
+///   cycle at T=8 is at `1e19`, unmistakably `{I, R}`.
+///
+/// **The `RST` vectors sharpen the mutation result rather than weakening it.** Under the
+/// mutation, T2–T3 of `c7`'s fetch carry `0001` where the corpus's own cycle-opening address is
+/// `6d33` — as far apart as this corpus can put two addresses — and the conformance gates were
+/// still unmoved. The interior is not merely unpinned in the degenerate `PC`=`0` case; it is
+/// unpinned where the corpus had every means to pin it.
+///
+/// > **The mutation was not even a faithful model of the hardware, and it still changed nothing
+/// > — which is the point.** It reused `refresh_address()` *after* `increment_r()`, so it drove
+/// > `{I, R+1}` on T3–T4 where the Z80 drives `{I, R}`: the die-level netlist holds the
+/// > pre-increment value on the bus for the whole refresh half while the register has already
+/// > stepped. So the probe was wrong by one in the low byte on top of being the wrong register,
+/// > and every gate stayed green regardless. **A real fix must not copy the probe:** it needs
+/// > `refresh_address()` read *before* `increment_r()` for the fetch's own two T-states and
+/// > *after* it for the internal cycles that follow — one function, both values. The evidence
+/// > and the corpus proof for each half are in `docs/Z80-REFERENCE.md`.
 ///
 /// **Why the machine cannot see it either.** `Ula::tick` consults its `address` argument
 /// only when no machine cycle is open; a fetch opens one four T-states long, so the address
@@ -308,27 +334,59 @@ pub fn compare_memory(expected: &[MemoryBlock], read: impl Fn(u16) -> u8) -> Vec
 ///
 /// ## And the divergence cannot cost a T-state on the hardware either — same manual
 ///
-/// This is stronger than *"unobservable in this emulator"*, it is not an argument from our
-/// contention model, and it is the reason the disposition above is safe rather than merely
-/// convenient. A Spectrum charges contention by holding the Z80's `/WAIT` line, and UM0080's
-/// *T Cycle* section says exactly when the CPU looks at it:
+/// This is stronger than *"unobservable in this emulator"* and it is not an argument from our
+/// contention model — but it is **derived, not proven**, and the boundary between the two is
+/// worth marking precisely, because an earlier draft of this paragraph crossed it.
+///
+/// What is **proven**, from UM0080's *T Cycle* section:
 ///
 /// > During T2 and every subsequent automatic WAIT state (TW), the CPU samples the WAIT line
 /// > with the falling edge of the clock. If the WAIT line is active at this time, another
 /// > WAIT state is entered during the following cycle.
 ///
-/// **T2 and TW. Not T3, not T4.** Wait states are inserted between T2 and T3, which is
-/// before the refresh address reaches the bus at all. So the address driven during T3–T4 of
-/// an M1 **cannot** lengthen that M1, whatever it is and whoever is snooping it: by the time
-/// the ULA could react to it the CPU has stopped asking. Contention charged once per machine
-/// cycle at the address the cycle opens on is not this emulator's simplification of the
-/// hardware — for M1 it is the only thing the hardware can do.
+/// **T2 and TW. Not T3, not T4.** Wait states are inserted between T2 and T3, before the
+/// refresh address reaches the bus at all. So on any machine that contends by asserting
+/// `/WAIT`, the address driven during T3–T4 of an M1 cannot lengthen that M1.
+///
+/// > **Correction — do not extend that to the Spectrum without saying which mechanism it uses.**
+/// > This paragraph asserted *"a Spectrum charges contention by holding the Z80's `/WAIT`
+/// > line"*, and the sources do not agree. The Sinclair Wiki's *ZX Spectrum 16K/48K* page says
+/// > the opposite in as many words — *"the ZX Spectrum uses a memory contention scheme based on
+/// > stopping the Z80's clock, rather than using the Z80's `WAIT` signal"* — and a **stopped
+/// > clock freezes the CPU wherever it stands**, T3 and T4 included, which is exactly the case
+/// > the `/WAIT` argument rules out. Chris Smith's gate-level reverse engineering is the
+/// > primary source that would settle it and is not in hand (`zxdesign.info` refused
+/// > connection again on 2026-09-01, as it did throughout M7; `web.archive.org` is
+/// > unreachable from here too). Classify: the Z80 `/WAIT` rule **proven**; which pin the ULA
+/// > pulls **disputed**; the conclusion below **measured and corroborated**, and resting on
+/// > that rather than on the mechanism.
+///
+/// **What survives the correction is the conclusion, and it is better sourced than the
+/// mechanism was.** Three independent lines agree that contention is applied at **T1 of a
+/// machine cycle and nowhere else** — the Sinclair Wiki's contention page (*"this happens on
+/// the first tstate (T1) of any instruction fetch, memory read or memory write operation"*),
+/// the community-canonical opcode timing table, which writes every fetch as `pc:4` with no
+/// `ir` component, and Wikipedia's *Contended memory* (*"it will stop the Z80's clock only
+/// during the first clock cycle of a machine cycle"*). All three are **observed**. The
+/// decisive **measured** point is the snow effect: `I` in `0x40..=0x7F` corrupts the display
+/// and World of Spectrum's 48K reference records that *"the Spectrum won't crash, and program
+/// will continue to run normally"* — the refresh address demonstrably reaches the memory
+/// system and demonstrably does not change the instruction's timing.
 ///
 /// Which closes the question that started this: **`PC`-for-all-four and `PC,PC,IR,IR` are not
-/// two behaviours, they are one behaviour in two coordinate systems.** No `Bus` that models a
-/// real Z80 machine can separate them, because the pin that would have to carry the
-/// difference is not being read. Measuring 68 hardware rows and 1335 vectors unchanged was
-/// the empirical half of that; this is why the empirical half had to come out that way.
+/// two behaviours, they are one behaviour in two coordinate systems** — for any `Bus` that
+/// prices contention once per machine cycle, at the address the cycle opens on, which is what
+/// every source above says the hardware does and what `Ula` implements. Measuring 68 hardware
+/// rows and 1335 vectors unchanged was the empirical half of that; the sources are why the
+/// empirical half had to come out that way.
+///
+/// The gauge is not unconditional, and the condition is the thing to check before anyone
+/// revisits this: a `Bus` that sampled the address **per T-state** would separate them. That
+/// is not a hypothetical no-op — it is the shape a machine snooping `/MREQ` continuously would
+/// have, and `/MREQ` *is* asserted during the refresh half (UM0080: *"The MREQ signal during
+/// this refresh period should be used to perform a refresh read"*), while `/RD` is not. So the
+/// question "does M1's second half drive `IR`" only becomes answerable at the same moment the
+/// contention model stops being per-cycle. Until then it is unobservable by construction.
 ///
 /// The residue — what a refresh address in contended RAM *does* do on real hardware — is not
 /// a timing effect at all. `I` in `0x40..=0x7F` points the refresh strobe at the screen bank
