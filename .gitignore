@@ -4,3 +4,9 @@ testdata/**
 !testdata/.gitkeep
 .DS_Store
 !testdata/README.md
+# The Sinclair ROMs are the one corpus that may be redistributed — Amstrad has explicitly
+# permitted shipping them with emulators. Game images may not, and are covered by the
+# blanket rule above. The directory has to be un-ignored before a file inside it can be.
+!testdata/roms/
+!testdata/roms/*.rom
+/.agent-workspace/

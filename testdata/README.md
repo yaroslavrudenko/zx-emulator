@@ -124,3 +124,66 @@ anything unrecognised is an error rather than a silent `false`.
 The `zex` exercisers are Frank Cringle's `zexlax`/`zexall` work, redistributed widely under
 permissive terms. As with the FUSE vectors they are fetched rather than committed, so this
 repository redistributes nothing.
+
+---
+
+## `testdata/roms/` — the Sinclair ROMs
+
+**This is the one directory here that is committed.** The rule at the top of this file —
+nothing in `testdata/` is in the repository — has one exception, and `.gitignore` names it:
+Amstrad has explicitly permitted redistributing the Sinclair ROMs with emulators, so
+`48.rom` may live here. Game images may not; the user supplies their own.
+
+`48.rom` is the 48K's single 16 KB ROM: Sinclair BASIC, the editor, the character set at
+`0x3D00`, and the interrupt handler the 50 Hz frame interrupt vectors into. It is the **M5**
+gate — a machine that boots it to `© 1982 Sinclair Research Ltd` has a working memory map
+and a working screen.
+
+| | |
+|---|---|
+| Size | 16384 bytes |
+| SHA-1 | `5ea7c2b824672e914525d1d5c419d71b84a426a2` |
+| CRC-32 | `ddee531f` |
+
+### Provenance
+
+Fetched from two independent mirrors and compared byte for byte, because a ROM is the one
+corpus here whose contents nothing else validates — the FUSE and `zex` harnesses check the
+structure of what they load, and a subtly wrong ROM would simply fail to boot with no clue
+why.
+
+```sh
+mkdir -p testdata/roms
+curl -fSL -o testdata/roms/48.rom \
+  "https://sourceforge.net/p/fuse-emulator/fuse/ci/master/tree/roms/48.rom?format=raw"
+
+# The second mirror the committed copy was checked against:
+#   https://raw.githubusercontent.com/archtaurus/RetroPieBIOS/master/BIOS/48.rom
+shasum -a 1 testdata/roms/48.rom   # 5ea7c2b824672e914525d1d5c419d71b84a426a2
+```
+
+### Making absence a failure
+
+The same rule as every other corpus, through the same environment variable — there is one
+convention here, not one per corpus:
+
+| | |
+|---|---|
+| present | it runs |
+| absent | **the gate fails**, naming the fetch instructions |
+| absent, `Z80_FUSE_ALLOW_MISSING=1` | the gate skips, printing why |
+| absent, `Z80_FUSE_ALLOW_MISSING=1`, `CI` set | **refused** |
+
+Absence should not happen, since the file is committed — which is exactly why the guard
+matters. A committed corpus that a sparse checkout or a stray `rm` removes produces the
+same green-and-verifying-nothing run that `docs/STATUS.md` records the FUSE gate producing,
+and "it is committed, so it is there" is the kind of reasoning that stops people looking.
+
+### Running the gate by hand
+
+```sh
+cargo run --release -p spectrum --example boot -- testdata/roms/48.rom
+```
+
+Prints the screen as text, the CPU state, the frame the copyright message first appeared
+on, and the emulated-to-real-time ratio; exits non-zero if the message never appeared.
