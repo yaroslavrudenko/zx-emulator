@@ -66,10 +66,28 @@
 //!
 //! # What is modelled that the field names may not suggest
 //!
-//! - **`MEMPTR`/`WZ`** ([`CpuState::wz`]) is *live*, not an inert snapshot field: every
-//!   indexed `(IX+d)`/`(IY+d)` access sets it, and `BIT` reads it back. It is the mechanism
-//!   behind the `BIT n,(IX+d)` flag rule. The un-prefixed instructions that also update it
-//!   on hardware — `LD A,(nn)`, `JP nn`, `EX (SP),HL` and their relatives — do not yet.
+//! - **`MEMPTR`/`WZ`** ([`CpuState::wz`]) is *live*, not an inert snapshot field: it is the
+//!   mechanism behind the `BIT n,(IX+d)` flag rule, and `BIT` is the only instruction that
+//!   reads it back. Every rule in Boo-boo and Kladov's *MEMPTR, esoteric register of the
+//!   ZiLOG Z80 CPU* is implemented — the indexed accesses, the accumulator and pair loads and
+//!   stores, `EX (SP),rp`, the 16-bit arithmetic, `RLD`/`RRD`, all four block families, the
+//!   I/O group, every jump, call and return, and interrupt acceptance. `Cpu::set_memptr` is
+//!   the single write site, so `rg 'set_memptr'` enumerates them.
+//!
+//!   **Implemented is not the same as correct, and the difference is measured rather than
+//!   conceded.** Two instruments grade this and neither subsumes the other:
+//!   `crates/z80/tests/memptr_rules.rs` asserts each rule's exact sixteen-bit result on its
+//!   own, and `crates/spectrum/tests/memptr_oracle.rs` runs Patrik Rak's exerciser on the
+//!   whole machine, where it now fails no group. **A clean sweep there is still not 160
+//!   correct rules**: the exerciser sees MEMPTR only through two flag bits folded into a CRC,
+//!   and breaking the accumulator-store quirk reddens four unit tests but only two of its
+//!   groups — `OUT (n),A` passes with its rule broken. That measurement is recorded at
+//!   `FAILING_GROUPS` in the oracle.
+//!
+//!   The NMOS rules are implemented; the KP1858BM1 / T34BM1 clones differ on the three
+//!   accumulator stores — they clear `MEMPTR`'s high byte where an NMOS part writes `A` —
+//!   and are **not** modelled. The rules and their source are documented on `Cpu::set_memptr`,
+//!   which is private — `cargo doc --document-private-items` renders it.
 
 #![cfg_attr(not(test), no_std)]
 #![deny(missing_docs)]
@@ -249,9 +267,8 @@ pub struct CpuState {
     /// reads it directly.
     ///
     /// It leaks into observable behaviour through the undocumented flag bits of `BIT`,
-    /// which is why a snapshot must carry it. Every indexed `(IX+d)`/`(IY+d)` access sets
-    /// it and `BIT` reads it back; the un-prefixed instructions that also update it on
-    /// hardware — `LD A,(nn)`, `JP nn`, `EX (SP),HL` and their relatives — do not yet.
+    /// which is why a snapshot must carry it: `BIT n,(HL)` executed just after a load is
+    /// restored can report bits the loading machine never computed.
     pub wz: u16,
     /// The flag latch — the value most recently written to `F`, or zero if the last
     /// instruction wrote no flags.
@@ -323,7 +340,7 @@ pub struct Cpu<B> {
     bus: B,
     interrupts: InterruptState,
     halted: bool,
-    /// `MEMPTR`. Carried through snapshots; not yet updated by any instruction.
+    /// `MEMPTR`. Written by [`Cpu::set_memptr`] and read only by `BIT`.
     wz: u16,
     /// The flag latch. See [`CpuState::q`].
     q: u8,
@@ -472,6 +489,11 @@ impl<B: Bus> Cpu<B> {
                 self.regs.set_pc(u16::from_le_bytes([low, high]));
             }
         }
+        // An accepted interrupt is a `CALL` the device asked for, and it loads `MEMPTR` with
+        // the address it vectors to exactly as `CALL` does. Read back from `PC` rather than
+        // from `dispatch` so mode 2 — whose target is not known until the vector table has
+        // been read — needs no second copy of the rule.
+        self.set_memptr(self.regs.pc());
 
         self.t_states
     }
@@ -490,6 +512,7 @@ impl<B: Bus> Cpu<B> {
         let return_address = self.regs.pc();
         self.push_word(return_address);
         self.regs.set_pc(NMI_VECTOR);
+        self.set_memptr(NMI_VECTOR);
 
         self.t_states
     }
@@ -756,8 +779,23 @@ impl<B: Bus> Cpu<B> {
 
     /// Fetch the next opcode: an M1 cycle, which also advances `PC` and refreshes `R`.
     ///
-    /// `R` is incremented before the cycle is charged because the refresh address the Z80
-    /// drives during and after M1 carries the *post*-increment value.
+    /// `R` is incremented before the cycle is charged so that the internal cycles *after* M1
+    /// see the **post**-increment value. That much the corpus proves: `ed57` starts at
+    /// `R = 0x17`, runs two M1 cycles and records `8 MC 1e19`.
+    ///
+    /// **This comment used to state two rules as one** — *"the refresh address the Z80 drives
+    /// during **and after** M1 carries the post-increment value"*. Right for *after*; wrong for
+    /// *during*, where the die-level netlist holds `{I, R}` on the bus across T3–T4 with `R` as
+    /// it was **before** this fetch's increment. `docs/Z80-REFERENCE.md`'s *`R` on the bus*
+    /// section is the single source for both and is not restated here.
+    ///
+    /// This core never faces the *during* rule, because it drives `PC` for all four T-states.
+    /// The divergence is inert, and that is **measured rather than argued** — see
+    /// `compare_contention` in `tests/common/report.rs`. Whoever makes M1 hardware-accurate
+    /// needs `refresh_address()` read **before** `increment_r()` for the fetch's own two
+    /// T-states and **after** it for everything downstream, one function wanting both values —
+    /// and should know that the probe which first found this was itself wrong by one, driving
+    /// `{I, R+1}` where the hardware drives `{I, R}`. A fix copied from the probe inherits that.
     ///
     /// The transfer goes through [`Bus::fetch`] rather than [`Bus::read`] so the machine can
     /// tell a four-T-state opcode fetch from a three-T-state read followed by an internal
@@ -807,6 +845,37 @@ impl<B: Bus> Cpu<B> {
     fn write_flags(&mut self, flags: u8) {
         self.regs.set_f(flags);
         self.q = flags;
+    }
+
+    /// Record an address in `MEMPTR`.
+    ///
+    /// The one writer, for the same reason [`Cpu::write_flags`] is the one writer of `q`: the
+    /// rules are scattered across three dozen handlers, they are undocumented by Zilog, and
+    /// the only way to audit which of them have landed is to be able to enumerate the write
+    /// sites. `rg 'set_memptr'` is that enumeration; `self.wz = ` appears nowhere outside
+    /// [`Cpu::set_state`], which loads a snapshot rather than executing an instruction.
+    ///
+    /// # Where the rules come from
+    ///
+    /// Zilog documents none of this, so the source is Boo-boo and Vladimir Kladov's *MEMPTR,
+    /// esoteric register of the ZiLOG Z80 CPU* (zx.pk.ru, 2006) — a **measurement** of real
+    /// parts rather than a specification. Its method is the reason to trust it: `CPI`
+    /// increments `MEMPTR` and `CPD` decrements it, so a loop of `CPD` walks the latch
+    /// downwards while `BIT n,(HL)` reports bits 11 and 13, and watching where the borrow
+    /// arrives recovers fourteen of the sixteen bits. Every rule below is quoted at the
+    /// handler that implements it, with the formula in the document's own terms.
+    ///
+    /// # What is deliberately not modelled
+    ///
+    /// The document's results agree across every part its authors tested **except** the
+    /// KP1858BM1 and T34BM1 clones, which write **zero** into `MEMPTR`'s high byte where an
+    /// NMOS Z80 writes `A` — affecting exactly `LD (nn),A`, `LD (rp),A` and `OUT (n),A`. This
+    /// core is an NMOS Z80 and takes the NMOS rule at all three sites. Modelling the clones
+    /// would need a part-variant switch on the public API, and nothing in this emulator asks
+    /// for one.
+    #[inline]
+    fn set_memptr(&mut self, address: u16) {
+        self.wz = address;
     }
 
     /// The carry flag, which several instruction classes take as an input.

@@ -2,13 +2,19 @@
 //!
 //! # Why this file exists, and what M6 made possible
 //!
-//! `docs/STATUS.md` carries a row saying MEMPTR is written at exactly one site — `wz` is set in
+//! `docs/STATUS.md` carried a row saying MEMPTR is written at exactly one site — `wz` set in
 //! `indexed_address`, so `(IX+d)`/`(IY+d)` records it and `BIT n,(HL)` reads it back — that
 //! every *other* hardware rule for the register is unimplemented, and that **nothing grades the
-//! value**. FUSE has no MEMPTR column and neither exerciser reports on it. That row also names
-//! the instrument: `testdata/README.md` documents `z80memptr.tap`, and `tape_corpus.rs` has
+//! value**. FUSE has no MEMPTR column and neither exerciser reports on it. That row also named
+//! the instrument: `testdata/README.md` documents `z80memptr.tap`, and `tape_corpus.rs` had
 //! been sweeping it as **tape-format** corpus — parsing its blocks and checking their parity
 //! bytes — without ever executing an instruction of it.
+//!
+//! **All three halves of that row are now out of date**, which is the normal fate of a row that
+//! names its own settling condition: the rules are implemented, `Cpu::set_memptr` is the one
+//! writer of twenty-eight sites, and this file plus `crates/z80/tests/memptr_rules.rs` grade the
+//! value. The row was also wrong in both directions when it was current — it listed `RLD`/`RRD`
+//! as unimplemented when they passed, and omitted `ADD/ADC/SBC HL,rr` when they failed.
 //!
 //! M6 is what made it runnable. `tape_rom_load.rs` established that this machine loads a `.tap`
 //! through the **real ROM's own `LD-BYTES`**, reading the `EAR` bit, with every `IN A,($FE)`
@@ -36,12 +42,16 @@
 //! wrong screen layout produces cells that match no glyph and read as `?` rather than quietly
 //! resolving into a plausible verdict.
 //!
-//! # What is asserted, and why it is not "all tests passed"
+//! # What is asserted
 //!
-//! **This program fails here, and its failures are the point.** Every un-prefixed MEMPTR rule
-//! is unimplemented, so a green run would be the surprising result. Asserting success would
-//! commit this gate to being red for the whole life of the defect, which is how a gate gets
-//! `#[ignore]`d and then forgotten — this project's own recorded failure, twice.
+//! **This section used to open *"this program fails here, and its failures are the point"*, and
+//! that is no longer true — the program now passes all 160 groups.** The paragraph is rewritten
+//! rather than deleted because the reasoning under it was sound and still governs: what the gate
+//! pins is the *exact* verdict, whatever that verdict is, so neither an improvement nor a
+//! regression can happen quietly. When the verdict was 45 failures that meant pinning 45
+//! failures; a gate that had instead asserted success would have been red for the whole life of
+//! the defect, which is how a gate gets `#[ignore]`d and then forgotten — this project's own
+//! recorded failure, twice.
 //!
 //! So what is asserted is the **shape of the run** and the **exact verdict**, pinned:
 //!
@@ -49,14 +59,17 @@
 //! - the program ran and returned, rather than stopping early or hanging;
 //! - **every one of its tests was seen**, by index, with none missing — see
 //!   [`Transcript::missing`], which is what makes the transcript's completeness a *measurement*
-//!   rather than a hope about the capture mechanism;
+//!   rather than a hope about the capture mechanism. It is checked against [`EXPECTED_TOTAL`]
+//!   rather than against the summary line's own count, **because the passing summary has no
+//!   count**: written the other way, this assertion would have switched itself off at the exact
+//!   moment the run went green;
 //! - the report is *readable* — a line this parser cannot read is a fault, not a pass;
-//! - the failing count is exactly [`VERDICT`], and the failing groups are exactly
-//!   [`FAILING_GROUPS`].
+//! - the verdict is exactly [`VERDICT`], and the failing groups are exactly [`FAILING_GROUPS`],
+//!   which is now the empty set.
 //!
-//! That last pair is the working part. A MEMPTR fix moves the count **down** and this gate goes
-//! red naming the groups that changed, which is the notification a fix wants. A regression
-//! moves it **up**, and the gate names those too. Neither can happen quietly.
+//! That last pair is the working part, and it is not weaker for being green. Any group that
+//! starts failing is named, and so is any that stops — the direction the gate fired in when the
+//! rules landed, taking the pin from 45 groups to none.
 //!
 //! # The green was proven able to fail
 //!
@@ -67,17 +80,38 @@
 //!
 //! | Mutation | Result |
 //! |---|---|
-//! | delete the sole `wz` write, `crates/z80/src/instructions.rs:660` | **RED**, exit 101 — failing groups **45 → 143** |
+//! | delete the `wz` write that was then the only one, at `crates/z80/src/instructions.rs:660` | **RED**, exit 101 — failing groups **45 → 143** |
 //! | flip **one byte** of the tape's 14390: the `CODE` block's parity | **RED**, exit 101 — the ROM refuses the block, the run stops at [`LOAD_FAILED`] having read no verdict at all |
 //!
 //! The second is this gate's own proof that the program arrives through the loader: `.tap`
 //! parity is checked by the **ROM**, not by anything here, so a single wrong byte 14 KB into a
 //! pulse train is the whole difference between a verdict and no verdict.
 //!
-//! The first carries a finding beyond "the gate bites", and it is the reason the caveat on
-//! [`FAILING_GROUPS`] is stated as strongly as it is: stranding MEMPTR at zero made **17
-//! currently-failing groups start passing**. A group's verdict is therefore not a report on
-//! whether its rule is implemented, and 111 passes are not 111 correct rules.
+//! The first was run when `wz` had one write site and the pin was 45 failures. It carried a
+//! finding beyond "the gate bites": stranding MEMPTR at zero made **17 then-failing groups start
+//! passing**. That is why the caveat on [`FAILING_GROUPS`] is stated as strongly as it is, and
+//! it is not retired by the run going green — a group's verdict was never a report on whether
+//! its own rule is implemented.
+//!
+//! **Both mutations were re-run against the passing core**, since a gate pinned to success has a
+//! different failure mode from one pinned to a failure count, and the earlier runs cannot speak
+//! for it:
+//!
+//! | Mutation, against the passing core | Result |
+//! |---|---|
+//! | neutralise `Cpu::set_memptr` so every rule writes nothing | **RED**, exit 101 — **0 → 143** failing groups |
+//! | drop only the block families' repeat rule — `repeat_block`'s `set_memptr` | **RED**, exit 101 — **0 → 8** failing, named below |
+//!
+//! The second is the sharper of the two, and its eight groups are worth reading rather than
+//! counting: `087 LDIR`, `088 LDDR`, `089 LDIR->NOP'`, `090 LDDR->NOP'`, `093 CPIR`, `094 CPDR`
+//! — and then `102 INIR->NOP'`, `103 INDR->NOP'`. **The first six are the rule Boo-boo and
+//! Kladov measured in 2006; the last two are the correction David Banks traced on real parts
+//! seventeen years later**, which their document explicitly denies. One line of this core
+//! carries both, and removing it moves exactly those eight groups and nothing else.
+//!
+//! It also disposes of a guess made while writing this table: the six were predicted and the
+//! eight were measured. Two groups more than expected is a small error to make in a comment and
+//! exactly the size of error that, written down unmeasured, becomes a fact nobody rechecks.
 //!
 //! # What this program does not cover
 //!
@@ -217,13 +251,19 @@ const STEPS_PER_SAMPLE: u32 = 2_000;
 
 /// T-states to allow for the whole run: the load and the program together.
 ///
-/// **Measured, not guessed.** A complete run costs **921,998,240** T-states, of which
+/// **Measured, not guessed.** A complete run costs **910,573,713** T-states, of which
 /// **309,241,005** — a third of it — is the tape passing through the loader in emulated real
 /// time. (That second figure is not an estimate: it is where the run stops when the tape's
 /// parity byte is corrupted, which is the moment the last block finishes arriving.) This is
 /// ~4x the total. The budget only has to separate "a bit different" from "looping forever": a
 /// core with a defect executes the same program and can differ by a few percent, not by a
 /// factor — and the mutation that deletes MEMPTR entirely still completes well inside it.
+///
+/// The total was **921,998,240** while 45 groups failed, and the difference is the program
+/// printing fewer lines, not running less: a failure costs an extra CRC line, which costs
+/// screenfuls, which cost scroll prompts — nine then against seven now. Worth recording only
+/// because a T-state total that moves when no timing changed looks like a defect until the
+/// cause is named.
 const BUDGET: u64 = 4_000_000_000;
 
 // ---------------------------------------------------------------------------------------
@@ -477,7 +517,6 @@ fn screen_fingerprint(machine: &Spectrum) -> u64 {
             (hash ^ u64::from_le_bytes(*chunk)).wrapping_mul(FNV_PRIME)
         })
 }
-
 // ---------------------------------------------------------------------------------------
 // Reading the program's report
 // ---------------------------------------------------------------------------------------
@@ -561,101 +600,74 @@ fn read_summary(rest: &str) -> Option<Summary> {
 // The gate
 // ---------------------------------------------------------------------------------------
 
+/// How many tests the program runs, pinned independently of its verdict.
+///
+/// **It is a separate constant precisely because the passing summary does not carry one.** The
+/// program prints `all tests passed.` with no count, so once this core started passing, a
+/// completeness check written against the summary's own `total` would have switched itself off
+/// — silently, at the exact moment the gate had least else to assert. That is the defect
+/// `docs/STATUS.md` records the FUSE harness having: a gate that verifies nothing while looking
+/// like it verifies something. [`faults`] checks [`Transcript::missing`] against this number on
+/// every run, pass or fail.
+const EXPECTED_TOTAL: u32 = 160;
+
 /// What this core scores today, pinned.
 ///
-/// **A mismatch is a finding, not a constant to bump.** Down is a MEMPTR rule being implemented
-/// and is the outcome this gate exists to notice; up is a regression. Either way the failure
-/// message names the groups that moved, which is the diagnosis.
-const VERDICT: Summary = Summary::Failed {
-    failed: 45,
-    total: 160,
-};
+/// **A mismatch is a finding, not a constant to bump.** This core now passes every group, so
+/// any movement at all is a regression, and the failure message names the groups that moved.
+const VERDICT: Summary = Summary::AllPassed;
 
-/// The groups that fail today, in the program's own numbering.
+/// The groups that fail today, in the program's own numbering — now none.
 ///
 /// Named rather than counted, for the reason `zex_oracle.rs` asserts a group count: a count
-/// alone cannot tell "three fixed and three broken" from "no change".
+/// alone cannot tell "three fixed and three broken" from "no change". Empty, it says the
+/// stronger thing — that *no* group may fail — and [`faults`] still reports any that do by name.
 ///
-/// # What this list is, and the thing it must not be read as
+/// # What a green run here does and does not establish
 ///
-/// It is the set of MEMPTR rules this core does not implement, made visible. `crates/z80/src`
-/// writes `wz` at **exactly one site** — `instructions.rs:660`, in `indexed_address` — so every
-/// other rule is absent, and this is what their absence looks like from outside.
+/// It was 45 groups until the rules landed, and this comment previously argued that the then-111
+/// passing groups were not 111 correct rules, *"because a group passes when the program's folded
+/// CRC did not distinguish"*. **That argument survives its own success and is the more important
+/// half now.** MEMPTR is observable only through bits 3 and 5 of `BIT n,(HL)` — two bits per
+/// probe — so this exerciser grades the *aggregate* of a rule set, group by group, and a
+/// compensating pair of errors inside one group is a thing it cannot see.
 ///
-/// **The 111 passing groups are not 111 correct MEMPTR rules, and reading them that way is the
-/// mistake this comment exists to prevent.** MEMPTR is observable only through bits 3 and 5 of
-/// `BIT n,(HL)`, so a group passes when the program's folded CRC did not *distinguish* — which,
-/// with one write site in the whole core, is the reason to expect for almost all of them. This
-/// is the same shape as `zex_oracle.rs`'s claim 2 about `zexall`: a verdict that is identical
-/// under several implementations is evidence for none of them.
+/// So this is one of two instruments, not the instrument. `crates/z80/tests/memptr_rules.rs`
+/// asserts each rule's exact sixteen-bit result on its own, which is what localises a defect to
+/// a rule; this file is what proves those rules add up to the behaviour a program written by
+/// somebody else, against real silicon, expects. Neither subsumes the other: the unit tests
+/// cannot catch a rule nobody thought to write, and this cannot say which rule is wrong.
 ///
-/// # Three asymmetries in the failing set — leads, not diagnoses
+/// **And the gap is measured, not merely conceded.** Breaking the accumulator-store quirk — one
+/// line, three instructions wrong — turns four of those unit tests red but only **two** groups
+/// here, `141` and `143`. `104 OUT (N),A` passes with its rule broken, because two bits folded
+/// into a CRC do not distinguish that particular wrong value. That is this caveat with a number
+/// against it.
 ///
-/// A CRC oracle localises to a group and no further, so these are observations for whoever
-/// implements the rules, not explanations:
+/// # What the 45 turned out to be
 ///
-/// 1. **In the `LD` family the split is by direction.** `LD A,(NN)` and `LD A,([BC,DE])` pass
-///    while `LD (NN),A` and `LD ([BC,DE]),A` fail — and those two are exactly the forms whose
-///    documented rule is not `address + 1` but the quirk that puts **`A` in MEMPTR's high
-///    byte**. `LD (NN),HL`, `LD (NN),XY` and `LD (NN),RR` all pass.
-/// 2. **In the block family the split is by repetition.** `LDI`, `LDD`, `CPI` and `CPD` pass;
-///    `LDIR`, `LDDR`, `CPIR` and `CPDR` fail, as do the two `->NOP'` variants of each.
-/// 3. **`RLD` and `RRD` pass**, although `docs/STATUS.md` lists them among the unimplemented
-///    rules — and `ADD/ADC/SBC HL,rr` fail, although that list does not mention them. The list
-///    and the measurement disagree in both directions, which is worth more than either alone.
-const FAILING_GROUPS: &[&str] = &[
-    "065 ADD HL,RR",
-    "066 ADD IX,RR",
-    "067 ADD IY,RR",
-    "068 ADC HL,RR",
-    "069 SBC HL,RR",
-    "087 LDIR",
-    "088 LDDR",
-    "089 LDIR->NOP'",
-    "090 LDDR->NOP'",
-    "093 CPIR",
-    "094 CPDR",
-    "095 IN A,(N)",
-    "096 IN R,(C)",
-    "097 IN (C)",
-    "098 INI",
-    "099 IND",
-    "100 INIR",
-    "101 INDR",
-    "102 INIR->NOP'",
-    "103 INDR->NOP'",
-    "104 OUT (N),A",
-    "105 OUT (C),R",
-    "106 OUT (C),0",
-    "107 OUTI",
-    "108 OUTD",
-    "109 OTIR",
-    "110 OTDR",
-    "111 JP NN",
-    "112 JP CC,NN",
-    "113 JP (HL)",
-    "114 JP (XY)",
-    "115 JR N",
-    "116 JR CC,N",
-    "117 DJNZ N",
-    "118 CALL NN",
-    "119 CALL CC,NN",
-    "120 RET",
-    "121 RET CC",
-    "122 RETN",
-    "123 RETI",
-    "124 RETI/RETN",
-    "131 EX (SP),HL",
-    "132 EX (SP),XY",
-    "141 LD ([BC,DE]),A",
-    "143 LD (NN),A",
-];
+/// Recorded because the shape of the answer is the useful part. The failing set carried three
+/// asymmetries, all three of which paid out, and one of them not in the direction it pointed:
+///
+/// 1. **The `LD` family split by direction** — `LD (NN),A` and `LD ([BC,DE]),A` failed while
+///    their loads passed, which is exactly the set taking the *"`MEMPTR_hi` = A"* quirk. See
+///    `accumulator_store_memptr` in `crates/z80/src/instructions.rs`.
+/// 2. **The block family split by repetition** — the rewind is its own rule, `MEMPTR = PC + 1`.
+/// 3. **`JP (HL)` and `JP (XY)` failed while needing no rule at all.** They are the family's one
+///    documented *exception* and the core already left `MEMPTR` alone for them; they failed
+///    because the instructions the exerciser sets up *with* were wrong, and came green with no
+///    change to `jump_to_pair`. A CRC oracle localises to a group and no further, and this is
+///    what that limitation looks like from the inside — a group can fail for a rule that is not
+///    its own.
+const FAILING_GROUPS: &[&str] = &[];
 
 #[test]
 #[ignore = "loads a 14 KB tape through the ROM in emulated real time and then runs a 160-group \
-            exerciser: 128,108,000 instructions / 921,998,240 T-states, measured at 2.76 s in \
-            release and 27.34 s in the dev profile cargo test uses by default. Run with \
-            --release -- --ignored; CI runs it that way."]
+            exerciser: 127,406,000 instructions / 910,573,713 T-states. Those two are \
+            deterministic and reproduce exactly; the wall clock is not, so it carries its \
+            conditions — 2.66 s in release and 24.25 s in the dev profile cargo test uses by \
+            default, Apple M3 Max, nothing else running, 2026-09-01. Run with --release -- \
+            --ignored; CI runs it that way."]
 fn the_memptr_exerciser_reports_the_verdict_this_core_earns() {
     let Some(rom) = sinclair_rom() else {
         return;
@@ -785,15 +797,24 @@ fn faults(transcript: &Transcript, pc: u16) -> Vec<String> {
         faults.push(format!("UNREADABLE REPORT LINE {line}"));
     }
 
-    if let Summary::Failed { total, .. } = summary {
-        let missing = transcript.missing(total);
-        if !missing.is_empty() {
-            faults.push(format!(
-                "the program reports {total} tests and {} were never seen: {missing:?}. The \
-                 transcript is incomplete, so no verdict below it can be trusted.",
-                missing.len(),
-            ));
-        }
+    // Checked against [`EXPECTED_TOTAL`] rather than against the summary's own count, because
+    // the passing summary has no count — see EXPECTED_TOTAL. A run that stopped after ten
+    // groups and then printed `all tests passed.` would otherwise satisfy every other rule here.
+    let missing = transcript.missing(EXPECTED_TOTAL);
+    if !missing.is_empty() {
+        faults.push(format!(
+            "the program runs {EXPECTED_TOTAL} tests and {} were never seen: {missing:?}. The \
+             transcript is incomplete, so no verdict below it can be trusted.",
+            missing.len(),
+        ));
+    }
+    if let Summary::Failed { total, .. } = summary
+        && total != EXPECTED_TOTAL
+    {
+        faults.push(format!(
+            "the program reports {total} tests where this gate expects {EXPECTED_TOTAL}. That \
+             is a different build of the exerciser, not a different result from ours.",
+        ));
     }
 
     if summary != VERDICT {
@@ -1014,19 +1035,14 @@ fn a_summary_line_this_parser_cannot_read_is_not_a_pass() {
 
 // --- one failing case per gate rule, so none of them can be decorative ---
 
-/// The `total` from [`VERDICT`], so the fixtures below agree with the gate by construction.
-const PINNED_TOTAL: u32 = match VERDICT {
-    Summary::Failed { total, .. } => total,
-    Summary::AllPassed => 0,
-};
-
 /// A transcript that passes the gate exactly: every pinned group failing, the rest `OK`.
 ///
-/// Built from [`FAILING_GROUPS`] and [`VERDICT`] rather than from literals, so it cannot drift
-/// away from them when a MEMPTR rule lands and both are updated.
+/// Built from [`FAILING_GROUPS`] and [`EXPECTED_TOTAL`] rather than from literals, so it cannot
+/// drift away from them. With the pinned set empty it is simply a wholly passing run, and it
+/// keeps working unchanged if a regression ever has to be pinned here again.
 fn passing_transcript() -> Transcript {
     let mut transcript = Transcript::default();
-    let lines: Vec<String> = (0..PINNED_TOTAL)
+    let lines: Vec<String> = (0..EXPECTED_TOTAL)
         .map(|index| {
             match FAILING_GROUPS
                 .iter()
@@ -1049,17 +1065,26 @@ fn passing_transcript() -> Transcript {
 fn the_pinned_verdict_and_failing_set_agree_with_each_other() {
     // The two constants are written by hand from one run, so nothing but this stops them
     // disagreeing — a count of 45 beside a list of 44 would make every future failure
-    // unreadable.
-    let Summary::Failed { failed, total } = VERDICT else {
-        panic!("a passing core would not need FAILING_GROUPS");
+    // unreadable. It held while the pin was a failing set and it still has to hold now that
+    // the two agree on zero, which is why it is repointed rather than deleted: if a regression
+    // is ever pinned here, this is what stops the count and the list drifting apart again.
+    let expected_failures = match VERDICT {
+        Summary::AllPassed => 0,
+        Summary::Failed { failed, total } => {
+            assert!(
+                failed < total,
+                "a run where everything fails is not a verdict"
+            );
+            assert_eq!(total, EXPECTED_TOTAL, "the pin must name the same build");
+            failed as usize
+        }
     };
     assert_eq!(
-        failed as usize,
+        expected_failures,
         FAILING_GROUPS.len(),
-        "VERDICT says {failed} groups fail and FAILING_GROUPS names {}",
+        "VERDICT expects {expected_failures} failing group(s) and FAILING_GROUPS names {}",
         FAILING_GROUPS.len(),
     );
-    assert!(failed < total);
     let mut sorted = FAILING_GROUPS.to_vec();
     sorted.sort_unstable();
     assert_eq!(
@@ -1105,9 +1130,13 @@ fn a_run_with_no_summary_is_a_fault_even_though_no_line_said_failed() {
 }
 
 #[test]
-fn an_incomplete_transcript_is_a_fault() {
+fn an_incomplete_transcript_is_a_fault_even_when_every_line_seen_says_ok() {
+    // The rule that had to survive the core starting to pass. Before, the completeness check
+    // read its `total` out of a `Failed` summary; a passing run carries no total, so written
+    // that way this assertion would have quietly stopped running — and a truncated transcript
+    // whose visible lines all say OK is exactly what it exists to catch.
     let mut transcript = passing_transcript();
-    let last = PINNED_TOTAL - 1;
+    let last = EXPECTED_TOTAL - 1;
     transcript.tests.remove(&last);
 
     let faults = faults(&transcript, RETURNED);
@@ -1123,7 +1152,10 @@ fn an_incomplete_transcript_is_a_fault() {
 #[test]
 fn a_changed_verdict_is_a_fault_that_says_it_is_not_a_constant_to_bump() {
     let mut transcript = passing_transcript();
-    transcript.summary = Some(Summary::AllPassed);
+    transcript.summary = Some(Summary::Failed {
+        failed: 1,
+        total: EXPECTED_TOTAL,
+    });
 
     let faults = faults(&transcript, RETURNED);
 
@@ -1136,19 +1168,29 @@ fn a_changed_verdict_is_a_fault_that_says_it_is_not_a_constant_to_bump() {
 }
 
 #[test]
-fn a_memptr_rule_landing_is_a_fault_that_names_the_group_that_was_fixed() {
-    // The outcome this gate exists to notice, and the one a fix will actually hit.
+fn a_regression_is_a_fault_that_names_the_group_that_broke() {
+    // The outcome this gate now exists to notice. It used to assert the mirror image — that a
+    // rule *landing* is reported, naming the group fixed — and that direction fired for real:
+    // it is how the 45 pinned groups were taken down. With nothing left failing, the same
+    // machinery guards the other way, and the message must still name the group rather than
+    // only the count.
     let mut transcript = passing_transcript();
-    let fixed = FAILING_GROUPS[0];
-    let index: u32 = fixed[..INDEX_WIDTH].parse().expect("an indexed group");
-    transcript.tests.get_mut(&index).expect("the group").outcome = Outcome::Ok;
+    let broken = 0;
+    transcript
+        .tests
+        .get_mut(&broken)
+        .expect("the group")
+        .outcome = Outcome::Failed {
+        crc: "00000000".to_owned(),
+        expected: "11111111".to_owned(),
+    };
 
     let faults = faults(&transcript, RETURNED);
 
     assert!(
         faults
             .iter()
-            .any(|fault| fault.contains("NO LONGER FAILING") && fault.contains(fixed)),
+            .any(|fault| fault.contains("NEWLY FAILING") && fault.contains("000 group 0")),
         "{faults:#?}"
     );
 }

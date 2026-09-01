@@ -30,7 +30,11 @@
 //! }
 //! ```
 //!
-//! Only [`cpu_state`] and [`snapshot`] at the bottom of this file touch `CpuState`.
+//! [`cpu_state`] and [`snapshot`] at the bottom of this file are where `CpuState` is converted
+//! to and from the corpus's own [`Registers`]/[`State`] pair. [`Machine::memptr`] and
+//! [`Machine::set_memptr`] also touch it, and deliberately do not go through that seam: `wz` has
+//! no column in either corpus type, so there is nothing there to convert — which is the whole
+//! reason they exist.
 //!
 //! # Why `tick` carries an address and is never batched
 //!
@@ -249,6 +253,32 @@ impl Machine {
 
     pub fn read_memory(&self, addr: u16) -> u8 {
         self.bus().peek(addr)
+    }
+
+    /// `MEMPTR`, which [`Setup`] and [`State`] have no column for.
+    ///
+    /// The FUSE corpus predates the register being understood, so the harness's state types
+    /// model the corpus and stop there — see [`Machine::set_state`]'s note on `wz`. Reading it
+    /// needs its own accessor, and `memptr_rules.rs` is what needs it: the exerciser in
+    /// `crates/spectrum/tests/memptr_oracle.rs` grades the register only through two flag bits
+    /// of `BIT n,(HL)` and only in aggregate, so a rule can be wrong in a way that folds into
+    /// the same CRC. This reads all sixteen bits directly.
+    pub fn memptr(&self) -> u16 {
+        self.cpu.state().wz
+    }
+
+    /// Put a known value in `MEMPTR` before stepping.
+    ///
+    /// Every assertion about the register needs this, because the two interesting outcomes are
+    /// *"the handler wrote the right address"* and *"the handler wrote nothing"* — and against a
+    /// zeroed latch those are the same observation whenever the right answer is zero. Seeding a
+    /// value no rule under test can produce keeps them distinguishable.
+    pub fn set_memptr(&mut self, memptr: u16) {
+        let state = CpuState {
+            wz: memptr,
+            ..self.cpu.state()
+        };
+        self.cpu.set_state(state);
     }
 
     /// The address on the bus at each T-state, indexed by T-state.

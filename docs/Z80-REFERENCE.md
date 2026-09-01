@@ -304,6 +304,14 @@ follow get the post-increment value, and `bus_timing.rs` gates that with `REFRES
 > T-states and after it for everything downstream** — one function needing both values. That file
 > is not this one's to change;
 > the defect is recorded here because this is where the hardware rule lives.
+>
+> > **Corrected on 2026-09-01: the comment now states the two rules separately**, and points back
+> > here rather than restating the evidence. Only the *comment* — the model is unchanged and
+> > `fetch_opcode` still drives `PC` for all four T-states, deliberately; see *What this core does,
+> > and why the difference is inert* below, and the Open row in [`STATUS.md`](STATUS.md) that still
+> > carries it. **This note is written from the changed file rather than from memory of it**, which
+> > is the discipline [`MACHINE.md`](MACHINE.md) arrived at after two documents each recorded the
+> > other as untouched and a reader would have read that as corroboration.
 
 Two further things the manual settles, both of which matter more than they look:
 

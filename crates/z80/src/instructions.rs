@@ -81,6 +81,28 @@ const fn repeats(opcode: u8) -> bool {
     opcode & 0x10 != 0
 }
 
+/// `MEMPTR` after a store whose data comes from the accumulator.
+///
+/// Boo-boo and Kladov give the same two-part formula three times — for `LD (addr),A`,
+/// `LD (rp),A` and `OUT (port),A` — and it is not `address + 1`:
+///
+/// ```text
+/// MEMPTR_low = (address + 1) & #FF,  MEMPTR_hi = A
+/// ```
+///
+/// **The carry does not propagate.** `LD (0x40FF),A` with `A = 0x12` leaves `MEMPTR` at
+/// `0x1200`, not `0x1300` and not `0x4100`: the low half is incremented in isolation and the
+/// high half is overwritten by the accumulator, which is the whole quirk. Written as one
+/// function because three handlers must not each re-derive an eight-bit wrap.
+///
+/// The three forms that *read* through the same addressing modes — `LD A,(addr)`,
+/// `LD A,(rp)`, `IN A,(port)` — take the ordinary `address + 1` instead, carry and all. The
+/// asymmetry is the measurement's, not a transcription slip.
+fn accumulator_store_memptr(address: u16, a: u8) -> u16 {
+    let [_, low] = address.wrapping_add(1).to_be_bytes();
+    u16::from_be_bytes([a, low])
+}
+
 impl<B: Bus> Cpu<B> {
     /// Execute one already-fetched opcode.
     ///
@@ -266,9 +288,16 @@ impl<B: Bus> Cpu<B> {
     ///
     /// Encoding `110` names no register: the byte is read, the flags are set from it, and
     /// the value is discarded. That form is written `IN (C)` or `IN F,(C)`.
+    ///
+    /// `MEMPTR = BC + 1`. Boo-boo and Kladov write the rule as `IN A,(C)`, naming the one
+    /// encoding whose destination is the accumulator, but it is stated in terms of the port
+    /// and the port is the whole of `BC` for all eight — the destination register is chosen
+    /// after the cycle and cannot reach back into it. The exerciser agrees: `IN R,(C)` and
+    /// `IN (C)` are separate groups from `IN A,(C)` and all three move together.
     fn input_from_c(&mut self, opcode: u8) {
         let port = self.regs.pair(pair::BC);
         let value = self.read_port(port);
+        self.set_memptr(port.wrapping_add(1));
         if let Some(register) = Operand::destination(opcode).register_index(pair::HL) {
             self.regs.set(register, value);
         }
@@ -277,6 +306,12 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `OUT (C),r`. Encoding `110` names no register and outputs zero.
+    ///
+    /// `MEMPTR = BC + 1`, for the reason given at [`Cpu::input_from_c`] — the document names
+    /// `OUT (C),A` and the rule belongs to the port. Note that this is **not** the
+    /// accumulator-store quirk: `OUT (C),r` addresses its port with `BC`, so there is no `A`
+    /// in the address for `MEMPTR`'s high byte to inherit. `OUT (n),A`, whose port high byte
+    /// *is* `A`, is the one that takes [`accumulator_store_memptr`].
     fn output_to_c(&mut self, opcode: u8) {
         let value = match Operand::destination(opcode).register_index(pair::HL) {
             Some(register) => self.regs.get(register),
@@ -284,26 +319,39 @@ impl<B: Bus> Cpu<B> {
         };
         let port = self.regs.pair(pair::BC);
         self.write_port(port, value);
+        self.set_memptr(port.wrapping_add(1));
     }
 
     /// `ADC HL,ss`.
+    ///
+    /// `MEMPTR = rp1_before_operation + 1`, `rp1` being the destination — always `HL` here,
+    /// because `ED` ignores an index prefix. See [`Cpu::add_pair`], which takes the same rule
+    /// with a destination the prefix *can* move.
     fn add_pair_with_carry(&mut self, operand: PairBase) {
         let addend = self.regs.pair(operand);
         let carry = self.carry_flag();
         let refresh = self.regs.refresh_address();
         self.internal_cycles(refresh, PAIR_ARITHMETIC);
-        let (result, flags) = flags::prefixed::adc16(self.regs.pair(pair::HL), addend, carry);
+        let augend = self.regs.pair(pair::HL);
+        self.set_memptr(augend.wrapping_add(1));
+        let (result, flags) = flags::prefixed::adc16(augend, addend, carry);
         self.regs.set_pair(pair::HL, result);
         self.write_flags(flags);
     }
 
     /// `SBC HL,ss`.
+    ///
+    /// `MEMPTR = rp1_before_operation + 1` — the document gives `ADD`, `ADC` and `SBC` one
+    /// rule, and subtraction is no exception to it: the latch takes the *minuend* plus one,
+    /// not the difference.
     fn subtract_pair_with_carry(&mut self, operand: PairBase) {
         let subtrahend = self.regs.pair(operand);
         let carry = self.carry_flag();
         let refresh = self.regs.refresh_address();
         self.internal_cycles(refresh, PAIR_ARITHMETIC);
-        let (result, flags) = flags::prefixed::sbc16(self.regs.pair(pair::HL), subtrahend, carry);
+        let minuend = self.regs.pair(pair::HL);
+        self.set_memptr(minuend.wrapping_add(1));
+        let (result, flags) = flags::prefixed::sbc16(minuend, subtrahend, carry);
         self.regs.set_pair(pair::HL, result);
         self.write_flags(flags);
     }
@@ -320,10 +368,14 @@ impl<B: Bus> Cpu<B> {
     /// Both restore `IFF1` from `IFF2` — the copy a non-maskable interrupt made on its way
     /// in — which is how interrupts resume after an NMI handler. `RETI` differs only in
     /// signalling the daisy chain, which this core has no bus for.
+    ///
+    /// `MEMPTR = addr`, as for `RET` — the document lists `RETI` beside it and the exerciser
+    /// grades `RETN`, `RETI` and their interaction as three separate groups.
     fn return_from_interrupt(&mut self) {
         self.interrupts.iff1 = self.interrupts.iff2;
         let target = self.pop_word();
         self.regs.set_pc(target);
+        self.set_memptr(target);
     }
 
     /// `IM 0`, `IM 1`, `IM 2`.
@@ -373,10 +425,14 @@ impl<B: Bus> Cpu<B> {
 
     /// The shared body of `RRD` and `RLD`: read `(HL)`, shuffle nibbles between it and the
     /// accumulator, write it back. Four internal T-states pay for the shuffle.
+    ///
+    /// `MEMPTR = HL + 1` — one rule for both, which is why it sits here rather than being
+    /// written twice above.
     fn rotate_digit(&mut self, shuffle: fn(u8, u8) -> (u8, u8)) {
         let address = self.regs.pair(pair::HL);
         let memory = self.read_byte(address);
         self.internal_cycles(address, DIGIT_ROTATE);
+        self.set_memptr(address.wrapping_add(1));
         let (accumulator, stored) = shuffle(self.regs.a(), memory);
         self.write_byte(address, stored);
         self.regs.set_a(accumulator);
@@ -385,6 +441,13 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `LDI` and `LDD` — copy one byte from `(HL)` to `(DE)`.
+    ///
+    /// **Neither touches `MEMPTR`.** Boo-boo and Kladov list `LDIR`/`LDDR` and not `LDI`/`LDD`,
+    /// and the two statements are one statement: the repeating forms' rule is *"when BC == 1:
+    /// MEMPTR is not changed"* — `BC == 1` being the last iteration — so a form that never
+    /// repeats never changes it either. The write lives in [`Cpu::repeat_block`], where the
+    /// rewind is, and this handler having no `set_memptr` call is the rule rather than an
+    /// omission.
     fn block_transfer(&mut self, opcode: u8) -> BlockOutcome {
         let step = block_step(opcode);
         let source = self.regs.pair(pair::HL);
@@ -409,6 +472,17 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `CPI` and `CPD` — compare `A` against `(HL)` without storing the difference.
+    ///
+    /// The one instruction pair that reads `MEMPTR` in order to write it: *"CPI — MEMPTR =
+    /// MEMPTR + 1"*, *"CPD — MEMPTR = MEMPTR - 1"*. That is what makes the whole register
+    /// measurable, and therefore what every other rule in this file was measured with — a
+    /// `CPD` loop walks the latch down one at a time while `BIT n,(HL)` reports bits 11 and
+    /// 13, and the borrow says where the other fourteen were.
+    ///
+    /// It applies to `CPIR`/`CPDR` too, on the iteration that stops: *"when BC=1 or A=(HL):
+    /// exactly as CPI"*. The repeating iterations take the instruction address instead, which
+    /// [`Cpu::repeat_block`] writes over the top of this one — the order matters not at all,
+    /// since only the value left behind is observable.
     fn block_compare(&mut self, opcode: u8) -> BlockOutcome {
         let step = block_step(opcode);
         let source = self.regs.pair(pair::HL);
@@ -421,6 +495,7 @@ impl<B: Bus> Cpu<B> {
         let flags =
             flags::prefixed::block_compare(self.regs.a(), value, remaining != 0, self.regs.f());
         self.write_flags(flags);
+        self.set_memptr(self.wz.wrapping_add_signed(i16::from(step)));
 
         BlockOutcome {
             // The searching forms stop on *either* term — the counter running out, or a
@@ -433,6 +508,10 @@ impl<B: Bus> Cpu<B> {
     /// `INI` and `IND` — read a port into `(HL)`.
     ///
     /// The port is addressed with `B` still at its old value; the decrement happens after.
+    /// `MEMPTR` follows that same port: *"INI — MEMPTR = BC_before_decrementing_B + 1"*,
+    /// *"IND — ... - 1"*. The 2006 document adds that `INIR`/`INDR` are *"exactly as INI/IND
+    /// on each execution"*, and that part of it does not hold — an iteration that repeats
+    /// overwrites the latch again from the instruction address. See [`Cpu::repeat_block`].
     fn block_input(&mut self, opcode: u8) -> BlockOutcome {
         let step = block_step(opcode);
         let refresh = self.regs.refresh_address();
@@ -442,6 +521,7 @@ impl<B: Bus> Cpu<B> {
         let value = self.read_port(port);
         let destination = self.regs.pair(pair::HL);
         self.write_byte(destination, value);
+        self.set_memptr(port.wrapping_add_signed(i16::from(step)));
 
         self.regs
             .set_pair(pair::HL, destination.wrapping_add_signed(i16::from(step)));
@@ -459,7 +539,11 @@ impl<B: Bus> Cpu<B> {
 
     /// `OUTI` and `OUTD` — write `(HL)` to a port.
     ///
-    /// Here `B` is decremented *before* the transfer, so the port carries the new value.
+    /// Here `B` is decremented *before* the transfer, so the port carries the new value — and
+    /// `MEMPTR` inherits that difference for free, because the rule is again the port either
+    /// side: *"OUTI — MEMPTR = BC_after_decrementing_B + 1"*, *"OUTD — ... - 1"*. Against
+    /// `INI`'s *before*, this is the one place the two I/O families' `MEMPTR` rules diverge,
+    /// and neither handler states it twice: each writes the port it actually drove.
     fn block_output(&mut self, opcode: u8) -> BlockOutcome {
         let step = block_step(opcode);
         let refresh = self.regs.refresh_address();
@@ -470,6 +554,7 @@ impl<B: Bus> Cpu<B> {
         let counter = self.decrement_b();
         let port = self.regs.pair(pair::BC);
         self.write_port(port, value);
+        self.set_memptr(port.wrapping_add_signed(i16::from(step)));
 
         self.regs
             .set_pair(pair::HL, source.wrapping_add_signed(i16::from(step)));
@@ -497,6 +582,39 @@ impl<B: Bus> Cpu<B> {
     ///
     /// Five extra T-states pay for the rewind, driven on whichever address was last on the
     /// bus.
+    ///
+    /// # The rewind is also a `MEMPTR` rule
+    ///
+    /// For the transfers and the compares, an iteration that repeats leaves `MEMPTR` at
+    /// *"PC + 1, where PC = instruction address"* — and the instruction address is precisely
+    /// what the rewind has just computed, so the two facts share the one subtraction rather
+    /// than deriving it twice. Boo-boo and Kladov state it for `LDIR`/`LDDR` outright and for
+    /// `CPIR`/`CPDR` as the complement of their stopping case.
+    ///
+    /// `PC` here is the `ED` byte, which is what `PC - 2` lands on: an index prefix before it
+    /// is not rewound onto, and the hardware re-fetches from the `ED`.
+    ///
+    /// # One rule, four families — and half of it is newer than the other half
+    ///
+    /// It applies to **all eight** repeating forms, and that took two separate discoveries
+    /// twenty years apart. Boo-boo and Kladov's 2006 measurements give it for `LDIR`/`LDDR`
+    /// and, as the complement of their stopping case, for `CPIR`/`CPDR` — but explicitly
+    /// exempt the I/O forms, giving `INIR` as *"exactly as INI on each execution"*. That
+    /// exemption is **wrong**, and the correction is David Banks's, from tracing real parts
+    /// (one Zilog NMOS and two NEC NMOS): the repeat's extra five T-states load the latch in
+    /// the I/O families exactly as in the other two. MAME took the same rule for `inir`,
+    /// `indr`, `otir` and `otdr`, and Patrik Rak's exerciser carries CRCs that expect it.
+    ///
+    /// So this handler ends with no per-family condition. It briefly had one — the I/O half
+    /// implemented from the 2006 document, which is how `102 INIR->NOP'` and `103 INDR->NOP'`
+    /// came to be the last two failing groups after every other rule had landed. **The
+    /// uniform rule is the one that explains more than it was fitted to**, which is this
+    /// project's own test for whether a rule is real: two of those four instructions are the
+    /// only ones any available oracle can see, and the rule covers the other two anyway.
+    ///
+    /// `OTIR`/`OTDR` are therefore implemented on the hardware evidence alone and are graded
+    /// by nothing here: the exerciser's self-overwriting `->NOP'` trick has no output
+    /// counterpart, so it has no group for them.
     fn repeat_block(&mut self, opcode: u8, outcome: BlockOutcome) {
         if !repeats(opcode) || !outcome.repeat {
             return;
@@ -504,6 +622,7 @@ impl<B: Bus> Cpu<B> {
         self.internal_cycles(outcome.last_address, BLOCK_REPEAT);
         let rewound = self.regs.pc().wrapping_sub(2);
         self.regs.set_pc(rewound);
+        self.set_memptr(rewound.wrapping_add(1));
     }
 
     /// Decrement `BC` and report what is left — the block instructions' loop counter.
@@ -648,16 +767,16 @@ impl<B: Bus> Cpu<B> {
 
     /// Compute an `(IX+d)` effective address, recording it in `MEMPTR` as the hardware does.
     ///
-    /// Every indexed access sets `MEMPTR` to the address it formed. Nothing in the core
-    /// reads that latch yet except `BIT`, but keeping it here — at the one place an indexed
-    /// address is computed — is what makes `BIT n,(IX+d)` come out right without a special
-    /// case, and is the down payment on the rest of `MEMPTR` at M4.
+    /// *"Any instruction with (INDEX+d): MEMPTR = INDEX+d"* — one line covering the whole
+    /// `DD`/`FD` set, which is why this is one write site rather than thirty. Keeping it at
+    /// the single place an indexed address is computed is what makes `BIT n,(IX+d)` come out
+    /// right with no special case, and it was the first of these rules to land.
     fn indexed_address(&mut self, index: Index, displacement: i8) -> u16 {
         let effective = self
             .regs
             .pair(index.base())
             .wrapping_add_signed(i16::from(displacement));
-        self.wz = effective;
+        self.set_memptr(effective);
         effective
     }
 
@@ -752,31 +871,47 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `LD A,(BC)` and `LD A,(DE)`.
+    ///
+    /// `MEMPTR = rp + 1`, the ordinary sixteen-bit increment. Contrast
+    /// [`Cpu::store_a_indirect`], which is the same addressing mode in the other direction and
+    /// takes a different rule.
     fn load_a_indirect(&mut self, base: PairBase) {
         let address = self.regs.pair(base);
         let value = self.read_byte(address);
+        self.set_memptr(address.wrapping_add(1));
         self.regs.set_a(value);
     }
 
     /// `LD (BC),A` and `LD (DE),A`.
+    ///
+    /// `MEMPTR_low = (rp + 1) & #FF`, `MEMPTR_hi = A` — the accumulator-store quirk, shared
+    /// verbatim with `LD (nn),A` and `OUT (n),A`. See [`accumulator_store_memptr`] for why the
+    /// carry stops at the byte boundary.
     fn store_a_indirect(&mut self, base: PairBase) {
         let address = self.regs.pair(base);
         let value = self.regs.a();
         self.write_byte(address, value);
+        self.set_memptr(accumulator_store_memptr(address, value));
     }
 
     /// `LD A,(nn)`.
+    ///
+    /// `MEMPTR = addr + 1`.
     fn load_a_absolute(&mut self) {
         let address = self.fetch_word();
         let value = self.read_byte(address);
+        self.set_memptr(address.wrapping_add(1));
         self.regs.set_a(value);
     }
 
     /// `LD (nn),A`.
+    ///
+    /// `MEMPTR_low = (addr + 1) & #FF`, `MEMPTR_hi = A` — see [`Cpu::store_a_indirect`].
     fn store_a_absolute(&mut self) {
         let address = self.fetch_word();
         let value = self.regs.a();
         self.write_byte(address, value);
+        self.set_memptr(accumulator_store_memptr(address, value));
     }
 
     // -----------------------------------------------------------------------------
@@ -790,19 +925,28 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `LD HL,(nn)`. The Z80 stores words low byte first.
+    ///
+    /// `MEMPTR = addr + 1` — which is also the address of the second byte this reads, so the
+    /// latch simply holds where the transfer got to.
     fn load_pair_absolute(&mut self, base: PairBase) {
         let address = self.fetch_word();
         let low = self.read_byte(address);
         let high = self.read_byte(address.wrapping_add(1));
+        self.set_memptr(address.wrapping_add(1));
         self.regs.set_pair(base, u16::from_le_bytes([low, high]));
     }
 
     /// `LD (nn),HL`.
+    ///
+    /// `MEMPTR = addr + 1`. The pair stores take the plain rule and **not** the accumulator
+    /// quirk, even though they are stores: the document gives `LD (addr),rp` and
+    /// `LD rp,(addr)` one line together, and separates `LD (addr),A` onto its own.
     fn store_pair_absolute(&mut self, base: PairBase) {
         let address = self.fetch_word();
         let [high, low] = self.regs.pair(base).to_be_bytes();
         self.write_byte(address, low);
         self.write_byte(address.wrapping_add(1), high);
+        self.set_memptr(address.wrapping_add(1));
     }
 
     /// `LD SP,HL`.
@@ -851,6 +995,12 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `EX (SP),HL` — the longest un-prefixed instruction at 19 T-states.
+    ///
+    /// `MEMPTR = rp value after the operation` — the word that came off the stack, not the
+    /// stack address it came from and not the word that went onto it. The one rule in the set
+    /// whose operand is a *value* rather than an address, which is what makes it worth
+    /// stating: `MEMPTR` is an address latch, and here it latches something that is only an
+    /// address if the program meant it as one.
     fn exchange_stack_pair(&mut self, base: PairBase) {
         let stack = self.regs.sp();
         let low = self.read_byte(stack);
@@ -865,7 +1015,9 @@ impl<B: Bus> Cpu<B> {
         // Two more extend the final write cycle (3 + 2), on SP.
         self.internal_cycles(stack, 2);
 
-        self.regs.set_pair(base, u16::from_be_bytes([high, low]));
+        let exchanged = u16::from_be_bytes([high, low]);
+        self.regs.set_pair(base, exchanged);
+        self.set_memptr(exchanged);
     }
 
     // -----------------------------------------------------------------------------
@@ -986,13 +1138,24 @@ impl<B: Bus> Cpu<B> {
     ///
     /// Both operands take a base because `DD 29` is `ADD IX,IX`: the prefix substitutes
     /// the destination and the source together.
+    ///
+    /// `MEMPTR = rp1_before_operation + 1`, and `rp1` is the **destination** — so `ADD IX,BC`
+    /// latches `IX + 1` while `ADD HL,BC` latches `HL + 1`, and the prefix that already moved
+    /// the destination moves the rule with it at no cost. `ADD IX,rr` and `ADD IY,rr` are
+    /// separate groups in the exerciser from `ADD HL,rr` for exactly this reason.
+    ///
+    /// Reading the destination **before** the add is the whole content of *before_operation*:
+    /// this is one of two rules in the set that would be silently wrong if the write happened
+    /// a line later, and it is why `augend` is bound rather than the pair being read twice.
     fn add_pair(&mut self, destination: PairBase, operand: PairBase) {
         // The 16-bit add occupies two internal machine cycles (4 + 3) after M1, all seven
         // T-states on IR — corpus vector `09`.
         let refresh = self.regs.refresh_address();
         self.internal_cycles(refresh, 7);
         let addend = self.regs.pair(operand);
-        let (result, flags) = flags::add16(self.regs.pair(destination), addend, self.regs.f());
+        let augend = self.regs.pair(destination);
+        self.set_memptr(augend.wrapping_add(1));
+        let (result, flags) = flags::add16(augend, addend, self.regs.f());
         self.regs.set_pair(destination, result);
         self.write_flags(flags);
     }
@@ -1021,9 +1184,30 @@ impl<B: Bus> Cpu<B> {
     // Jumps, calls and returns
     // -----------------------------------------------------------------------------
 
+    /// Fetch a 16-bit branch target, recording it in `MEMPTR`.
+    ///
+    /// `JP nn`, `JP cc,nn`, `CALL nn` and `CALL cc,nn` share one `MEMPTR` rule, and it is the
+    /// one rule in the set stated with an explicit scope: *"JP (except JP rp) / CALL addr
+    /// (even in case of conditional call/jp, independantly on condition satisfied or not) —
+    /// MEMPTR = addr"*. The latch follows the **operand fetch**, not the branch.
+    ///
+    /// Fetching and latching together is what keeps that true at all four call sites without
+    /// four chances to put the write on the taken side of an `if`. It is also the exception
+    /// that shapes its neighbours: [`Cpu::jump_relative`] and [`Cpu::return_conditional`] latch
+    /// only when they actually jump, because the document's other line says *"JR/DJNZ/RET/RETI/
+    /// RST (**jumping to** addr)"* — a qualification it would not have written twice by
+    /// accident, having just written the opposite for `JP`.
+    ///
+    /// `JP (HL)` is excepted by name and takes no rule at all; see [`Cpu::jump_to_pair`].
+    fn fetch_branch_target(&mut self) -> u16 {
+        let target = self.fetch_word();
+        self.set_memptr(target);
+        target
+    }
+
     /// `JP nn`.
     fn jump_unconditional(&mut self) {
-        let target = self.fetch_word();
+        let target = self.fetch_branch_target();
         self.regs.set_pc(target);
     }
 
@@ -1050,8 +1234,14 @@ impl<B: Bus> Cpu<B> {
     /// The corpus's own asymmetry is the tell: `CALL cc` really does lose machine cycles
     /// when not taken, `JP cc` does not, and the trace treats both alike. Nothing
     /// observable differs on a side-effect-free bus; addresses and timing are identical.
+    ///
+    /// **The third argument has since been made observable rather than merely asserted.** It
+    /// was written here as a reason to perform a read the corpus does not record; the read now
+    /// also loads the latch, through [`Cpu::fetch_branch_target`], and `112 JP CC,NN` is a
+    /// group the MEMPTR exerciser grades. An argument that was only an argument when this
+    /// comment was written is now a gate.
     fn jump_conditional(&mut self, condition: Condition) {
-        let target = self.fetch_word();
+        let target = self.fetch_branch_target();
         if condition.holds(self.regs.f()) {
             self.regs.set_pc(target);
         }
@@ -1059,6 +1249,12 @@ impl<B: Bus> Cpu<B> {
 
     /// `JP (HL)`. Despite the notation there is no memory access: the jump target is the
     /// register pair itself, which is why this is the only four T-state jump.
+    ///
+    /// **It leaves `MEMPTR` alone**, and that is a rule rather than an omission: the document
+    /// writes *"JP (except JP rp)"*, carving this one encoding out of the family whose every
+    /// other member latches its target. The same absence of a memory access explains both
+    /// facts — nothing here forms an address, so there is nothing for an address latch to
+    /// catch, and there is no operand-fetch cycle to spend.
     fn jump_to_pair(&mut self, base: PairBase) {
         let target = self.regs.pair(base);
         self.regs.set_pc(target);
@@ -1106,22 +1302,35 @@ impl<B: Bus> Cpu<B> {
     ///
     /// The displacement is measured from the address *after* the operand byte, which is
     /// where `PC` already points once the operand has been fetched.
+    ///
+    /// `MEMPTR = addr`, the address jumped **to**, which is why the write is here rather than
+    /// beside the displacement fetch: `JR e` has no absolute operand to latch, so the latch
+    /// cannot be loaded until the addition has happened. All three callers — `JR e`, `JR cc,e`
+    /// and `DJNZ e` — reach this only when the branch is taken, which is what the document's
+    /// *"(jumping to addr)"* qualification asks for. A not-taken `JR cc` leaves the latch
+    /// untouched, and that is the whole difference from `JP cc,nn` a few lines above.
     fn jump_relative(&mut self, offset: i8) {
         let target = self.regs.pc().wrapping_add_signed(i16::from(offset));
         self.regs.set_pc(target);
+        self.set_memptr(target);
     }
 
     /// `CALL nn`.
     fn call_unconditional(&mut self) {
-        let target = self.fetch_word();
+        let target = self.fetch_branch_target();
         // Corpus vector `cd`: the internal cycle holds the last operand byte's address.
         let last_operand = self.regs.pc().wrapping_sub(1);
         self.call_to(target, last_operand);
     }
 
     /// `CALL cc,nn`.
+    ///
+    /// The latch is loaded by the operand fetch and so survives the condition failing, exactly
+    /// as `JP cc,nn`'s does — see [`Cpu::fetch_branch_target`]. Unlike `JP cc`, the *machine
+    /// cycles* here genuinely do differ by outcome (17 T-states against 10), which is why the
+    /// push and the internal cycle sit inside the branch and the latch does not.
     fn call_conditional(&mut self, condition: Condition) {
-        let target = self.fetch_word();
+        let target = self.fetch_branch_target();
         if condition.holds(self.regs.f()) {
             let last_operand = self.regs.pc().wrapping_sub(1);
             self.call_to(target, last_operand);
@@ -1133,13 +1342,20 @@ impl<B: Bus> Cpu<B> {
     /// The eight restart vectors are why the bottom of the address space is reserved: a
     /// one-byte call is precious in an eight-bit program, and the Spectrum's ROM puts its
     /// most-used routines there.
+    /// `MEMPTR = addr`. `RST` is listed with the jumps and returns rather than with `CALL`,
+    /// and the reason is visible in this handler: it has no operand fetch for the latch to
+    /// follow, so the destination is all there is — which is also why the write is here and
+    /// not in the shared [`Cpu::call_to`], where it would be a second writer for a `CALL` that
+    /// has already latched the same value at its operand fetch.
     fn restart(&mut self, opcode: u8) {
         /// Bits 5–3 scaled by eight — already in place in the opcode.
         const TARGET_MASK: u8 = 0x38;
         // `RST` has no operands, so its internal cycle holds IR instead — corpus
         // vector `ff`.
         let refresh = self.regs.refresh_address();
-        self.call_to(u16::from(opcode & TARGET_MASK), refresh);
+        let target = u16::from(opcode & TARGET_MASK);
+        self.set_memptr(target);
+        self.call_to(target, refresh);
     }
 
     /// The shared tail of `CALL` and `RST`: one internal T-state, push the return address,
@@ -1157,9 +1373,12 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// `RET`.
+    ///
+    /// `MEMPTR = addr` — the address returned to, which the stack has just supplied.
     fn return_unconditional(&mut self) {
         let target = self.pop_word();
         self.regs.set_pc(target);
+        self.set_memptr(target);
     }
 
     /// `RET cc`.
@@ -1167,6 +1386,12 @@ impl<B: Bus> Cpu<B> {
     /// The condition test extends M1 by one T-state whether or not the branch is taken, so
     /// an untaken `RET cc` costs five T-states — the cheapest conditional on the chip, and
     /// the reason it is the idiomatic early-out.
+    ///
+    /// `MEMPTR` follows suit and is loaded **only when the branch is taken**, unlike
+    /// `JP cc,nn` and `CALL cc,nn`. Here that needs no appeal to the document's wording: an
+    /// untaken `RET cc` performs no stack read at all, so there is no address in the
+    /// instruction for the latch to hold. The conditional jumps differ precisely because they
+    /// fetch their operand either way.
     fn return_conditional(&mut self, condition: Condition) {
         // The condition test extends M1 by one T-state, on IR.
         let refresh = self.regs.refresh_address();
@@ -1174,6 +1399,7 @@ impl<B: Bus> Cpu<B> {
         if condition.holds(self.regs.f()) {
             let target = self.pop_word();
             self.regs.set_pc(target);
+            self.set_memptr(target);
         }
     }
 
@@ -1185,20 +1411,34 @@ impl<B: Bus> Cpu<B> {
     ///
     /// The port address carries the accumulator in its high half. This form affects no
     /// flags — unlike the `ED`-prefixed `IN r,(C)`, which does.
+    ///
+    /// `MEMPTR = (A_before_operation << 8) + port + 1` — which is the whole sixteen-bit port
+    /// address plus one, **carry and all**, so `IN A,($FF)` with `A = 0x40` leaves `0x4100`.
+    /// Its mirror image `OUT (n),A` truncates instead. Reading `A` before the port supplies
+    /// its result is the *before_operation* in the formula, and here it is not a subtlety —
+    /// the same accumulator is the address's high half and the destination.
     fn input_immediate(&mut self) {
         let low = self.fetch_byte();
         let port = u16::from_be_bytes([self.regs.a(), low]);
         let value = self.read_port(port);
+        self.set_memptr(port.wrapping_add(1));
         self.regs.set_a(value);
     }
 
     /// `OUT (n),A`. The accumulator supplies both the data and the high half of the port
     /// address.
+    ///
+    /// `MEMPTR_low = (port + 1) & #FF`, `MEMPTR_hi = A` — the third instruction taking the
+    /// accumulator-store quirk, alongside `LD (nn),A` and `LD (rp),A`. Where `IN A,(n)` a few
+    /// lines above carries into the high byte, this one does not, and the pair of them is the
+    /// clearest statement of the asymmetry in the whole set: identical addressing, opposite
+    /// direction, different rule.
     fn output_immediate(&mut self) {
         let low = self.fetch_byte();
         let value = self.regs.a();
         let port = u16::from_be_bytes([value, low]);
         self.write_port(port, value);
+        self.set_memptr(accumulator_store_memptr(port, value));
     }
 
     // -----------------------------------------------------------------------------
