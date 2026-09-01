@@ -320,7 +320,7 @@ happened, not because the items are minor:
   compiles clean, and advances nothing. A published method that silently does nothing is worse than
   an absent one, because a caller reads the name and stops looking — the same failure class this
   project records as *"the most dangerous defect was not a bug in a comparison, it was a comment"*.
-  `crates/spectrum/src/timing.rs:129` — `const CONTENDED_T_STATES_PER_LINE` — now carries that
+  `crates/spectrum/src/timing.rs` — `const CONTENDED_T_STATES_PER_LINE` — now carries that
   reasoning at the declaration.
 
 ### Note for machine authors

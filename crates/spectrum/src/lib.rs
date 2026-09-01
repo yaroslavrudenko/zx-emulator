@@ -623,7 +623,31 @@ impl Spectrum {
         self.cpu.bus_mut().insert_tape(tape);
     }
 
-    /// The tape in the drive — how a frontend or a test plays, stops or rewinds it.
+    /// The tape in the drive — how a frontend or a test asks what the drive is doing.
+    ///
+    /// # A frozen surface, widened once and on purpose
+    ///
+    /// Every other device on this machine is reachable both ways — [`Spectrum::ula`] beside
+    /// [`Spectrum::ula_mut`], [`Spectrum::memory`] beside [`Spectrum::memory_mut`],
+    /// [`Spectrum::keyboard`] beside [`Spectrum::keyboard_mut`] — and the drive was the one
+    /// that was not. So a caller with a `&Spectrum` could not ask a question as ordinary as
+    /// *is the tape running*, and a caller with a `&mut Spectrum` had to take a **mutable**
+    /// borrow to read: `zx-shot`'s `tape_frames` did exactly that, and carried a comment
+    /// apologising for the order it had to do things in to make the borrow checker allow it.
+    ///
+    /// The alternative was to let each caller reach through [`Spectrum::tape_mut`] and hope
+    /// nobody wrote through it. That is a borrow that says *"I intend to change this"* about a
+    /// caller that does not, which is the weaker claim of the two and is the one the compiler
+    /// stops checking.
+    ///
+    /// With nothing inserted this is a blank tape rather than a `None`, for the reason
+    /// [`Spectrum::tape_mut`] gives.
+    #[must_use]
+    pub fn tape(&self) -> &Tape {
+        self.cpu.bus().tape()
+    }
+
+    /// The tape in the drive, mutably — how a frontend or a test plays, stops or rewinds it.
     ///
     /// With nothing inserted this is a blank tape rather than a `None`: a drive with no
     /// cassette and a cassette with nothing on it drive the `EAR` line identically, so there

@@ -50,6 +50,24 @@ testdata/**
 # two are named outright.
 !testdata/roms/128-0.rom
 !testdata/roms/128-1.rom
+#
+# The games stay ignored — they are other people's copyright and the blanket rule above is what
+# keeps them out. The RECORD about them is this project's own writing, and it is the one file in
+# that directory whose entire purpose is to be read by somebody who does not have the directory.
+# It was ignored along with the corpus it documents, so `docs/images/README.md` pointed at it five
+# times as though a clone could open it, and every one of those links resolved to nothing anywhere
+# but the machine that wrote it. A provenance record that ships nowhere documents nothing.
+#
+# Same mechanics as the ROMs above and for the same reason: `testdata/**` excludes
+# `testdata/games/` as a **directory**, and git will not look inside an excluded directory to find
+# a file to re-include, so the directory line is what lets the file line be reached at all. The
+# directory line re-includes nothing by itself — every path inside still matches `testdata/**`
+# unless it is named here, which is exactly the property the ROM block relies on.
+#
+# NAMED, not globbed, for the reason spelled out above: a glob commits by default, and this is the
+# directory where committing by default means redistributing somebody else's game.
+!testdata/games/
+!testdata/games/PROVENANCE.md
 /.agent-workspace/
 # Agent scratch space, and the same hazard as `/target` for the same reason. Worktrees created
 # under `.claude/worktrees/` each carry their own full build directory — 1.7 GB in the one that

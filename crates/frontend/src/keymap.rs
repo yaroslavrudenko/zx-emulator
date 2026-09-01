@@ -657,6 +657,18 @@ const CURSOR_KEYS: ArrowScheme = ArrowScheme {
 /// and always tell the truth. The smallest addition that would allow a toggle is named in the
 /// report: `pub const fn is_playing(&self) -> bool` on `Tape`.
 ///
+/// > **That addition landed, and it was a second feature that asked for it rather than this
+/// > one.** [`spectrum::tape::Tape::is_playing`] exists, and its own documentation carries the
+/// > argument above as the reason. What needed it was [`crate::pacing::Rung::Automatic`], which
+/// > has to ask the drive **every tick** — a tape that stops itself at the end of its train is
+/// > exactly the *"the owner can change it behind your back"* case, one layer up.
+/// >
+/// > **The three keys stay three keys.** Nothing about a toggle got better: `F3`/`F4`/`F5` are
+/// > still an edge each, still a row of [`HOTKEYS`] `tests/keymap_table.rs` grades as a table,
+/// > and collapsing two of them would buy one keystroke and cost the ability to say *stop* to a
+/// > machine whose drive has already stopped itself. The accessor was the cheap half of that old
+/// > trade; the toggle was the expensive half, and only the cheap half was worth having.
+///
 /// # Deliberately **not** `#[non_exhaustive]`
 ///
 /// Its siblings in `crates/spectrum` are, and they should be — they are a published surface
@@ -685,7 +697,7 @@ pub enum Hotkey {
     /// A runtime choice rather than a build-time one because the right answer is a property of
     /// the **game**, and one artefact is meant to run more than one game.
     CycleArrows,
-    /// Run the machine at the next multiplier in [`crate::pacing::SPEEDS`].
+    /// Run the machine at the next rung in [`crate::pacing::RUNGS`].
     ///
     /// # A key that cycles, and not a key that is held
     ///
@@ -695,8 +707,20 @@ pub enum Hotkey {
     /// as a table; a held modifier is a **level**, read through `is_key_down`, and the only place
     /// to put that is `main.rs` — the file whose own header says it is *"the untestable part, and
     /// it is kept thin on purpose"*. It would have been a second input mechanism, in the one file
-    /// no test can reach, to save one keystroke. The cycle costs three presses to reach 8× and one
-    /// to come back, and every part of it is reachable from `cargo test`.
+    /// no test can reach, to save one keystroke. The cycle costs four presses to reach the top
+    /// rung and one to come back — which is why [`crate::pacing::RUNGS`] widened its *step* rather
+    /// than growing rungs when the measured ceiling turned out to be 98× — and every part of it is
+    /// reachable from `cargo test`.
+    ///
+    /// # The rung that decides is a rung of this cycle, and that is what makes it safe
+    ///
+    /// [`crate::pacing::Rung::Automatic`] runs the machine flat out while a tape is moving. As
+    /// anything other than a rung — a modifier, a rule that fires on PLAY, a preference — it
+    /// would be a **second input mechanism** deciding the speed, which is the same objection this
+    /// key already answered above about a held modifier, arriving with an extra failure mode:
+    /// somebody parked at 1× to watch the loading stripes would be overtaken by it. As the last
+    /// rung of one cycle there is nothing to reconcile. One key sets the speed, four presses
+    /// reach the rung that decides, and a fifth is real time again.
     CycleSpeed,
 }
 

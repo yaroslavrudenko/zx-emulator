@@ -449,7 +449,7 @@ fn run(arguments: &[String]) -> Result<String, String> {
     // a run with no tape then falls straight through to the keys, which is right for a `.z80`.
     let tape_ends_at = options
         .play_tape
-        .then(|| recorder.elapsed + tape_frames(&mut machine));
+        .then(|| recorder.elapsed + tape_frames(&machine));
     if options.play_tape {
         machine.tape_mut().play();
     }
@@ -514,17 +514,16 @@ fn run(arguments: &[String]) -> Result<String, String> {
 /// With nothing in the drive this is zero, and zero is the right answer rather than a degenerate
 /// one: `Tape`'s `Default` is *"a tape drive with nothing in it"*, a `.z80` is already running,
 /// and there is nothing to wait for.
-fn tape_frames(machine: &mut Spectrum) -> u64 {
-    // Read before the mutable borrow below, which is also the honest order: the frame length is
-    // a property of the machine and the pulse train is a property of what is in its drive.
+/// # It used to take `&mut Spectrum`, and it never wrote anything
+///
+/// [`spectrum::Spectrum::tape_mut`] was the only way to reach the drive, so a function whose
+/// whole job is to **read** a pulse train had to announce that it intended to change the machine
+/// — and then arrange its two lines around the borrow that announcement cost, with a comment
+/// explaining the order. [`spectrum::Spectrum::tape`] is what removes both. The signature is now
+/// the truth about what this does, which is also what lets the caller keep holding the machine.
+fn tape_frames(machine: &Spectrum) -> u64 {
     let frame = u64::from(machine.ula().clock().timing().frame_t_states());
-    let total: u64 = machine
-        .tape_mut()
-        .pulses()
-        .iter()
-        .copied()
-        .map(u64::from)
-        .sum();
+    let total: u64 = machine.tape().pulses().iter().copied().map(u64::from).sum();
     total.div_ceil(frame)
 }
 

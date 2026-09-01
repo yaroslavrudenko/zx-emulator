@@ -176,17 +176,14 @@ fn a_rom_named_after_the_machine_is_running_is_refused_rather_than_ignored() {
 #[test]
 fn a_valid_tape_goes_into_the_drive() {
     let mut machine = media::start(&[&[0; PAGE_SIZE]]).expect("a page-sized ROM");
-    assert!(
-        machine.tape_mut().pulses().is_empty(),
-        "the drive starts empty"
-    );
+    assert!(machine.tape().pulses().is_empty(), "the drive starts empty");
 
     // The one-block tape from `spectrum::tape`'s own doc example: a length word, a flag byte,
     // one byte of data, and a checksum.
     media::insert(&mut machine, Kind::Tape, &[0x03, 0x00, 0xFF, 0x2A, 0xD5])
         .expect("a well-formed one-block tape");
     assert!(
-        machine.tape_mut().pulses().len() > 3000,
+        machine.tape().pulses().len() > 3000,
         "a data block opens with 3223 pilot pulses",
     );
 }

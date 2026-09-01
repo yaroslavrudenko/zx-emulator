@@ -583,6 +583,15 @@ impl Ula {
         self.tape = tape;
     }
 
+    /// The tape in the drive, to read — where the head is, and whether it is moving.
+    ///
+    /// The immutable half of the pair below, added because [`crate::Spectrum::tape`] cannot
+    /// reach a private field of this struct without it. Nothing else in this file needs it:
+    /// [`Ula::ear_bit`] reads `self.tape` directly, being inside the type.
+    pub(crate) fn tape(&self) -> &Tape {
+        &self.tape
+    }
+
     /// The tape in the drive — how anything starts, stops or rewinds it.
     pub(crate) fn tape_mut(&mut self) -> &mut Tape {
         &mut self.tape
