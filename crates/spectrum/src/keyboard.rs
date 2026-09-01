@@ -263,6 +263,31 @@ impl Keyboard {
 
 #[cfg(test)]
 mod tests {
+    //! # One test used to live here and has been removed
+    //!
+    //! `every_key_is_visible_to_a_scan_of_its_own_half_row` pressed each of the 40 keys and
+    //! asserted it read low — on a port and against a bit **both derived from
+    //! [`Key::position`], the function under test**. It therefore proved [`Keyboard::read`]
+    //! consistent with `position`, and could say nothing about whether either matched the
+    //! hardware. It is gone rather than kept alongside `tests/keyboard_matrix.rs`, which
+    //! pins all 40 keys against a literal table of ports and bits that owes the crate
+    //! nothing, and so proves strictly more.
+    //!
+    //! **That it was blind is measured, not argued.** Rotating the five bits of half-row 0
+    //! — `CAPS SHIFT` `0x01`->`0x02`, `Z` `0x02`->`0x04`, `X` `0x04`->`0x08`,
+    //! `C` `0x08`->`0x10`, `V` `0x10`->`0x01`, five keys rewired, distinctness preserved —
+    //! left it **green**. The mutation was caught, at the commit that predates
+    //! `tests/`, by exactly one test: `releasing_a_key_does_not_release_its_neighbours`,
+    //! which happens to assert a **literal** `!0x04` for `X`. That literal, and the one in
+    //! `a_key_reads_low_only_on_its_own_half_row` for `ENTER`, are the two anchors that make
+    //! the surviving tests here worth keeping, and they are why the permutation a cold
+    //! review found could move **38** of the 40 keys and not 40: those two could not move.
+    //!
+    //! The general form is in `docs/STATUS.md` — *a test whose expectation is computed by
+    //! the subject is not a weak test; it is a tautology with a cross product attached*. The
+    //! cross product is not the fix. Getting the other side of the comparison from somewhere
+    //! the subject cannot reach is, and that is what the literal table does.
+
     use super::*;
 
     /// Every key, so exhaustiveness properties can be asserted over the whole membrane.
@@ -369,21 +394,6 @@ mod tests {
             seen.push(position);
         }
         assert_eq!(seen.len(), HALF_ROWS * KEYS_PER_HALF_ROW);
-    }
-
-    #[test]
-    fn every_key_is_visible_to_a_scan_of_its_own_half_row() {
-        for key in ALL_KEYS {
-            let mut keyboard = Keyboard::new();
-            keyboard.press(key);
-            let (row, bit) = key.position();
-            let port = (u16::from(!HALF_ROW_SELECTORS[row]) << 8) | 0x00FE;
-            assert_eq!(
-                keyboard.read(port),
-                RELEASED & !bit,
-                "{key:?} was not visible on its own half-row"
-            );
-        }
     }
 
     #[test]

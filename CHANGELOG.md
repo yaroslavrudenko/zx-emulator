@@ -1,16 +1,208 @@
 # Changelog
 
-Notable changes to the published surface of `crates/z80`. Milestones are recorded even before
-the first release, because the crate's API is being frozen decision by decision and the moment
-each one stopped being free is worth knowing.
+Notable changes to the published surface of **this workspace** — `crates/z80` and
+`crates/spectrum`. Milestones are recorded even before the first release, because each crate's API
+is being frozen decision by decision and the moment each one stopped being free is worth knowing.
 
-## Unreleased — `Bus::fetch`, the M1 opcode fetch
+**Every entry names its crate.** Entries written before M5 were `crates/z80` by definition and have
+been labelled as such; nothing in them changed.
+
+> **The scope was widened at M5, and the decision is recorded because it was a real choice.** This
+> document opened by declaring itself a record of *"notable changes to the published surface of
+> `crates/z80`"*, which was exactly right while `spectrum` was a stub. It is not one any more:
+> `Spectrum`, `Ula`, `Memory`, `Keyboard`, `Key`, `Frame`, `Colour`, `screen::read_text`,
+> `timing::Clock` and the rest are `pub`, `#![deny(missing_docs)]` is on, and `crates/frontend` is
+> coming at M8 to consume them. There were two options and the other one was viable:
+>
+> - **Keep it z80-only and point elsewhere for `spectrum`.** The natural "elsewhere" is the coverage
+>   table in `crates/spectrum/src/lib.rs`. **Rejected**, because that table records *what is graded
+>   and by what* — it is an evidence register, not an API register, and it would answer "is this
+>   tested?" for a reader asking "did this break?". Making one document serve both questions is how
+>   the two open registers in `STATUS.md` and `ARCHITECTURE.md` came to disagree about four facts in
+>   one session.
+> - **Widen it.** Chosen. The stated purpose — *the moment each decision stopped being free* —
+>   applies to `spectrum` identically and more urgently, because `spectrum` acquired its entire
+>   surface in one commit while `z80` froze its own one decision at a time.
+>
+> The cost of widening is that a reader after a z80-only history has to skip entries. That is
+> cheaper than a surface with no record at all, which is what `spectrum` had between `2157331` and
+> this entry.
+
+## Unreleased — M6 · `crates/spectrum` — the applier and the tape
+
+### Added — `Spectrum::snapshot()` and `Spectrum::restore()`
+
+- **`Spectrum::snapshot(&self) -> Snapshot`** and **`Spectrum::restore(&mut self, &Snapshot)`**.
+
+**`Ula`, `Memory`, `Clock` and `CpuState` gained no public items**, and that is the whole of
+`docs/M6.md` Decision 1's argument rather than a happy outcome. A snapshot applier needs three
+things the machine does not otherwise expose — set the border without performing an `OUT`, set the
+frame position without adding elapsed time, and write RAM bank by bank. Placed in a separate crate
+they would have had to reach through `spectrum`'s **public** surface, making all three permanent
+public API for one in-workspace caller. As modules inside the crate they are `pub(crate)`:
+`Ula::set_border`, `Ula::set_frame_t_state`, `Ula::insert_tape`, `Ula::tape_mut`,
+`Clock::set_frame_t_state`, and a private `Ula::advance`.
+
+`Memory::bank` / `bank_mut` are **still absent**, and stay absent. The three banks a 48K snapshot
+carries are exactly the three its slot map exposes, so `restore` reaches them through the already
+public `Memory::slots()` — which also means the code is derived from the slot map rather than from
+the 48K's particular one, and will not need rewriting when M7 moves it. They become unavoidable at
+M7, where a 128 snapshot carries banks that are paged out and therefore have no address at all;
+adding them now would be a semver commitment with no caller.
+
+**Three things deliberately survive a restore**, each a convention rather than a measurement,
+because no format carries the field: `Spectrum::frames()` (the machine's uptime — the boot gate
+asserts on it and the FLASH phase derives from it), the ROM, and the tape.
+
+### Added — `pub mod tape`
+
+- **`tape::Tape`**, with `new`, `play`, `stop`, `rewind`, `level` and `pulses`.
+- **`tape::Error`** (`#[non_exhaustive]`, `Copy`, allocation-free — matching `snapshot::Error`,
+  `RomSizeError` and `z80::StepError`).
+- **`tape::tap::parse`**.
+- **`Spectrum::insert_tape()`** and **`Spectrum::tape_mut()`**.
+
+**The tape is a signal, not a ROM trap**, which is `docs/M6.md` Decision 4 and the largest decision
+in the milestone. `Tape` holds a **pulse train** — half-period lengths in T-states — rather than a
+block list, so `.tzx` becomes a second converter at M7 rather than a rewrite of the ULA side.
+
+`Tape::new` and `Tape::pulses` are public where the design implied only `play`/`stop`/`rewind`. The
+reason is the gates: an expectation computed by its own subject is a tautology, so the gate that
+grades the `.tap` converter has to build a train by hand and read one back with a decoder it owns.
+
+`Spectrum::tape_mut` returns `&mut Tape` rather than `Option<&mut Tape>`: a drive with no cassette
+and a cassette with nothing on it drive the `EAR` line identically, so there is no state to
+distinguish and no option to unwrap.
+
+**Deliberately absent, and non-breaking to add later:** `Tape::is_finished`, `Tape::position`,
+`Spectrum::eject_tape`, `tape::tzx`, `sna::write`, `Memory::bank` / `bank_mut`.
+
+### Changed — behaviour, not signatures
+
+- **Bit 6 of a read from port `0xFE` is now driven by the tape.** With no tape inserted it still
+  reads **low**, so `IN A,(0xFE)` on an idle machine still returns the `0xBF` that
+  `crates/spectrum/tests/keyboard_matrix.rs` has pinned across the full membrane since M5. No
+  constant changed and no signature moved; `ula.rs`'s documented table row went from **no** to
+  **yes**.
+- **`Ula::reset` still does not rewind the tape.** Pressing reset does not rewind a cassette.
+
+### Note for machine authors
+
+Every `Clock::advance` call site in `ula.rs` now routes through one private `Ula::advance` that
+moves the clock **and** the tape. Contention advances the clock outside any `Bus::tick`, so a tape
+driven from `tick` alone would run slow by exactly the contention a loader suffers — silently.
+Measured: 32 `NOP`s cost 128 T-states out of the contended bank and 194 in it.
+
+## Unreleased — M5 follow-up · `crates/z80` — the machine-cycle lengths become contract
+
+### Added
+
+- **`z80::OPCODE_FETCH_T_STATES`, `z80::MEMORY_ACCESS_T_STATES`, `z80::PORT_ACCESS_T_STATES`**
+  (`pub const u8` = 4, 3, 4), defined in `bus` and re-exported from the crate root. Additive and
+  non-breaking; permanent, because a published constant cannot be withdrawn without a major bump.
+
+**Why these are contract and not implementation detail, which is the whole of the decision.** The
+`Bus` documentation already published this table in prose — it had to, because an implementation
+cannot honour the trait without it. `Bus::tick` is called once per T-state and carries no cycle
+boundary, so the only way to tell a tick that belongs to the cycle a transfer just opened from a
+standalone internal cycle that must contend on its own account is to **count**, and counting needs
+the length. These three numbers are the decoding key for the call stream, not a number the machine
+happens to want. A crate that publishes the key in prose and keeps the machine-readable form private
+is asking every implementor to re-transcribe it.
+
+`crates/spectrum` was doing exactly that. Its `ula.rs` held `OPCODE_FETCH_CYCLE`/`MEMORY_CYCLE`/
+`PORT_CYCLE` with the same three values, and `contention_magnitude.rs` recorded the consequence in
+its *what is not graded here*: *"those two sets of constants are duplicates that no gate compares, so
+if they diverged every contended access would be charged wrongly."* The gate it offered instead was
+that a divergence would move a hand-derived total — **a consequence, not a comparison**. The
+duplicates are deleted and `Ula` consumes the exported constants, so a divergence is no longer
+something to detect: it is unrepresentable.
+
+**What is deliberately *not* exported, because the boundary is the argument.** `INTERRUPT_ACKNOWLEDGE`
+and `NMI_ACKNOWLEDGE` stay private. The three above are public because each corresponds to a `Bus`
+transfer callback, so an implementation can *recognise* the cycle the number measures. An acknowledge
+has no callback — it reads no memory — so a machine has nothing to attach the length to, and
+exporting it would hand out a number a `Bus` cannot act on.
+
+**What still grades the values.** Removing the duplication removes the risk of two implementations
+disagreeing; it does nothing about both being wrong together, and one definition means a wrong value
+now moves the core's accounting and the ULA's in lockstep. So the expectations stay independent:
+`contention_magnitude.rs`'s `nominal` column, `io_contention.rs`'s `PORT_CYCLE`, `block_contention.rs`'s
+16 and 21, and `crates/z80/tests/bus_timing.rs`'s own `MEMORY_CYCLE` are all written from the
+published Z80 figures and none of them import these constants.
+
+### Note for machine authors
+
+`crates/z80/tests/codegen.rs` pins exact codegen counts and was checked across this change: all seven
+assertions hold unmoved. `const` items emit no code, so adding three public ones is invisible to the
+compiler — which was the prediction, and it was checked rather than assumed.
+
+## Unreleased — M5 · `crates/spectrum` — the machine, and a second published surface
+
+### Added — the whole of it, in one commit
+
+`crates/spectrum` went from a stub to a 48K in `2157331`, so its entire published surface arrived at
+once rather than a decision at a time. Recorded here as a single entry because that is what
+happened, not because the items are minor:
+
+- **`Spectrum`** — the machine. `new`, `reset`, `step`, `run_frame`, `run_frames`, `frames`,
+  `frame_t_state`, `render`, `cpu_state`, `set_cpu_state`, `fault`, `ula`/`ula_mut`,
+  `memory`/`memory_mut`, `keyboard`/`keyboard_mut`, `border`.
+- **`Ula`** — the bus the CPU is instantiated over: `new`, `reset`, `memory`/`memory_mut`,
+  `keyboard`/`keyboard_mut`, `clock`, `border`, `interrupt_asserted`, and `FLOATING_BUS_BYTE`. It
+  implements **all six** `z80::Bus` methods, `fetch` included — the defaulted one is overridden here
+  rather than inherited, which is what retires the machine-cycle heuristic below.
+- **`Memory`** — slots to banks, with 48K as the locked configuration: `spectrum_48k`, `read`,
+  `write`, `is_contended`, `slot_at`, `slots`, plus `Slot`, `BankIndex`, `RomIndex`,
+  `SPECTRUM_48K_SLOTS`, `RomSizeError` and the four size constants.
+- **`Keyboard`** and **`Key`** — `press`, `release`, `release_all`, `is_pressed`, `read`, with
+  `HALF_ROWS`, `KEYS_PER_HALF_ROW` and `RELEASED`.
+- **`screen`** — `Frame`, `Colour`, `Attribute`, `render`, `flash_phase`, `pixel_address`,
+  `attribute_address`, **`read_text`**, and the display/frame geometry constants.
+- **`timing`** — `Clock`, `delay`, `T_STATES_PER_FRAME`, `T_STATES_PER_LINE`, `LINES_PER_FRAME`,
+  `INTERRUPT_T_STATES`, `FIRST_CONTENDED_T_STATE`.
+
+### Removed
+
+- **`pub mod machine_cycle`, and with it the whole reconstruction heuristic.** It exported a type no
+  caller could obtain — nothing public returned one — while letting any caller *construct* one and
+  drive it into a state the real bus never produces. A public type reachable only by building it
+  wrongly is a surface that can only be misused, and it is gone: `Bus::fetch` states outright what
+  the deferral existed to infer. **−161 production LOC, −8 branches and −2 nesting levels on the
+  `Bus::tick` path.** Nothing on `crates/z80`'s side changed to make room for it — `fetch` there is
+  additive and defaulted — so this removal is `spectrum`'s alone. The −161 and the branch and
+  nesting counts are the implementer's measurement of the change; the deleted file's own production
+  half is 191 lines, which is the part re-derived independently.
+
+- **`Clock::advance` left the published surface**, narrowed to `pub(crate)` rather than deleted —
+  every real caller is inside this crate. As a *public* method it was a **no-op**: `Clock` is `Copy`
+  and `Ula::clock` returns by value, so an outside `ula().clock().advance(n)` auto-refs a temporary,
+  compiles clean, and advances nothing. A published method that silently does nothing is worse than
+  an absent one, because a caller reads the name and stops looking — the same failure class this
+  project records as *"the most dangerous defect was not a bug in a comparison, it was a comment"*.
+  `crates/spectrum/src/timing.rs:130` now carries that reasoning at the declaration.
+
+### Note for machine authors
+
+**`Spectrum::step` returns T-states and that number is not the clock.** Contention is added on the
+bus's side and is not included in it. Use `Spectrum::frame_t_state` for time; `step`'s return is
+useful only for asserting an instruction's nominal length. A frame loop that sums `step` returns
+gets the instruction count right and the time wrong, with nothing failing — which is why
+`run_frame` watches the frame *counter* rather than a T-state budget.
+
+**`Spectrum::render` is a snapshot, not a record of what the ULA drew.** Progressive drawing —
+multicolour, border stripes — is not modelled. Nor are the floating bus or keyboard ghosting. The
+per-property list of what is and is not graded lives in `crates/spectrum/src/lib.rs`.
+
+## Unreleased — M5 · `crates/z80` — `Bus::fetch`, the M1 opcode fetch
 
 ### Added
 
 - **`Bus::fetch(&mut self, addr: u16) -> u8`**, defaulted to `Bus::read`. Non-breaking: every
   existing implementation compiles and behaves identically without touching it, and `spectrum`
-  was left unmodified as the proof.
+  was left unmodified **at the moment it landed** as the proof — `cargo test -p spectrum` reported
+  98 passed, 0 failed on the untouched machine. It has since opted in, which is the point of a
+  defaulted method: non-breaking on arrival, load-bearing when adopted.
 
   It exists because M1 is the one machine cycle whose **length** a machine cannot infer from
   the call stream. A write is three T-states and a port access is four, but a read is three for
@@ -19,12 +211,24 @@ each one stopped being free is worth knowing.
   streams: one transfer callback followed by four ticks at the same address. A contention model
   owes one stall for the first and two for the second, and nothing in the stream said which.
 
-  This is not a speculative addition. `crates/spectrum/src/machine_cycle.rs` reconstructs cycle
-  boundaries by deferring the fourth tick until a fifth discloses the shape, and its residual
-  error is exactly one contention point — 0 to 6 T-states — on the read-modify-write family
-  (`INC`/`DEC (HL)` and `(IX+d)`, the `CB` operations on memory, `EX (SP),HL`). That residual is
-  pinned by a test of its own. `fetch` removes the ambiguity at the source rather than
-  reconstructing it downstream.
+  This was not a speculative addition. **`crates/spectrum/src/machine_cycle.rs` reconstructed**
+  cycle boundaries by deferring the fourth tick until a fifth disclosed the shape, at a residual of
+  exactly one contention point on the read-modify-write family (`INC`/`DEC (HL)` and `(IX+d)`, the
+  `CB` operations on memory, `EX (SP),HL`), pinned by a test of its own. `fetch` removes the
+  ambiguity at the source rather than reconstructing it downstream, and **the machine has taken it:
+  `Ula` implements `fetch`, `machine_cycle.rs` is deleted, and the residual is gone rather than
+  pinned.**
+
+  > **Correction, and it is not a tidy-up.** This paragraph described the file in the present tense
+  > after it had been deleted, and it described the residual as *"exactly one contention point — 0
+  > to 6 T-states"*. **That phrasing conflates two different quantities.** 0–6 is the *isolated
+  > stall* a single cycle would be charged, taken alone. The *net observable error* is smaller and
+  > differently shaped: swept over all 448 start positions, `INC (HL)`'s total was wrong by 0 or 1
+  > T-state and never more, because dropping a stall opens the next cycle earlier, where the pattern
+  > charges most of it straight back. Read as an error bound, "0 to 6" invites adding the missing
+  > stall to an observed total — which two independent derivations did, landing on 30 T-states where
+  > the machine cycles give 26. `docs/STATUS.md` carries the full account under *A missing stall
+  > cannot be added to a total*.
 
 - **The rule, for implementors:** `fetch` is called once per M1 cycle that reads memory, which
   during `step()` is also exactly once per `R` increment — prefix bytes included, since `DD`,
@@ -48,6 +252,24 @@ each one stopped being free is worth knowing.
   exact across `step()` and off by one for each accepted interrupt.** Anything reconstructing M1
   cycles from the bus alone must add those itself.
 
+### The invariant those rulings force, stated with its scope
+
+The tempting rule is *one `fetch` per `R` increment*. It is nearly true, it is why the method can be
+described in one line, and it is wrong as stated. The exact form:
+
+> `R` increments **once per M1 cycle**. `fetch` fires **once per M1 cycle that reads memory**. The
+> interrupt acknowledge is the only cycle that is neither — it refreshes without fetching. So the
+> correspondence is **exact across `step()`**, where a frame loop spends all of its time, and **off
+> by one per accepted interrupt or NMI**.
+
+A halted CPU's cycle keeps the count, because it does read memory — it re-fetches the `HALT` opcode
+and discards the byte. The acknowledge does not, because `/IORQ` replaces `/MREQ` and no address is
+presented to memory at all.
+
+**The exception was not found by thinking harder about the rule; it was found by trying to write its
+test**, at which point the acknowledge path had to be given a verdict and refused to fit. An
+invariant asserted has no scope; an invariant tested acquires one.
+
 ### Note for machine authors
 
 The correspondence above is also the gate. `crates/z80/tests/bus_timing.rs` asserts
@@ -58,7 +280,12 @@ vectors and by `zexall`, so the new method is anchored to something already prov
 a hand-count of call sites — and the check bites in both directions, since a fetch left on `read`
 drops one side of the equation while an operand read promoted to `fetch` inflates the other.
 
-## Unreleased — M3, `zexdoc`
+**On the machine's side the adoption is graded too**, which is the part a defaulted method usually
+leaves unmeasured: removing `Ula`'s `fetch` implementation — so the machine silently falls back to
+the default and treats every opcode fetch as a three-T-state read — turns **7 tests red**. Opting in
+is therefore load-bearing rather than decorative, and opting back out cannot happen quietly.
+
+## Unreleased — M3 · `crates/z80` — `zexdoc`
 
 ### The published surface did not change, and that is the result
 
@@ -75,14 +302,22 @@ where a wrong flag bit poisons a CRC thousands of instructions after the mistake
 
 **Throughput at scale is now measured rather than extrapolated.** 46,734,977,142 T-states in
 43.1 s on an Apple M3 Max — **~308x real time** for a 3.5 MHz Z80, on a flat 64K bus with a
-no-op `tick`. That is within 7 % of `benches/step.rs`'s 329x, so the benchmark's figure holds
-over a real instruction mix and not just its own sample.
+no-op `tick`.
+
+> **Correction.** This entry went on to say *"within 7 % of `benches/step.rs`'s 329x, so the
+> benchmark's figure holds"*, and it claims the wrong thing corroborated the wrong thing.
+> The **329x is unresolved**: re-run repeatedly it gives **296–308x**, and a loaded machine
+> can only make a throughput figure *smaller*, never larger — so there is no reading of the
+> load under which 306 is evidence for 329. What the 308 above corroborates is ~306, on a
+> completely independent workload of 5.8 × 10⁹ real instructions, which is a genuinely
+> useful agreement and is not the one that was claimed. See `docs/ARCHITECTURE.md`'s
+> *Measured* section, which owns the verdict table.
 
 The number that matters for a frame loop is the other one in that pair: a `dev`-profile build
 runs the same work at ~4.9 M instructions/s, **27x slower**. Anything scheduling `Cpu::step`
 against a wall clock must be built in release.
 
-## Unreleased — M2, the four prefixes
+## Unreleased — M2 · `crates/z80` — the four prefixes
 
 ### Breaking
 
@@ -130,7 +365,7 @@ against a wall clock must be built in release.
 length, so a frame loop must treat one step as able to overrun its remaining budget. There is no
 small maximum.
 
-## Unreleased — M1, the un-prefixed opcodes
+## Unreleased — M1 · `crates/z80` — the un-prefixed opcodes
 
 ### Added
 

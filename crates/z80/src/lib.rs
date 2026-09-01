@@ -81,24 +81,24 @@ mod registers;
 
 pub(crate) mod flags;
 
-pub use bus::Bus;
+pub use bus::{Bus, MEMORY_ACCESS_T_STATES, OPCODE_FETCH_T_STATES, PORT_ACCESS_T_STATES};
 
 use decode::Index;
 use registers::{Registers, index, pair};
 
-/// T-states in an opcode fetch (M1).
-const OPCODE_FETCH: u8 = 4;
-
-/// T-states in a memory read or write.
-const MEMORY_ACCESS: u8 = 3;
-
-/// T-states in an I/O port read or write.
-const PORT_ACCESS: u8 = 4;
-
 /// T-states in a maskable-interrupt acknowledge cycle: M1 stretched by two wait states.
+///
+/// Deliberately **not** exported alongside the three machine-cycle lengths in [`bus`], and
+/// the asymmetry is the rule rather than an oversight: those three are public because each
+/// corresponds to a [`Bus`] transfer callback, so an implementation can recognise the cycle
+/// they measure and needs the number to decode the tick stream. An acknowledge has no
+/// callback — it reads no memory, so there is nothing for a machine to recognise — and
+/// exporting its length would hand out a number a `Bus` cannot act on.
 const INTERRUPT_ACKNOWLEDGE: u8 = 7;
 
 /// T-states in a non-maskable-interrupt acknowledge cycle.
+///
+/// Private for the same reason as [`INTERRUPT_ACKNOWLEDGE`].
 const NMI_ACKNOWLEDGE: u8 = 5;
 
 /// Where a non-maskable interrupt always vectors.
@@ -679,7 +679,7 @@ impl<B: Bus> Cpu<B> {
         let address = self.regs.pc();
         self.bus.fetch(address);
         self.regs.increment_r();
-        self.internal_cycles(address, OPCODE_FETCH);
+        self.internal_cycles(address, OPCODE_FETCH_T_STATES);
     }
 
     // -----------------------------------------------------------------------------
@@ -718,7 +718,7 @@ impl<B: Bus> Cpu<B> {
     #[inline]
     fn read_byte(&mut self, address: u16) -> u8 {
         let value = self.bus.read(address);
-        self.internal_cycles(address, MEMORY_ACCESS);
+        self.internal_cycles(address, MEMORY_ACCESS_T_STATES);
         value
     }
 
@@ -726,14 +726,14 @@ impl<B: Bus> Cpu<B> {
     #[inline]
     fn write_byte(&mut self, address: u16, value: u8) {
         self.bus.write(address, value);
-        self.internal_cycles(address, MEMORY_ACCESS);
+        self.internal_cycles(address, MEMORY_ACCESS_T_STATES);
     }
 
     /// Read one byte from a port, charging an I/O cycle.
     #[inline]
     fn read_port(&mut self, port: u16) -> u8 {
         let value = self.bus.in_port(port);
-        self.internal_cycles(port, PORT_ACCESS);
+        self.internal_cycles(port, PORT_ACCESS_T_STATES);
         value
     }
 
@@ -741,7 +741,7 @@ impl<B: Bus> Cpu<B> {
     #[inline]
     fn write_port(&mut self, port: u16, value: u8) {
         self.bus.out_port(port, value);
-        self.internal_cycles(port, PORT_ACCESS);
+        self.internal_cycles(port, PORT_ACCESS_T_STATES);
     }
 
     /// Fetch the next opcode: an M1 cycle, which also advances `PC` and refreshes `R`.
@@ -761,7 +761,7 @@ impl<B: Bus> Cpu<B> {
         let address = self.regs.pc();
         let opcode = self.bus.fetch(address);
         self.regs.increment_r();
-        self.internal_cycles(address, OPCODE_FETCH);
+        self.internal_cycles(address, OPCODE_FETCH_T_STATES);
         self.regs.advance_pc();
         opcode
     }

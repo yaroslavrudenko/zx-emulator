@@ -40,8 +40,16 @@ pub trait Bus {
     fn tick(&mut self, addr: u16);
 }
 
-pub struct Cpu<B: Bus> { /* ... */ }
+pub struct Cpu<B> { /* ... */ }
 ```
+
+> **Corrected: this block carried `pub struct Cpu<B: Bus>` long after the bound moved to the
+> `impl` blocks.** `STATUS.md` records the struct-level bound's removal in its *Closed* table —
+> *"Removed. The declaration is `pub struct Cpu<B>`"* — and this code block kept the old
+> signature anyway. That is worse than the same slip in prose, because a code block is what
+> somebody copies. The substantive claim the block is here to make — six methods, one
+> defaulted, generic rather than `Box<dyn Bus>` — is unaffected and is gated in
+> `crates/z80/tests/codegen.rs`.
 
 Six methods. **`fetch` is the newest and the only defaulted one**, and it exists because M1 is the
 one machine cycle whose *length* the call stream does not disclose: a write is three T-states and a
@@ -58,9 +66,12 @@ machine crate compiled *and* passed on the default, unmodified — `cargo test -
 
 **Every clause of that is history now, and it is written in the past tense for a reason: three of
 them were still in the present tense long after they stopped being true.** `Ula` implements `fetch`
-(`crates/spectrum/src/ula.rs:241`), `ula.rs` has been rewritten, `machine_cycle.rs` — the 161-line
-module that existed only to reconstruct M1 boundaries the old call stream had discarded — is
-**deleted**, and `crates/spectrum/tests/` has grown past the five binaries of that day. (That last
+(`grep -n 'fn fetch' crates/spectrum/src/ula.rs` — a command rather than a line number, because
+`ula.rs` is edited by every milestone and the number this sentence carried was already stale),
+`ula.rs` has been rewritten, `machine_cycle.rs` — the **312-line** module (191 of them production;
+`#[cfg(test)]` begins at 192) that existed only to reconstruct M1 boundaries the old call stream had
+discarded — is **deleted**, and `crates/spectrum/tests/` has grown past the five binaries of that
+day. (That last
 one is left as "grown past five" on purpose: a live count of files in another crate's test directory
 is a claim that rots on someone else's commit, which is the defect this paragraph is an example
 of. The number that matters is the one the evidence needs, and that number is historical.) What
@@ -68,6 +79,17 @@ survives is the evidence, and it
 survives precisely because it is a claim about a moment: a defaulted trait method was added to a
 published trait and a downstream implementor kept working untouched. That is what "non-breaking"
 means, and it stays proven whether or not the implementor has since opted in. It has.
+
+> **That sentence said "the 161-line module", and 161 is not a file size — it is a *net LOC
+> delta*.** `git show 2157331:crates/spectrum/src/machine_cycle.rs | wc -l` is **312**, of
+> which 191 are production. The 161 is the retirement's net change across `machine_cycle.rs`
+> **and** `ula.rs` together, and [`STATUS.md`](STATUS.md) states it correctly, as
+> *"Production LOC | −161"*, in the table this sentence borrowed it from.
+>
+> This is the class that document already has a name for — a derived figure carried away from
+> its derivation, where it can no longer be checked against the thing it was derived from. The
+> tell here is that the wrong reading is *plausible*: a module and a delta are both line
+> counts, both about the same change, and one of them is right.
 
 Two numbers that go with the opt-in, both **reported by the agent that did the work and not
 reproduced in this pass**: `INC (HL)` in contended memory was derived independently twice as **26
@@ -143,8 +165,18 @@ regs: [u8; 26],   // A F B C D E H L | A' F' B' C' D' E' H' L' | IXh IXl IYh IYl
 
 This is the key to the DD/FD prefixes. They substitute IX or IY for HL in the *next*
 instruction. With named fields that is a branch in every HL-touching handler; with an
-array it is a **constant index offset** — one `hl_base: usize`, and the entire HL
-instruction set operates on IX with no `if` at all.
+array it is a **constant index offset** — one base index, and the entire HL instruction set
+operates on IX with no `if` at all.
+
+> **The name in that sentence used to be `hl_base`, and there has never been such an item.**
+> `grep -rn 'hl_base' crates/` returns nothing at any commit. The mechanism is real and shipped;
+> it is a `PairBase` threaded as a **parameter named `base`** — `pair(base)`,
+> `set_pair(base, value)`, `decode.rs`'s `register_index(base)`. The note below records the
+> reviewers catching the *mechanism* missing; what nobody caught until now is that the
+> **name** was a phantom too, so `grep hl_base` returning zero hits stayed true after the work
+> landed and meant something different. That is the `Cpu::pc()` class this document already
+> records once: a plausible identifier written from the design's intent rather than from the
+> crate, and nothing checking.
 
 > **How this landed, and why the note stays.** The *layout* arrived first and the *indirection*
 > did not: two independent reviewers found `grep hl_base` returning zero hits while this
@@ -159,7 +191,10 @@ instruction set operates on IX with no `if` at all.
 > `0x29` (`ADD IX,IX`) needs the base substituted in **two** positions. Separately, the
 > operand-field→array-index mapping is already an 11-instruction branch cascade before any
 > offset is added, because the two orderings differ by a permutation that LLVM cannot fold;
-> `hl_base` will sit on top of that, not replace it.
+> the base will sit on top of that, not replace it. *(This sentence was future tense —
+> "`hl_base` will sit on top of that" — about work that had already landed under a different
+> name. A forward-looking claim is the one kind of stale prose a reader cannot detect by
+> checking the crate, because the thing it names is supposed not to exist yet.)*
 
 ## Decision 3 — decode with `match`, not a function-pointer table
 
@@ -242,9 +277,32 @@ multicolour effects). That is observation, not a green check.
 | M3 | Documented behaviour | **zexdoc passes** |
 | M4 | Undocumented flags | **zexall passes** — CPU is done |
 | M5 | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` |
-| M6 | Snapshots (Z80/SNA) or TAP tape | a real game runs |
+| M6 | Snapshots (Z80/SNA) **and** TAP tape | **T1 + T2 + T3** — see below |
 | M7 | 128: paging, second ROM, AY, contention per bank | 128-only software runs |
 | M8 | WASM + macroquad | playable from a URL |
+
+> **The M6 row said *"Snapshots (Z80/SNA) **or** TAP tape"* and *"a real game runs"*, and both
+> halves are corrected here rather than quietly widened.** The design is
+> [`M6.md`](M6.md), and its Decision 8 splits the milestone's evidence into four tiers:
+>
+> | Tier | What it is | Evidence class | Corpus |
+> |---|---|---|---|
+> | **T1** | the round trips, the truncation sweep, the codec property tests, the transcribed vectors | **proven** | none — built in code |
+> | **T2** | the real ROM's `LD-BYTES` loads a synthetic tape through the `EAR` bit | **measured** | the committed 48K ROM |
+> | **T3** | a program **we wrote** is loaded from tape by the ROM and then executes | **measured** | the same ROM |
+> | T4 | a real game reaches its title screen; one of our `.z80` files opens elsewhere | **observed** | user-supplied, absent by default |
+>
+> **The gate is T1 + T2 + T3, and T3 is what replaces "a real game runs".** T4 is *observation*
+> in this project's vocabulary and cannot be automated in a repository that may not carry games
+> — `docs/ARCHITECTURE.md`'s own licensing note says why — so a milestone gated on it would be
+> a gate that runs nowhere, which `STATUS.md` records three times already. It is **not done**,
+> and that residue is stated rather than absorbed: T4 is the only tier that grades a turbo
+> loader, and no `.tap` can carry one at any speed.
+>
+> The **or** was the smaller error and the more consequential one: snapshots and the tape are
+> both built, and a row offering a choice between them would have let either alone count.
+> `MACHINE.md` carries the same row and is not this document's to edit; it is flagged for
+> whoever owns it.
 
 Performance is a non-goal. 3.5 MHz × 50 Hz ≈ 70,000 T-states per frame; a modern machine
 does that thousands of times faster than real time. Optimise nothing until measured.
@@ -328,10 +386,32 @@ measure 2.27 even at M1. Whatever produced 329/145 was not this benchmark in thi
 **One orphan, carried forward rather than deleted.** This section used to end: *"The `spectrum`
 crate's contention arithmetic is the one cost worth watching — it is the largest term (−21.5 points
 of the M7 decomposition) and it is irreducible."* The engineering judgement is sound and is kept.
-The number is **not reproducible**: `grep -rn 'decomposition\|21\.5' docs/ crates/` returns nothing,
-so the decomposition it apportions exists in no file here. It is recorded as an orphan instead of
+The number is **not reproducible**: no "M7 decomposition" exists in any file here, so there is
+nothing for the −21.5 to be a share of. It is recorded as an orphan instead of
 being quietly dropped, because a row that simply disappears is indistinguishable from a row nobody
 re-read — which is the failure this whole section is a response to.
+
+> **The recipe this paragraph published for checking itself did not work.** It read: *"The number
+> is **not reproducible**: `grep -rn 'decomposition\|21\.5' docs/ crates/` returns nothing"*. It
+> returns **six** hits — five inside this file, guaranteed the moment the orphan figure was
+> quoted here, and one in `crates/spectrum/tests/contention_magnitude.rs`. The conclusion
+> survives untouched: no "M7 decomposition" exists anywhere, so the −21.5 is a share of nothing.
+> What failed is the *command*, and it failed in the section whose stated remedy is that
+> re-running must be cheaper than re-deriving. **A published command that cannot return what it
+> claims is worse than no command**, because it will be run once, contradicted, and then
+> distrusted along with the finding it was supporting. The prose keeps the finding; the
+> self-invalidating recipe is gone.
+
+**A second orphan, and this one was carried forward by halves.** The `overflow-checks` block that
+used to sit below recorded *"the release build of `Cpu<Ula>` carries **46** `panic_const_add_overflow`
+sites and **15** `panic_bounds_check` sites."* The 15 survives, in Subject B of the codegen table.
+The 46 does not: `grep -rn 'panic_const_add_overflow' docs/ crates/` now returns nothing. Every
+other deletion in that pass is preserved with a correction attached — the old throughput table, the
+5 % row, the 6.6 % row, the *"re-run after M2"* instruction, the retired Open rows — and this is the
+one exception, so it is recorded here rather than left as a number that vanished. **It is not
+re-measured**, because nothing in this pass needed it and re-taking a figure to fill a gap in a
+table is how the unreproducible ones got here. Whoever wants it back:
+`cargo rustc -p spectrum --release --lib -- --emit=asm -C debuginfo=2` and count the symbol.
 
 **C1's price is still the right trade, and that argument does not depend on the disputed digits.**
 Ticking once per T-state instead of once per batch is roughly 3× the calls, each doing contention

@@ -33,7 +33,7 @@ use spectrum::keyboard::{HALF_ROWS, KEYS_PER_HALF_ROW};
 use spectrum::memory::PAGE_SIZE;
 use spectrum::timing::T_STATES_PER_FRAME;
 use spectrum::{Key, Spectrum};
-use z80::{Bus, InterruptMode};
+use z80::{Bus, CpuState, InterruptMode};
 
 // ---------------------------------------------------------------------------
 // Where things live in the address space
@@ -45,6 +45,18 @@ use z80::{Bus, InterruptMode};
 /// costs exactly its nominal length and the landing position is arithmetic rather than a
 /// simulation of the contention model the tests are trying to grade.
 pub const PROLOGUE: u16 = 0x8000;
+
+/// Where [`advance_to_absolute`] assembles the sled it re-runs to cross whole frames.
+///
+/// Also slot 2, and clear of [`PROLOGUE`]'s reach: the fine half of that positioning is never
+/// more than two sleds long, so its prologue cannot grow past ~1 KB from `0x8000`.
+pub const SLED: u16 = 0x8800;
+
+/// `NOP`s in that sled.
+const SLED_NOPS: u64 = 256;
+
+/// T-states one lap of it costs, out of uncontended memory.
+const SLED_T_STATES: u64 = SLED_NOPS * NOP_T_STATES as u64;
 
 /// Uncontended RAM for a program under test, clear of the prologue.
 ///
@@ -155,11 +167,22 @@ pub fn write_program(machine: &mut Spectrum, address: u16, bytes: &[u8]) {
     }
 }
 
+/// Edit the CPU's registers in place.
+///
+/// The one place the read-modify-write of a [`CpuState`] is written. `spectrum` exposes the
+/// register file only as a whole snapshot — `crates/z80` keeps `Registers` private, which is
+/// the point of the crate boundary — so every gate that needs one register has to fetch all
+/// twenty fields, change one, and put them back. Doing that inline is three lines each time
+/// and was already copied four ways across these gates before this existed.
+pub fn with_cpu_state(machine: &mut Spectrum, edit: impl FnOnce(&mut CpuState)) {
+    let mut state = machine.cpu_state();
+    edit(&mut state);
+    machine.set_cpu_state(state);
+}
+
 /// Point `PC` at `address`, leaving every other register alone.
 pub fn set_pc(machine: &mut Spectrum, address: u16) {
-    let mut state = machine.cpu_state();
-    state.pc = address;
-    machine.set_cpu_state(state);
+    with_cpu_state(machine, |state| state.pc = address);
 }
 
 /// Enable both interrupt flip-flops, select `mode`, and give the CPU a usable stack.
@@ -168,12 +191,12 @@ pub fn set_pc(machine: &mut Spectrum, address: u16) {
 /// window at the top of the frame, and a machine with interrupts already on would vector out
 /// of the prologue instead of finishing it.
 pub fn enable_interrupts(machine: &mut Spectrum, mode: InterruptMode) {
-    let mut state = machine.cpu_state();
-    state.iff1 = true;
-    state.iff2 = true;
-    state.im = mode;
-    state.sp = 0xFF00;
-    machine.set_cpu_state(state);
+    with_cpu_state(machine, |state| {
+        state.iff1 = true;
+        state.iff2 = true;
+        state.im = mode;
+        state.sp = 0xFF00;
+    });
 }
 
 /// Run a fresh machine to exactly `target` T-states into frame zero.
@@ -231,6 +254,70 @@ pub fn advance_to(machine: &mut Spectrum, target: u32) {
     );
 }
 
+/// Run a fresh machine to exactly `target` T-states after power-on, however many frames away.
+///
+/// [`advance_to`] assembles **one straight-line prologue**, so its reach is bounded by the RAM
+/// it can write: a frame is [`T_STATES_PER_FRAME`] T-states and would need some seventeen
+/// thousand instructions, which is more than the 16 KB bank it assembles into. Everything at
+/// or beyond a frame boundary is therefore out of its reach — which is why every gate in this
+/// directory before `frame_boundary.rs` measured inside frame zero.
+///
+/// This closes the gap by **repeating** a fixed-cost sled rather than by assembling a longer
+/// one: [`SLED_NOPS`] `NOP`s at [`SLED`], executed as that many steps. Out of bank 2 nothing
+/// contends, so each lap costs exactly `4 * SLED_NOPS` T-states and the landing stays
+/// arithmetic rather than a simulation of the contention model these gates are grading.
+///
+/// The fine positioning runs **first**, so [`advance_to`]'s own landing assertion still fires
+/// against an unrun machine; the laps then carry the remainder, which is always a whole
+/// multiple of the sled. The final position is asserted here as well, for the same reason
+/// [`advance_to`] asserts its own.
+///
+/// Interrupts must still be enabled *after* this returns: the laps run through the interrupt
+/// window at the top of every frame they cross, and a machine with `iff1` set would vector out
+/// of the sled instead of finishing it.
+///
+/// # Panics
+///
+/// If `machine` has already run, or if the machine does not land exactly on `target`.
+pub fn advance_to_absolute(machine: &mut Spectrum, target: u64) {
+    assert_eq!(
+        elapsed(machine),
+        0,
+        "advance_to_absolute positions a machine that has not run yet"
+    );
+
+    let mut laps = target / SLED_T_STATES;
+    let mut remainder = target - laps * SLED_T_STATES;
+    // A remainder inside the Frobenius gap is not composable, so borrow a whole lap: the
+    // prologue then assembles `remainder + SLED_T_STATES`, which is far above the bound.
+    if laps > 0 && remainder <= u64::from(UNREACHABLE_ABOVE) {
+        laps -= 1;
+        remainder += SLED_T_STATES;
+    }
+
+    advance_to(
+        machine,
+        u32::try_from(remainder).expect("a remainder below two sleds"),
+    );
+
+    if laps > 0 {
+        write_program(machine, SLED, &vec![NOP; SLED_NOPS as usize]);
+        for _ in 0..laps {
+            set_pc(machine, SLED);
+            for _ in 0..SLED_NOPS {
+                machine.step();
+            }
+        }
+    }
+
+    assert_eq!(
+        elapsed(machine),
+        target,
+        "positioning must land exactly on {target}: {remainder} T-states of prologue and \
+         {laps} sleds of {SLED_T_STATES}"
+    );
+}
+
 /// Run `steps` instructions from `address` and report what the machine's clock charged.
 ///
 /// The clock, never the sum of what `step` returns: `docs/MACHINE.md` Decision 1 is a
@@ -243,6 +330,94 @@ pub fn cost_of_running(machine: &mut Spectrum, address: u16, steps: usize) -> u6
         machine.step();
     }
     elapsed(machine) - before
+}
+
+// ---------------------------------------------------------------------------
+// Watching a run take interrupts
+// ---------------------------------------------------------------------------
+
+/// One accepted interrupt, as it looks from outside the CPU.
+///
+/// Everything here is sampled at the moment of acceptance rather than reconstructed
+/// afterwards, which matters for the first two fields: the acknowledge moves the clock, so a
+/// position read *after* the step is the position the handler starts at and not the position
+/// the offer was made at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptedInterrupt {
+    /// The frame the offer was made in.
+    pub frame: u64,
+    /// How far into that frame — necessarily inside the ULA's window.
+    pub offset: u32,
+    /// `BC` exactly as the last completed iteration left it.
+    pub bc: u16,
+    /// The address the acknowledge pushed.
+    pub return_address: u16,
+    /// T-states the acknowledge itself charged.
+    pub charged: u32,
+}
+
+/// What one run of a repeating instruction produced.
+#[derive(Debug)]
+pub struct InterruptedRun {
+    /// Every interrupt taken, in order.
+    pub accepted: Vec<AcceptedInterrupt>,
+    /// T-states the whole run cost, taken from the clock rather than from `step`'s return.
+    pub cost: u64,
+    /// Where the machine stands afterwards, as a frame and an offset.
+    pub end: (u64, u32),
+}
+
+/// Step until `finished`, recording every interrupt taken on the way.
+///
+/// An acceptance is a step after which `PC` is `handler`: [`z80::Cpu::interrupt`] executes no
+/// instruction of its own, so the register file is exactly as the last completed iteration
+/// left it — which is the state a gate on an interrupted block instruction is about.
+///
+/// The predicate rather than a fixed "the counter reached zero" test, because the four block
+/// families do not agree on what the counter is: the transfers and the compares count `BC`
+/// down to zero, and the input and output families count `B` while leaving `C` alone. What
+/// they do agree on is that only the pass which exhausts the counter steps `PC` past the
+/// instruction, so every caller's predicate is some reading of `PC`.
+///
+/// # Panics
+///
+/// If `budget` steps pass without `finished` returning true — a hang would otherwise be
+/// indistinguishable from a slow test.
+pub fn run_recording_interrupts(
+    machine: &mut Spectrum,
+    handler: u16,
+    budget: usize,
+    finished: impl Fn(&CpuState) -> bool,
+) -> InterruptedRun {
+    let before = elapsed(machine);
+    let mut accepted = Vec::new();
+
+    for _ in 0..budget {
+        // Taken before the step: see `AcceptedInterrupt`.
+        let offered_at = (machine.frames(), machine.frame_t_state());
+        let charged = machine.step();
+        let state = machine.cpu_state();
+        if state.pc == handler {
+            accepted.push(AcceptedInterrupt {
+                frame: offered_at.0,
+                offset: offered_at.1,
+                bc: state.bc,
+                return_address: u16::from_le_bytes([
+                    machine.memory().read(state.sp),
+                    machine.memory().read(state.sp.wrapping_add(1)),
+                ]),
+                charged,
+            });
+        }
+        if finished(&state) {
+            return InterruptedRun {
+                accepted,
+                cost: elapsed(machine) - before,
+                end: (machine.frames(), machine.frame_t_state()),
+            };
+        }
+    }
+    panic!("the instruction under test did not finish within {budget} steps");
 }
 
 // ---------------------------------------------------------------------------

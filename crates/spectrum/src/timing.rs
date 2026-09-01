@@ -24,12 +24,38 @@
 //!
 //! # What is not verified
 //!
-//! [`FIRST_CONTENDED_T_STATE`] is the value the emulator community reports for an issue 3
-//! 48K, and **this crate has no oracle for it.** An issue 2 machine is one T-state earlier.
-//! Off-by-one here does not fail anything; it makes multicolour effects land one character
-//! cell out. It is a single named constant precisely so that a future timing-test program
-//! — `MACHINE.md`'s verification item 2, the only real oracle available for this — has one
-//! place to correct.
+//! This section said, until the oracle landed:
+//!
+//! > [`FIRST_CONTENDED_T_STATE`] is the value the emulator community reports for an issue 3
+//! > 48K, and **this crate has no oracle for it.** An issue 2 machine is one T-state earlier.
+//! > Off-by-one here does not fail anything; it makes multicolour effects land one character
+//! > cell out. It is a single named constant precisely so that a future timing-test program
+//! > — `MACHINE.md`'s verification item 2, the only real oracle available for this — has one
+//! > place to correct.
+//!
+//! **Two of its clauses are now wrong and the third is now satisfied.** It is kept above
+//! rather than overwritten, because this project corrects loudly and because a reader who
+//! acted on *"an issue 2 machine is one T-state earlier"* needs to find out.
+//!
+//! **The oracle exists.** `crates/spectrum/tests/timing_oracle.rs` grades the machine against
+//! T-state counts measured on real Spectrums — `MACHINE.md`'s verification item 2, which the
+//! paragraph above correctly named as the only thing that would settle this. Of the values
+//! near this constant, **only 14335 is green**; 14333, 14334, 14336, 14337 and 14361 all turn
+//! it red.
+//!
+//! **What that does and does not establish, stated precisely.** Three mutations came back
+//! *green* — shortening the interrupt window, and moving the interrupt and the window
+//! *together* — so the oracle grades the **interval from `/INT` to the first contended
+//! T-state**, not this constant in isolation. The constant is anchored; the frame's origin
+//! remains a convention, and [`INTERRUPT_T_STATES`]'s length is still ungraded.
+//!
+//! **The early/late difference is not a property of the board**, which is what the old
+//! sentence got wrong. The suite's own authors record a *cold* machine reporting late and then
+//! reporting early once warm, and board issues 3B, 4B and 6A appear in **both** classes in
+//! their hardware results. So "issue 2 versus issue 3" is the wrong axis: the one T-state is
+//! not a stable identity of a machine, and which of the two behaviours to reproduce may not be
+//! a question with a single hardware answer. This emulator reproduces the majority class, and
+//! `timing_oracle.rs` says which as a fact rather than as an intention.
 
 use crate::screen::DISPLAY_HEIGHT;
 
@@ -135,6 +161,29 @@ impl Clock {
             self.frame_t_state -= T_STATES_PER_FRAME;
             self.frames += 1;
         }
+    }
+
+    /// Put the clock at `frame_t_state` **without** disturbing the frame counter.
+    ///
+    /// The one operation a snapshot load needs and [`Clock::advance`] cannot express: a
+    /// restore moves the machine to a position in the frame, and it is not elapsed time. The
+    /// frame counter is the machine's uptime since power-on — the boot gate asserts on it and
+    /// the FLASH phase derives from it — so rewinding it on a load would make one number mean
+    /// two things. `docs/M6.md` Decision 2 records that as a convention rather than a
+    /// measurement, because no snapshot format carries a frame count.
+    ///
+    /// Values at or above [`T_STATES_PER_FRAME`] are reduced into range rather than rejected,
+    /// which is the same rollover [`Clock::advance`] documents — so a position derived from a
+    /// hostile file cannot leave the clock somewhere that means nothing.
+    ///
+    /// `pub(crate)` for exactly the reason `advance` is, and the footgun is the same one:
+    /// [`Clock`] is `Copy` and [`crate::Ula::clock`] returns it **by value**, so
+    /// `machine.ula().clock().set_frame_t_state(0)` would auto-ref a temporary, compile clean
+    /// under `deny(warnings)`, and do nothing at all. The only caller is
+    /// [`crate::Ula::set_frame_t_state`], which owns the field.
+    #[inline]
+    pub(crate) fn set_frame_t_state(&mut self, frame_t_state: u32) {
+        self.frame_t_state = frame_t_state % T_STATES_PER_FRAME;
     }
 
     /// T-states elapsed since the start of the current frame.
@@ -267,6 +316,38 @@ mod tests {
         clock.advance(T_STATES_PER_FRAME);
         assert!(clock.interrupt_asserted());
         assert_eq!(clock.frames(), 1);
+    }
+
+    #[test]
+    fn setting_the_frame_position_leaves_the_frame_counter_alone() {
+        // `docs/M6.md` Decision 2's convention, as an assertion rather than a sentence: a
+        // restore moves the machine within the frame and does not rewind its uptime.
+        let mut clock = Clock::new();
+        clock.advance(T_STATES_PER_FRAME * 5 + 100);
+        assert_eq!((clock.frames(), clock.frame_t_state()), (5, 100));
+        clock.set_frame_t_state(12_345);
+        assert_eq!(
+            (clock.frames(), clock.frame_t_state()),
+            (5, 12_345),
+            "the position moved and the uptime did not"
+        );
+    }
+
+    #[test]
+    fn a_frame_position_out_of_range_is_reduced_rather_than_rejected() {
+        // A hostile snapshot can name any `u32`. The rollover is the same one `advance`
+        // documents, so the clock never stands somewhere that means nothing.
+        let mut clock = Clock::new();
+        clock.set_frame_t_state(T_STATES_PER_FRAME);
+        assert_eq!((clock.frames(), clock.frame_t_state()), (0, 0));
+        clock.set_frame_t_state(T_STATES_PER_FRAME * 3 + 7);
+        assert_eq!(
+            (clock.frames(), clock.frame_t_state()),
+            (0, 7),
+            "reducing is not advancing: three frames' worth of overshoot is not three frames"
+        );
+        clock.set_frame_t_state(u32::MAX);
+        assert_eq!(clock.frame_t_state(), u32::MAX % T_STATES_PER_FRAME);
     }
 
     #[test]

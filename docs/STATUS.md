@@ -3,7 +3,10 @@
 A living record of where the project actually is — what is proven, what is measured, what is
 open. Updated as work lands, not once at the start.
 
-**Last updated:** 2026-09-01, closing M5.
+**Last updated:** 2026-09-01, closing M5 — and re-opened the same day, twice: once by
+`tests/timing_oracle.rs`, which settled the item that had headed *Still ungraded* for two
+milestones, and once by `tests/frame_boundary.rs` and `tests/block_interrupt.rs`, which closed two
+properties of the **machine** that nothing had ever driven.
 
 > **The header said *"during M3"* while the document's top section was M4 and M5 had already
 > landed.** It is corrected here rather than silently bumped, because the gap is the symptom of a
@@ -22,6 +25,30 @@ The 48K boots to `© 1982 Sinclair Research Ltd` on **frame 87**, matched agains
 the ROM's own character set at `0x3D00` rather than a font table this crate wrote, and 200 frames of
 boot run at **96× real time**.
 
+> **That last figure is unmeasured and is marked so rather than re-taken.** It carries no command,
+> no date, no host and no statement of what else the machine was doing — which is exactly what this
+> document says, four hundred lines below, makes a number *"not a measurement at all: a claim
+> wearing a measurement's clothes"*, and what `ARCHITECTURE.md` requires of every row in its
+> *Measured* section. It sits one line under a removed *SECTION INCOMPLETE* banner in a commit
+> whose whole thesis is that defect, which is the point worth noticing: **the sweep covered the
+> section being corrected and not the sentence introducing it.**
+>
+> It is **not** re-measured here, deliberately. Three agents are compiling in this tree, and a
+> throughput figure taken under that load would be worth less than the hole — a wrong number with
+> a method reads as authoritative in a way that no number does not. Whoever takes it should state
+> the command, the profile, the host and the load alongside it.
+>
+> **Two data points arrived anyway, and they are recorded with their conditions rather than
+> promoted.** `cargo run --release -p spectrum --example boot -- testdata/roms/48.rom` is part of
+> this project's standing verification set, and on 2026-09-01 it printed *"13977600 T-states in
+> 0.036s — **112x** real time"* and, half an hour later on the same tree, **114x** — both while
+> three agents were compiling. Those are **lower bounds taken under unstated load**, not a
+> replacement figure. What they settle is only this: the quantity moves by 2 % between two runs of
+> one command on one host within one hour, and by ~17 % from the recorded 96, so **96 was never
+> reproducible in the sense the *Measured* discipline means.** A number that drifts that far
+> without anyone characterising the conditions is not a measurement of the emulator; it is a
+> measurement of whatever else the machine was doing.
+
 > **This section opened under a banner reading *SECTION INCOMPLETE, DO NOT READ AS A VERDICT*,
 > and the banner is removed here rather than left standing.** It was correct when written: the
 > machine had landed in `2157331` and the measurements that decide what it proves were still being
@@ -35,9 +62,16 @@ something that nothing runs.
 
 ### Seven gates, and ten mutations that turn them red
 
-At `2157331` there was no `crates/spectrum/tests/` directory at all. There are **seven** gates in it
-now, and the crate's own coverage table in `crates/spectrum/src/lib.rs` is the per-property view of
-the same set:
+At `2157331` there was no `crates/spectrum/tests/` directory at all. There were **seven** gates in
+it when this table was written, and the crate's own coverage table in `crates/spectrum/src/lib.rs`
+is the per-property view of the same set:
+
+> **Deliberately no live count.** The directory has grown past seven while this section was being
+> written, and it is still growing — `ls -1 crates/spectrum/tests/*.rs | wc -l` gives a different
+> answer from one hour to the next while three agents are landing gates. A number that goes stale
+> between being written and being read is worse than no number: the list below names the gates it
+> is about, `crates/spectrum/src/lib.rs` carries the per-property table, and the directory listing
+> is the only thing that is ever current.
 
 | Gate | What it grades |
 |---|---|
@@ -67,6 +101,56 @@ hole it found on the way in — see *Still ungraded*, where it closes a row.
 | `MEMORY_CYCLE` 3 → 2 | **8 failures** |
 | Internal cycles never contend | **5 failures** |
 | Contention removed entirely | **14 failures** |
+
+> **That table is the record of one pass and the directory has grown past it.** The row
+> `contention phase off by one (14335 → 14334)` in particular says *"the only failure in the
+> workspace"*, and re-measured on the current tree it is **RED 3** —
+> `contention_phase.rs`, `timing_oracle.rs` and `frame_boundary.rs`. The old figure was correct
+> when taken and is left as it stands, because *"the only failure in the workspace"* is a claim
+> about a run, and naming the wrong run makes it wrong in exactly the way this document's own M5
+> section is about. Whoever quotes a verdict from this table should re-take it first.
+
+### Two more gates: the frame boundary, and a block instruction that is actually interrupted
+
+Two properties of the **machine** rather than of an instruction had no gate in any form. Both are
+load-bearing, both were named in the documents as design decisions with nothing behind them, and
+both are now driven through a real `Spectrum`.
+
+| Gate | What it grades |
+|---|---|
+| `tests/frame_boundary.rs` | the clock rolling over **inside** an instruction: the frame counter and the offset as a **pair**, an instruction landing exactly on 69888, **two** crossings in one `step()`, contention priced at the same frame position in frames 0, 1 and 2, one instruction priced free-then-contended across the wrap, and an overshoot past the 32-T-state window missing that frame's interrupt entirely |
+| `tests/block_interrupt.rs` | an 8192-byte `LDIR`/`LDDR` interrupted mid-loop by the machine's own 50 Hz interrupt: the two acceptances it takes, the derived iteration each lands on, the `BC` still remaining, the instruction's **own** address on the stack, the resumed loop finishing the copy byte-exact, and `R` counting the acknowledge's refresh |
+
+**Everything positioned past frame zero needed a mechanism first, and its absence is why these
+were ungraded rather than merely unwritten.** `common::advance_to` assembles one straight-line
+prologue, and a frame is some seventeen thousand instructions away — more than the bank it
+assembles into. So the far side of the first frame boundary was *unreachable*, and every gate in
+that directory measures inside frame zero. `common::advance_to_absolute` reaches it by repeating a
+fixed-cost sled instead of assembling a longer one.
+
+Eleven mutations were run against the pair, each landed and each restored from bytes held by the
+driver. Counts are failing tests across the whole workspace under `--no-fail-fast`:
+
+| Mutation | Workspace | Reddens the new gates by |
+|---|---|---|
+| Rollover tests `>` rather than `>=` | RED 8 | the exact landing, the NOP equivalence, the `HALT`, and an acceptance point |
+| Contention priced from time since power-on | RED 4 | both pricing rows |
+| The interrupt offered *after* the instruction | RED 6 | the overshoot, the `HALT`, the acceptance points |
+| `INTERRUPT_T_STATES` 32 → 33 | RED 4 | the overshoot |
+| **`INTERRUPT_T_STATES` 32 → 24** | **RED 1** | **the overshoot — sole witness in the workspace** |
+| **A 16-bit T-state accumulator** | **RED 1** | **the two-wrap chain — sole witness** |
+| `LDIR` runs its whole loop inside one `step()` | RED 15 | all three behavioural block gates |
+| `acknowledge` no longer increments `R` | RED 4 | the refresh count |
+| `FIRST_CONTENDED_T_STATE` → 14334 / → 14336 | RED 3 each | the free-then-contended chain, both times |
+| Rollover discards the overshoot | RED 3 | **nothing** — and that is a property, see below |
+| Rollover `if` rather than `while` | RED 3 | **nothing** — same reason |
+
+Two of those are sole witnesses, and both are worth naming because a gate with no unique failing
+case is decoration. **A 16-bit T-state accumulator** is the next size up from the `u8` that once
+aborted this process on a legal instruction stream; 131,072 T-states in one `step()` — a
+32,767-prefix chain filling every byte of uncontended RAM — is the only measurement in the
+workspace large enough to see it. **`INTERRUPT_T_STATES` at 24** is the one the window's own gate
+could not see, and is written up below.
 
 ### The premise those gates were written from was wrong, and that is the most useful thing here
 
@@ -165,13 +249,32 @@ This list is the answer to `MACHINE.md`'s instruction to write down which proper
 rather than inferring correctness from the absence of a failing test. It is **not** a to-do list
 awaiting apology; it is the shape of what M5's green means.
 
-- **`timing::FIRST_CONTENDED_T_STATE` has no oracle.** It is pinned to `64 × 224 − 1`, a
+- ~~**`timing::FIRST_CONTENDED_T_STATE` has no oracle.** It is pinned to `64 × 224 − 1`, a
   **derivation** from documented frame structure — not a measurement. Nothing compares it to
   hardware, and **an issue 2 machine is one T-state earlier and would pass the gate identically.**
-  `contention_phase` pins it against drift; it does not establish it.
-- **The 64-line pre-display count is taken on trust.** It is the input to that derivation, and it
-  has the same status.
-- **The interrupt window's *length* is pinned against drift, never measured.**
+  `contention_phase` pins it against drift; it does not establish it.~~
+  **Closed by `tests/timing_oracle.rs`.** The row's evidence, its thirteen mutations and its
+  precise scope are in the **Closed** table; the anti-circularity reasoning, which is the reusable
+  part, is under *Is this oracle circular?*. Two things about the struck text are worth keeping
+  visible rather than deleting: *"an issue 2 machine is one T-state earlier"* is **the wrong
+  axis** — the suite's own data has the early/late split spanning six board issues with three of
+  them in **both** classes, and one machine reporting Late cold and Early warm — and what the
+  oracle closes is the **interval from `/INT` to the first contended T-state**, not the constant
+  standing alone.
+- ~~**The 64-line pre-display count is taken on trust.** It is the input to that derivation, and it
+  has the same status.~~ **Closed only as a consequence, which is a weaker thing and is recorded
+  as such.** The oracle measures the interval's *product*, not its factors: a pre-display count of
+  63 with a line of 227.5 T-states is not a machine, but any compensating pair that still lands on
+  14335 would pass identically. What is established is the total; `64 × 224` remains the reading of
+  it that the documented frame structure supplies.
+- **The interrupt window's *length* is still not measured — and it is now *demonstrated* that the
+  oracle cannot measure it.** `INTERRUPT_T_STATES` moved 32 → 24 leaves `timing_oracle.rs` green;
+  measured here, that mutation reddens **exactly one test in the whole workspace**, and it is
+  `frame_boundary.rs`'s `an_overshoot_past_the_interrupt_window_misses_that_frames_interrupt`. So
+  the row narrows rather than closes: the window is now pinned against drift **on both edges**,
+  by two literals rather than by a value derived from the constant, and nothing anywhere compares
+  32 to hardware. What the two-sided pin replaced is written up under *A window graded against its
+  own constant*, below.
 - ~~**I/O contention is graded against a hand-written tick stream**, not through a real `Cpu<Ula>`.~~
   **Closed by `tests/io_contention.rs`** — three instruction forms (`IN A,(n)`, `OUT (n),A`,
   `IN A,(C)`) × four ports × eight phases through a real `Cpu<Ula>`, 96 assertions, every expected
@@ -187,11 +290,34 @@ awaiting apology; it is the shape of what M5's green means.
   **where** the index-computation T-states are spent is observed rather than asserted. "By
   construction" was an argument; it is now a verdict.
 - **Floating bus, progressive drawing (multicolour, border stripes) and keyboard ghosting are not
-  modelled**, so they are not gradeable rather than ungraded.
+  modelled**, so they are not gradeable rather than ungraded. The oracle's groups 35–37 are
+  excluded **by name** for exactly that reason, so its green says nothing about them.
+- **The frame's origin is a convention, not a measurement.** We assert `/INT` at frame T-state 0
+  and the oracle grades the interval from there; moving the origin and the window together — `/INT`
+  one T-state later *and* `FIRST_CONTENDED_T_STATE` at 14336 — leaves `timing_oracle.rs` green.
+  Measured here rather than inherited: that mutation is RED 15 across the workspace and
+  `every_instruction_group_matches_the_hardware_table_contended_and_not` is **not among the
+  fifteen**. The convention is pinned against drift by fifteen tests and established by none.
+- ~~**An instruction driven across the frame boundary.** Nothing grades that the clock rolls over
+  correctly mid-instruction, that contention is priced correctly on the far side, or that one
+  instruction can advance the frame counter more than once.~~ **Closed by
+  `tests/frame_boundary.rs`.** Seven cases, eight mutations, and two of them reddening that file
+  and nothing else in the workspace — see the gate table below.
+- ~~**A block instruction actually interrupted mid-loop.** `block_contention.rs` grades the rewind,
+  which *shows* the loop is interruptible; nothing interrupts one.~~ **Closed by
+  `tests/block_interrupt.rs`**, which drives an 8192-byte `LDIR` across two frame boundaries and
+  grades the two acceptances it takes.
+- **An interrupt arriving mid-loop while the loop is being *contended*.** `block_interrupt.rs`
+  runs wholly uncontended on purpose, so the iteration an interrupt lands on is arithmetic rather
+  than a simulation of the model `block_contention.rs` grades. The contended case is M7's shape.
+- **The four-case I/O rule's fourth term.** A mutation dropping it leaves the oracle green, because
+  its groups 1–34 never reach a contended non-ULA port. `io_contention.rs` remains its only gate,
+  and that is now a measured statement rather than an assumption.
 
-The two struck rows are kept with their closures attached rather than deleted, for the reason the
+The struck rows are kept with their closures attached rather than deleted, for the reason the
 Closed table exists: **a row that vanished is indistinguishable from a row nobody re-read.** The
-remaining four are the shape of what M5's green still means.
+remainder are the shape of what M5's green still means — and the list is longer than it was, which
+is the intended direction: closing four items surfaced four sharper ones underneath them.
 
 ### What M5 opened — three closed, one still open
 
@@ -286,6 +412,18 @@ gates at all** — writing this down now is cheaper than rediscovering it then.
 `Cpu::interrupt`, `Cpu::nmi`, the three interrupt modes, `RETN`, and the `EI` one-instruction
 deferral are verified by unit tests in `crates/z80/src` and by nothing external. That is a
 different class of evidence from everything above, and M5 is where it starts to matter.
+
+> **Still true of *oracles*, and no longer true of *gates* — the two are worth keeping apart,
+> because this row is quoted as though it said the second.** Nothing external grades an interrupt,
+> and nothing at M5 changed that. What changed is that acceptance is now driven **through the
+> machine** rather than only in `crates/z80`'s unit tests: `tests/frame_interrupt.rs` grades the
+> line and the `HALT` escape, and `tests/block_interrupt.rs` grades acceptance **inside a
+> repeating instruction** — the derived iteration it lands on, the `BC` still remaining, the
+> instruction's own address pushed, and the acknowledge's refresh visible in `R`. Mode 2's
+> vector-table read is exercised there too, by both new gates.
+>
+> `NMI`, `RETN`, mode 0 and the `EI` deferral remain unit-tested only, and the *oracle* column of
+> the table above is unchanged: **❌, ❌, ❌**.
 
 ## Milestone M3 — `zexdoc`
 
@@ -428,6 +566,18 @@ identical to one that asserts everything.
 > lacks `workflow` scope, so `.github/` cannot be pushed. Until someone with that scope pushes
 > it, **the M3 gate is verified locally and enforced nowhere.**
 
+> **The "16 passing tests" is 19, and it is labelled as measured, so it is re-measured here.**
+> `cargo test -p z80 --test zex_oracle` reports **19 passed, 2 ignored** on 2026-09-01 — the file
+> holds 21 `#[test]`s of which `zexdoc_conformance` and `zexall_conformance` carry `#[ignore]`.
+> The argument survives untouched: the command still exits 0 without ever looking for the
+> exerciser, which is the whole point. Only the integer was stale.
+>
+> **What was *not* re-taken, and the distinction matters:** this run had the corpus **present**,
+> because moving `testdata/` aside while three agents are running their own suites would break
+> theirs. The original claim is about the corpus-absent case, and its number is the count of
+> runnable tests either way. State it that way rather than re-quoting a figure taken under
+> conditions nobody recorded.
+
 ### What the harness learned from the M2 review
 
 The verdict is a pure function over a parsed report rather than a chain of inline `assert!`s.
@@ -439,6 +589,17 @@ Six tests cover the verdict rules and ten cover the CP/M shell and the report pa
 in all, none of them `#[ignore]`d, none of them needing `testdata/`. The one that matters most
 is `a_run_that_stopped_early_is_a_fault_even_though_every_line_said_ok`, because a truncated run
 prints nothing but `OK` lines and "did any line say ERROR?" passes it.
+
+> **Counted on 2026-09-01 from the test list rather than from memory: it is nine and ten —
+> nineteen in all.** The nine verdict-rule tests run from
+> `the_pinned_instruction_stream_is_accepted` to `a_port_access_is_a_fault`; the ten shell and
+> parser tests from `both_bdos_functions_reach_the_console` to
+> `the_report_parser_ignores_the_banner_and_the_footer`. The sentence's claim — none `#[ignore]`d,
+> none needing `testdata/` — is unchanged and still true.
+>
+> **The same stale sixteen sits in `testdata/README.md`, which is another agent's file and is
+> routed separately.** That is the whole content of the propagation lesson below: one derived
+> figure, two files, and the correction only lands in the one being read.
 
 ---
 
@@ -553,9 +714,21 @@ M5 section above lists its item *names* and defers here for their state, for the
 opened four; three left this table for the Closed one below when the milestone closed, and the first
 row is the survivor.
 
+> **The survivor has since closed, and closing it opened three narrower rows in its place.** The
+> row read *"`timing::FIRST_CONTENDED_T_STATE = 14335` has no oracle"*; `tests/timing_oracle.rs`
+> settled it against measured hardware, and settling it made visible that the constant was never
+> the whole claim. What the oracle grades is an **interval** — from `/INT` to the first contended
+> T-state — so the frame's origin, the window's length, and the `64 × 224` factorisation of that
+> interval each had to be stated separately, and each is still open. The three rows at the top of
+> this table are those, and the closed row is in the Closed table with its scope and the three
+> mutations that bound it. **A row that closes into three narrower rows is the normal case, not a
+> setback**: what it means is that the original row was carrying more than one claim.
+
 | Item | State | Settled by |
 |---|---|---|
-| **M5** — `timing::FIRST_CONTENDED_T_STATE = 14335` has **no oracle** | Pinned to `64 × 224 − 1`, a **derivation** from documented frame structure. Nothing measures it against hardware, and **an issue 2 machine is one T-state earlier and would pass identically** — so would its input, the 64-line pre-display count, which is taken on trust. **Partly changed at M5 and the row is narrowed rather than closed:** `tests/contention_phase.rs` now catches the 14335 → 14334 mutation, which was the only failure it produced in the whole workspace, so the value is pinned against *drift*. It is still not *established* — a gate that fails when a constant changes says nothing about whether the constant was right | A known-timing test program that reports measured T-state counts — item 2 of `MACHINE.md`'s verification plan, and the only item there that is an oracle rather than an observation |
+| **M5** — the frame's **origin** is a convention | We assert `/INT` at frame T-state 0 and everything is measured from there. `tests/timing_oracle.rs` grades the *interval* between `/INT` and the first contended T-state, so moving both together leaves it green — measured, not argued. Fifteen other tests pin the convention against drift and none establishes it | Hardware that reports where `/INT` falls relative to something the emulator does not also define |
+| **M5** — the interrupt window's **length** | 32 T-states. `tests/frame_boundary.rs` pins **both** edges against drift with two literals (31 accepted, 32 missed) and is the only test in the workspace that 32 → 24 reddens. The oracle is green at 24, so it cannot settle this | A timing program that varies when it enables interrupts within the window |
+| **M5** — the 64-line pre-display count's **factors** | Its *product* is now measured — see the Closed table. Any compensating pair that still lands on 14335 would pass identically | Nothing available; it is the documented frame structure's reading of a measured total |
 | The flag latch has almost no instrument | Two FUSE vectors (`37_1`, `3f`) are the **only** gate that can see it. `zexdoc` masks the bits off; `zexall` passes against three different rules including a stuck-at-zero latch | A corpus with a flag-setter → no-flag instruction → `SCF` sequence. Neither existing corpus has one |
 | CI does not run the M3 gate | `.github/workflows/ci.yml` has the `zexdoc` job written, but `.github/` cannot be pushed from the session that wrote it — the token lacks `workflow` scope | Someone with `workflow` scope pushing it. Until then the gate is verified locally and enforced nowhere, which is the `Z80_FUSE_REQUIRED` defect again |
 | `WZ` / MEMPTR | Carried in `CpuState`, never written | M4, when `BIT n,(HL)` first makes it observable |
@@ -586,6 +759,28 @@ is indistinguishable from a row nobody re-read.
 | **M5 — nothing runs the boot gate** | *"It is `crates/spectrum/examples/boot.rs`; `cargo test` builds an example without calling `main`. Deleting the committed ROM left the suite at 72 passed."* | `crates/spectrum/tests/boot.rs` exists and runs the ROM under `cargo test`, asserting both the message **and the frame it appears on** — the one number the example printed and never checked. The example remains, as an example. See *A gate that nothing runs, for the third time*, which this closes |
 | **`Q` latch — latch lifecycle** | *"`((q ^ f) \| a) & 0x28` has landed, but `begin_operation()` zeroes `q` before `SCF`/`CCF` read it… **FUSE is red: 288/290**… **Blocks M3**."* | The `q_prev` fix landed in `crates/z80/src`: `begin_operation` now assigns `self.q_prev = self.q` before clearing, and both `SCF`/`CCF` call sites read `q_prev`. Re-measured here rather than inherited — `cargo test -p z80 --test fuse_vectors` reports **290 executed, 290 passed, 0 failed** and **1045 executed, 1045 passed, 0 failed**. The row had been red in the register through two merged milestones. **What it does *not* close** is the row above it: the rule is still graded by two FUSE vectors and nothing else |
 | **`Cpu<B: Bus>` struct-level bound** | *"Downstream types naming `Cpu<Ula>` must carry `where Ula: Bus`… Removable at any time."* | Removed. The declaration is `pub struct Cpu<B>` |
+| **M5 — `timing::FIRST_CONTENDED_T_STATE = 14335` has no oracle** | *"Pinned to `64 × 224 − 1`, a derivation from documented frame structure. Nothing measures it against hardware… `contention_phase` pins it against drift; it does not establish it."* The row also said **an issue 2 machine is one T-state earlier**, which is on the wrong axis and is corrected below | **`tests/timing_oracle.rs`** — Richard Butler's 48K timing suite, a `.z80` snapshot carrying 34 instruction groups and **two** expected-result tables measured on real Spectrums, run contended and uncontended: 68 hardware rows, 0 disagreements, and the machine reproduces `TYPE1 (Early)`. **Green on the first run, so thirteen mutations were run against it**, each landed and each restored from held bytes. `FIRST_CONTENDED_T_STATE` at 14333/14334/14336/14337 mismatches 13/8/7/7 hardware rows and only 14335 is clean; at 14336 the machine scores **7 against Early and 64 against Late — it does not become the other machine, it stops being either.** Deleting the delay pattern is 38 rows, `fetch` as a 3-T read 29, internals never contending 34. **The scope is narrower than the row's disappearance suggests and is stated in the three new Open rows above:** what is measured is the *interval* from `/INT` to the first contended T-state, because moving the origin and the window together leaves the oracle green |
+
+> **What of that oracle row this pass derived, and what it carried across.** The **workspace**
+> verdicts were re-taken here: `FIRST_CONTENDED_T_STATE` at 14334 and at 14336 each redden
+> **three** tests — `contention_phase.rs`, `timing_oracle.rs` and `frame_boundary.rs` — and the
+> combined origin shift (`/INT` one T-state later *and* the window at 14336) reddens **fifteen**
+> with `timing_oracle.rs` **not among them**, which is the measurement the row's scope rests on.
+> The **per-row hardware mismatch counts** — 13/8/7/7, 38, 29, 34 — are the oracle's own internal
+> figures and were taken by whoever wired that gate; they are recorded here as theirs, not
+> re-derived. Do not read the two columns as the same quantity: one counts failing *tests*, the
+> other counts disagreeing *hardware rows inside one test*, and the earlier draft of this note
+> conflated them.
+>
+> **Correction — *"an issue 2 machine is one T-state earlier"* is the wrong axis, and it was
+> repeated in three places.** The suite's own results database has the early/late split spanning
+> board issues 2, 3, 3B, 4A, 4B and 6A, with **3B, 4B and 6A appearing in both classes** — and the
+> authors record one machine reporting Late when cold and Early once warm. So the difference is
+> not a property of the board revision at all. The sentence stood in this document twice (the
+> *Still ungraded* row and the Open register row, both now struck) and still stands in
+> `crates/spectrum/src/timing.rs`, which is another agent's file and is routed separately.
+> Choosing `TYPE1` is choosing a **behaviour** that real machines exhibit, not choosing an issue
+> number.
 
 > **Correction — "one contention point (0–6 T-states)" conflated two different quantities, and the
 > conflation cost a wrong number.** That phrasing appeared in this register, in `CHANGELOG.md` and in
@@ -681,6 +876,25 @@ guarantee; it is a hypothesis that needs its own failing case.
 CI now exists (`.github/workflows/ci.yml`), fetches the corpus, and carries a second job whose
 entire purpose is to assert that the conformance gate **refuses to pass** when the corpus is
 absent.
+
+> **That sentence is false on this branch and the register two hundred lines above it has said so
+> the whole time.** Verified on 2026-09-01: `ls .github` reports no such directory, and
+> `git ls-tree -r --name-only HEAD -- .github` is empty at `b3e89ad`. The workflow **is** committed
+> — on the branch **`ci-pending`**, at `1604af7` (*"the workflow, parked on a branch until the token
+> has workflow scope"*) and `55224e0` — and it is not reachable from `m5-followup` and has never
+> run. So the accurate statement is: *the workflow is written, reviewed and parked; no pipeline
+> executes it; the M3 gate remains verified locally and enforced nowhere.*
+>
+> **The shape is worse than the wrong sentence.** This document's own headline defect is *"an
+> `#[ignore]`d gate that no pipeline executes is not a gate"*, and here the remedy paragraph
+> asserts the remedy shipped while the Open register, `:528` and the row in *Open — the
+> authoritative register*, all say it did not. Three places, one fact, and the one a reader reaches
+> first is the one that is wrong. A remedy sentence is a **claim about the present**; the register
+> is the record of it; when they disagree the register wins, and the remedy sentence should have
+> deferred to it rather than restated it in the past tense.
+>
+> Corrected here rather than deleted, because a reader who acted on *"CI now exists"* — by not
+> checking whether their change was gated anywhere — needs to find out that they did.
 
 ### Comments rot at milestone boundaries, so the sweep belongs in "done"
 
@@ -911,6 +1125,49 @@ the beginning of the investigation and never its result — which is the same ru
 already applies at the other end of a mutation run, where *"it landed"* must be proven before a
 verdict is trusted.
 
+> **A second instance, and it landed on the same side.** Two mutations of `Clock::advance` — the
+> rollover discarding its overshoot (`frame_t_state = 0` for `-= T_STATES_PER_FRAME`), and `if`
+> for `while` — reddened `timing.rs`'s own unit tests and **nothing** in
+> `crates/spectrum/tests/`, including the file written specifically to drive instructions across
+> the boundary. Derived rather than dismissed, the reason is a fact about the machine: **every
+> multi-T-state `advance` on a 48K is a contention stall, contention exists only between 14335 and
+> 57342, and the largest stall is six — so `advance` can never cross a frame boundary by more than
+> one T-state through the machine.** At a step of one, `= 0` and `-= 69888` are the same
+> assignment and `if` and `while` are the same loop. There is nothing to catch, and a gate written
+> to catch it would have to call `Clock::advance` directly, which is what the unit tests already
+> do.
+>
+> It is the same reason that shapes `frame_boundary.rs` end to end: **around a frame boundary a
+> 48K is always in the border**, so the wrap can never fall inside the fetch window and no
+> instruction can straddle it with contention live on either side. One derivation, two
+> consequences — which is the tell that it is a property rather than a coincidence.
+
+### A window graded against its own constant
+
+`INTERRUPT_T_STATES` moved from 32 to 24 reddened **one test in the entire workspace**, and it was
+a newly written one. The window's own gate —
+`frame_interrupt.rs`'s `the_line_is_held_across_the_whole_window_and_drops_at_its_end` — stayed
+green, and so did `timing_oracle.rs`.
+
+It stayed green because it derives **both** the positions it samples and the value it expects from
+the constant under test: it steps `while frame_t_state() < INTERRUPT_T_STATES`, asserts `/INT` at
+each, then asserts the machine lands exactly on `INTERRUPT_T_STATES`. Every clause moves with the
+constant. It is the keyboard-matrix tautology again — *a test whose expectation is computed by the
+subject is not a weak test; it is a tautology with a cross product attached* — this time with a
+loop rather than a cross product.
+
+**And the near-miss is the sharp part.** The same mutation in the *other* direction, 32 → 33, does
+redden it. Not because the test can see the window move, but because 33 is not a multiple of four,
+so its `NOP`s can no longer land exactly on it and the final `assert_eq!` fails on arithmetic. A
+one-sided pin, held by an accident of divisibility, reading in a run log exactly like a two-sided
+one.
+
+What replaced it is two literals: an instruction that overshoots the top of a frame by **31**
+T-states must have its interrupt accepted at once, and one that overshoots by **32** must miss that
+frame's interrupt entirely and wait for the next. Neither mentions `INTERRUPT_T_STATES`. That is
+the difference in kind this document already records for the keyboard: **a literal table has a
+failing case for the property it appears to test, and a consistency check has none.**
+
 ### Exhaustive on one axis can be weaker than a sample on another
 
 The harness's ALU test was a 256-case proptest; it was replaced with an exhaustive sweep of all
@@ -930,6 +1187,21 @@ Two mutations, each proven to have landed before its verdict was trusted:
 
 The second is the shape of the register-`Q` behaviour this project defers to M4 — a leak of entry
 `F` into a result — and it is invisible to every gate we have.
+
+> **The last clause stopped being true at M2 and the fix is in the very file the table is about.**
+> `crates/z80/tests/alu_flags.rs:34` carries
+> `const ENTRY_FLAG_GRID: [u8; 4] = [0x00, flags::C, !flags::C, 0xFF];`, and its own doc names this
+> exact case — *"a `CP` ORing entry bit 5 for exactly `a=0x3C, operand=0x17` survived that
+> revision … Four values fix it"*. `git log -1 -- crates/z80/tests/alu_flags.rs` is `8021b4f`,
+> which is the M2 merge, so the entry-flag axis was restored **three milestones** before this
+> sentence was last read past.
+>
+> **The table above is honest as history and the concluding sentence is not, and the difference is
+> the whole lesson.** *"The deleted boundary test caught it and the sweep did not"* is a verdict
+> about a run that happened; *"it is invisible to every gate we have"* is a claim about the
+> present tense, and the present tense is what rots. A finding written in the past tense stays
+> true for ever; the same finding generalised into a standing claim acquires an expiry date that
+> nothing enforces. Prefer the past tense unless the standing claim is worth a gate of its own.
 
 **More cases is not more coverage.** A count is a property of the loop; coverage is a property of
 which *dimensions* vary. When replacing a sample with an enumeration, the question to ask is not
@@ -1090,6 +1362,33 @@ uncommitted change to that file, which is an assumption about everything else ha
 — and it is false whenever anyone else is working in it. **A restore must be scoped to what the
 process itself did**, never to what the index happens to hold.
 
+### A harness reported eight survivals while every one of them exited 101
+
+The most dangerous shape a test tool can take is not a wrong verdict. It is **"the suite went red
+and I could not read how" printing as "the guard held"** — and the tool that did it here was the
+mutation driver, built to enforce exactly that rule against everything else.
+
+Eight mutations, all reported **SURVIVED**. All eight had in fact reddened multiple targets, and
+all eight had exited **101**. The driver used `subprocess.run(capture_output=True)`, which routes
+stdout and stderr into two separate pipes; `cargo` prints `Running <target>` on **stderr** and
+`test result: FAILED` on **stdout**. Concatenating the two afterwards destroyed the interleaving
+the parser walked, so it matched nothing, found zero failures, and called that a survival.
+
+**The fix that matters is not the parser.** Merging the streams into one pipe is a one-line change
+and it is the smaller half. The load-bearing change is the assertion the driver now makes about
+itself: **a non-zero exit with nothing parsed raises, and never reports a survival.** So does a
+zero exit with parsed failures. A run the tool could not read is a *failed run*, not a green one,
+and the distinction has to be encoded rather than remembered — because the two are identical from
+the outside, which is the whole reason this document keeps writing the same sentence about exit
+codes.
+
+This is the project's own standing warning about tooling manufacturing false evidence, committed
+by the tool built to enforce it. That is not irony worth enjoying; it is the reason the rule needs
+a mechanism. Three instances are now recorded within these pages — a corpus-absent suite exiting 0
+with 87 passing tests, `cargo test` short-circuiting before the integration gates, and a mutation
+driver reading its own output wrong — and in every one the tool answered a **narrower question than
+the caller asked**, in a form indistinguishable from the wider one.
+
 ### `cargo test` without `--no-fail-fast` answers a different question than the one asked
 
 `cargo test` stops after the first target that fails. The integration gates in
@@ -1113,6 +1412,106 @@ recorded here for the first time; the remedy is identical to the one this projec
 its corpus guards. **Make the tool state what it covered, and assert on that, rather than on its
 verdict.** A count of executed targets, or of executed vectors, is checkable; an exit code is not.
 
+### The interrupt acknowledge is priced per T-state, and it was written down rather than fixed
+
+`crates/spectrum/src/ula.rs` charges every machine cycle's contention **once**, at the moment the
+cycle opens, because every cycle reaches the bus as a transfer callback followed by that cycle's
+own ticks. **The interrupt acknowledge has no transfer callback** — it reads no memory, asserting
+`/IORQ` in place of `/MREQ` — so `crates/z80` delivers it as seven bare `Bus::tick` calls at the
+refresh address, and `Ula::tick` treats each as a standalone internal cycle contending on its own
+account. The hardware performs **one** machine cycle there: M1 stretched by two wait states. On a
+contended `IR` the model would charge seven stalls where it owes one.
+
+**It is not fixed, and the reason it is not fixed is the finding.** On a 48K it cannot be observed
+at all: the ULA holds `/INT` low for the frame's first 32 T-states and contention does not begin
+until 14335, so an accepted interrupt and its acknowledge always land in the top border, where
+every stall is zero whatever the address. **No test can distinguish the two models**, so a fix
+would be an unverifiable guess and a gate for it would assert a number nothing produces. That is
+the same class this document records for the floating bus: *returning a constant is wrong in a way
+that is visible; a plausible guess would be wrong in a way that is not.*
+
+The general rule, which is the part worth carrying: **when a defect is real, understood, and
+currently unobservable, the correct action is to write it down where the register lives — not to
+fix it, and not to leave it in a head.** A guess shipped into a model becomes indistinguishable
+from a measurement the moment the next person reads the code; a recorded item stays an item. This
+project's register exists precisely so that a known-and-unfixable thing cannot quietly become a
+forgotten one.
+
+**M7 is when it stops being unobservable**, and that is why it is recorded now rather than when it
+bites: the 128's frame geometry differs — 70908 T-states, a different interrupt position — and it
+contends banks in whichever slot they are paged into, so an acknowledge on a contended `IR` becomes
+reachable. Whoever does that work should arrive at this already knowing, rather than rediscovering
+a seven-fold overcharge as an unexplained timing error.
+
+### Is this oracle circular? — the shape of the answer, which will be needed again
+
+`tests/timing_oracle.rs` is the first thing in `crates/spectrum` whose expectations this project did
+not write, and the obvious objection is the right one to raise: **the suite's author writes his own
+emulator, and his page says it passes all the tests.** Read alone, that is exactly the shape that
+would make the corpus worthless — a table fitted to an emulator, graded against an emulator.
+
+Three things answer it, and **none of them requires believing the author**:
+
+1. The expectations are attributed to runs on real Spectrums, in as many words.
+2. The results database is hardware-only **by policy** — *"Only submit results from genuine
+   hardware no emulators!"*
+3. **Decisively: the file carries two tables, and twenty-five of twenty-eight submitted machines,
+   from nine independent people, sort cleanly into exactly those two classes.** A table fitted to
+   one emulator has no reason to predict a *second* class of machine that emulator does not
+   implement, and no reason for twenty-five real boards to fall into the two rather than scatter.
+
+**It is the third that carries the weight, and the reason generalises past this corpus.** The first
+two are assertions by the party whose independence is in question — worth having, worth nothing on
+their own. The third is a **structural** property of the artefact: it predicts something the
+circular hypothesis gives no account of. That is the question to ask of the next external oracle
+this project reaches for — at M7 for the 128, and for anything that grades the AY: *not "did they
+say it came from hardware", but "what does this artefact predict that a fitted table would have no
+reason to predict?"*
+
+And the answer's limits are as reusable as the answer. The corpus **cannot** say whether 14335 or
+14336 is right, because real Spectrums are both; what it can do is **refuse a machine that is
+neither** — and that turned out to be the sharper instrument, because it is the one every emulator
+bug actually trips.
+
+### A correction is not landed until you have grepped for every other copy
+
+This document already records that *a derived figure repeated across documents acquires authority
+it never earned*, and prescribes **re-derive rather than cite**. That rule is right and it is
+incomplete: it tells you what to do when you *find* a figure, and says nothing about what to do
+when you *fix* one.
+
+Both defect classes the previous documentation pass set out to eliminate **recurred inside the
+commit that names them**:
+
+- The mutation-count correction visited `STATUS.md`, `ARCHITECTURE.md` and `MACHINE.md` — and left
+  `README.md`, the repository's front door and the only document a newcomer reads first, carrying
+  the pre-correction figure. The section diagnosing the propagation missed a copy of the thing
+  propagating, and the copy it missed was the most-read one.
+- *"Sixteen tests"* was stale in `STATUS.md` **and** `testdata/README.md` simultaneously, and the
+  pass corrected neither.
+
+> **Checked rather than repeated: the first bullet is history, not the present.** `README.md`
+> carries the corrected figure today — *"four were already red and one survived"* — under a
+> correction block that reaches this same rule independently and reports its own sweep as **not
+> coming back clean**, naming `docs/MACHINE.md:358` as the remaining copy. Two agents arriving at
+> the same rule from opposite ends of the same defect is the strongest evidence for it there is;
+> a third repeating the *finding* without re-checking whether it still held would have been the
+> defect itself, one level up.
+
+**The enforcement half, which costs seconds:** when a figure is corrected, `grep` for it across
+`docs/`, `README.md`, `CHANGELOG.md` and `testdata/` **before publishing**, and fix or route every
+instance. Not "check the related documents" — grep, because the instinct for which documents are
+related is exactly what failed both times.
+
+The deeper point is that *re-derive rather than cite* is a rule about **the document set**, not
+about one file. A correction applied file-by-file leaves the corpus internally inconsistent, and an
+inconsistent corpus is worse than a uniformly wrong one: a reader who checks two sources and finds
+them agreeing stops looking, and a reader who finds them disagreeing has no way to tell which is
+current. This pass found four such disagreements — a CI remedy contradicting its own register two
+hundred lines away, a present-tense claim about gate coverage falsified three milestones earlier, a
+count stale in two files, and a throughput figure with no method in the commit whose thesis is that
+defect — and every one of them was cheaper to grep for than to argue about.
+
 ## How this project is verified
 
 Three tiers, and the distinction between them is the point:
@@ -1127,14 +1526,33 @@ Three tiers, and the distinction between them is the point:
    produces the same kind of untrustworthy tree. And the *runner* must be made to run everything:
    `cargo test` without `--no-fail-fast` stops at the first failing target, so the integration gates
    never execute, which is indistinguishable from their passing. Both are written up above.
+   **A third end has since been found, and it is the driver reading its own output.** Splitting
+   `cargo`'s stdout and stderr into separate pipes destroys the interleaving a parser walks, and
+   the driver reported eight survivals against eight runs that had every one exited 101. So: merge
+   the streams, and make an unreadable run **raise** rather than resolve to a verdict. Written up
+   under *A harness reported eight survivals while every one of them exited 101*.
 3. **Claims about the emitted code are checked in the emitted code.** "It monomorphises" and
    "it lowers to a jump table" are assertions until someone reads the assembly.
 
-Machine-level timing (contention, floating bus) has no such oracle and is verified against
+Machine-level timing (contention, floating bus) had no such oracle and was verified against
 known-demanding software. That is observation, and it is labelled as observation. **M5 is the first
 milestone to run in that mode, and what it produced instead of an oracle is the *ungraded* list —
 the properties nothing covers, written down rather than inferred.** That list is a deliverable of
 the milestone; see *Still ungraded* in the M5 section.
+
+> **Tier 1 now reaches the machine, and that changes the sentence above rather than replacing it.**
+> `tests/timing_oracle.rs` grades contention against T-state counts measured on real Spectrums, so
+> *"machine-level timing has no such oracle"* is past tense for the memory and I/O patterns and
+> present tense for everything else in that clause — the floating bus is still unmodelled and
+> therefore ungradeable, progressive drawing likewise, and the interrupt window's length is now
+> *demonstrated* to be beyond the oracle's reach rather than merely unmeasured.
+>
+> **And the *ungraded* list survived being right.** The item that headed it for two milestones did
+> not close by someone deciding it was fine; it closed because the list named exactly what would
+> settle it — *"a known-timing test program that reports measured T-state counts"* — and somebody
+> went and found one. That is what the list is for, and it is the argument for keeping it when it
+> is uncomfortable: **a well-formed open item is a search query.** It closed into three narrower
+> items, all of them still open, which is the normal shape of progress here and not a disappointment.
 
 ---
 
