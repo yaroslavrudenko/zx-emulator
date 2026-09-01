@@ -67,6 +67,20 @@ page.workspace = true
 # matching on. `z80` was declared and never used; both are dropped rather than left to rot.
 thiserror.workspace = true
 
+# Every other gate in this crate synthesises the ROM it needs — `tests/speed_multiplier.rs` says
+# why in its own header, and `gate-bundled.sh` makes the same move — so until now nothing here
+# was backed by a corpus and nothing here needed the policy.
+#
+# `zx-shot`'s `--hold` ceiling is the exception, and it cannot be made one: the 48K editor's
+# auto-repeat is a property of the *Sinclair* ROM, and eight instructions assembled locally have
+# no keyboard routine to repeat with. So that gate reads `testdata/roms/48.rom`, which makes it a
+# gate that might not run — and `crates/testsupport` is where this workspace decided what happens
+# then: absent is a **failure** naming the fetch instructions, not a skip, unless the absence is
+# declared and not under CI. Its own header asks for exactly this: *"there is one convention here,
+# not one per corpus."*
+[dev-dependencies]
+testsupport.workspace = true
+
 [[bin]]
 name = "zx"
 path = "src/main.rs"

@@ -140,7 +140,7 @@ const EXPECTED_CHORDS: [(KeyCode, Key, Key); 14] = [
 ];
 
 /// Every hotkey, written out by hand.
-const EXPECTED_HOTKEYS: [(KeyCode, Hotkey); 7] = [
+const EXPECTED_HOTKEYS: [(KeyCode, Hotkey); 8] = [
     (KeyCode::F1, Hotkey::ToggleStatus),
     (KeyCode::F2, Hotkey::SaveSnapshot),
     (KeyCode::F3, Hotkey::PlayTape),
@@ -150,6 +150,9 @@ const EXPECTED_HOTKEYS: [(KeyCode, Hotkey); 7] = [
     // The arrow keys are a *choice* — the Spectrum has none, and games disagree about what to
     // read — so the choice needs a key. `docs/M8.md` Decision 13, and `keymap::ArrowScheme`.
     (KeyCode::F7, Hotkey::CycleArrows),
+    // How fast the wall clock is asked to run, which is the only way past a three-minute tape
+    // that `docs/M6.md` Decision 4 leaves open. See `frontend::pacing::Speed`.
+    (KeyCode::F8, Hotkey::CycleSpeed),
 ];
 
 /// What the table under test says about `code`.
@@ -174,8 +177,9 @@ fn select(half_row: usize) -> u16 {
 
 #[test]
 fn a_membrane_binding_reaches_the_key_its_row_names() {
-    // This is the one that catches a **permutation**. `the_membrane_bindings_hold_down_every_key`
-    // below cannot: swapping two rows still presses all forty keys.
+    // This is the one that catches a **permutation**.
+    // `the_membrane_bindings_hold_down_every_key_on_the_membrane` below cannot: swapping two rows
+    // still presses all forty keys.
     for (code, key) in EXPECTED_MEMBRANE {
         assert_eq!(
             binding_for(code),

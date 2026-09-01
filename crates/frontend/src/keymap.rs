@@ -378,8 +378,12 @@ const ARROW_DIRECTIONS: [Direction; 4] = [
 ///   and right and the bottom row for jump, read out of the game's own text at `0x9D31` rather
 ///   than recalled. So the game the owner actually wants to play is **unreachable** through the
 ///   cursor chord, whatever else is true.
-/// - **A Kempston joystick**, which is a separate port rather than the membrane, and which
-///   `crates/spectrum` does not have at all.
+/// - **A Kempston joystick**, which is a separate port rather than the membrane — and which
+///   ~~`crates/spectrum` does not have at all~~ **`crates/spectrum` has**: `spectrum::joystick`,
+///   reached through `Spectrum::joystick_mut`, imported at the top of *this* file and pressed by
+///   [`ArrowTarget::Kempston`] below. The parenthetical was written when the three camps were
+///   first set out and the port did not exist; it survived the port's arrival, and went on
+///   denying a device this very module drives.
 ///
 /// **So a single fixed mapping is wrong for some large fraction of any collection**, and the
 /// two ways of hiding that are both worse than admitting it: binding the arrows to the cursor
@@ -681,6 +685,19 @@ pub enum Hotkey {
     /// A runtime choice rather than a build-time one because the right answer is a property of
     /// the **game**, and one artefact is meant to run more than one game.
     CycleArrows,
+    /// Run the machine at the next multiplier in [`crate::pacing::SPEEDS`].
+    ///
+    /// # A key that cycles, and not a key that is held
+    ///
+    /// A held key is the nicer gesture — press to skip a load, release when the game arrives —
+    /// and it was rejected on where it would have had to live. Everything in [`HOTKEYS`] is an
+    /// **edge**, read once through `is_key_pressed` by a loop `tests/keymap_table.rs` can grade
+    /// as a table; a held modifier is a **level**, read through `is_key_down`, and the only place
+    /// to put that is `main.rs` — the file whose own header says it is *"the untestable part, and
+    /// it is kept thin on purpose"*. It would have been a second input mechanism, in the one file
+    /// no test can reach, to save one keystroke. The cycle costs three presses to reach 8× and one
+    /// to come back, and every part of it is reachable from `cargo test`.
+    CycleSpeed,
 }
 
 /// Host keys the emulator keeps for itself.
@@ -698,6 +715,7 @@ pub const HOTKEYS: &[(KeyCode, Hotkey)] = &[
     (KeyCode::F5, Hotkey::RewindTape),
     (KeyCode::F6, Hotkey::Reset),
     (KeyCode::F7, Hotkey::CycleArrows),
+    (KeyCode::F8, Hotkey::CycleSpeed),
 ];
 
 /// Set `keyboard` to exactly what `is_down` reports, and nothing else.

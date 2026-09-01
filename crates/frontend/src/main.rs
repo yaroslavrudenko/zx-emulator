@@ -5,9 +5,9 @@
 //!     testdata/roms/48.rom testdata/tapes/z80doc.tap
 //! ```
 //!
-//! Files are told apart by extension, in any order: `.rom` builds the machine, `.tap` goes in
-//! the drive, `.z80` and `.sna` are restored over the top. With no ROM named, the machine is
-//! built from `testdata/roms/48.rom`. **Files can also be dropped on the window**, on every
+//! Files are told apart by extension, in any order: `.rom` builds the machine, `.tap` and `.tzx`
+//! go in the drive, `.z80` and `.sna` are restored over the top. With no ROM named, the machine
+//! is built from `testdata/roms/48.rom`. **Files can also be dropped on the window**, on every
 //! target, and go through the same two functions.
 //!
 //! In a browser the same files are named by the query string —
@@ -18,12 +18,19 @@
 //! |---|---|
 //! | `Shift` | `CAPS SHIFT` — either hand |
 //! | `Ctrl` or `Tab` | `SYMBOL SHIFT` — either hand, and `Tab` because a browser keeps `Ctrl`+digit for itself |
-//! | `Backspace`, arrows, `Escape`, `,` `.` `;` `'` `-` `=` `/` | the combination the Spectrum prints on the key |
+//! | `Backspace`, `Escape`, `,` `.` `;` `'` `-` `=` `/` | the combination the Spectrum prints on the key |
+//! | arrows | whichever scheme `F7` has selected — **`5`/`6`/`7`/`8` plus the Kempston port by default**, and *not* the cursor chord the Spectrum prints on those keys |
 //! | `F1` | show or hide the pacing readout |
 //! | `F2` | save a `.z80` |
 //! | `F3` `F4` `F5` | tape play, stop, rewind |
 //! | `F6` | reset |
 //! | `F7` | what the arrow keys send — **starts on the setting for games**, and `F7` reaches the BASIC cursor keys |
+//! | `F8` | how fast the machine runs — 1× → 2× → 4× → 8× → 1×, shown on the readout as `speed` |
+//!
+//! `F8` is the answer to a tape taking three minutes. Nothing is bypassed: the machine is the same
+//! machine and the tape is still the signal `docs/M6.md` Decision 4 insists on, so every loader
+//! works — the wall clock is simply asked to hand over more of itself per tick. Sound is muted
+//! above 1× and the reason is at the push site below.
 //!
 //! The arrows are the one choice this emulator cannot make once and be right about, because the
 //! Spectrum has no arrow keys and games disagree about what to read. See
@@ -46,11 +53,11 @@ use frontend::audio::{self, Resampler};
 use frontend::bundle;
 use frontend::keymap::Hotkey;
 use frontend::media;
-use frontend::pacing::{LossMeter, Pacer, RateMeter};
+use frontend::pacing::{self, LossMeter, Pacer, RateMeter, Speed};
 use frontend::viewport::Viewport;
 use frontend::{host, keymap, palette, viewport};
 use spectrum::screen::{FRAME_HEIGHT, FRAME_WIDTH};
-use spectrum::{Frame, Spectrum};
+use spectrum::{Frame, Model, Spectrum};
 
 /// The ROM used when the command line names none.
 const DEFAULT_ROM: &str = "testdata/roms/48.rom";
@@ -133,11 +140,30 @@ const STATUS_MARGIN: f32 = 6.0;
 /// The line break is inside a phrase rather than at a separator on purpose: `\` at the end of a
 /// Rust string literal eats the newline **and the next line's indentation**, so a break placed
 /// just before `-   drop` silently ate two of that separator's three spaces.
+///
+/// # What it lists is now graded against the list itself
+///
+/// It said `.tap/.z80/.sna` for the fortnight after `.tzx` became loadable: **the most visible
+/// string in the project**, drawn on the status bar from the first frame, describing an emulator
+/// one format smaller than the one drawing it. Width was gated here and contents were not, which
+/// is the narrower version of the mistake this file's own header records — measuring the string
+/// against another string when the thing that failed was the picture.
+///
+/// So `mod tests` below reads [`media::EXTENSIONS`] and asserts this line names every extension a
+/// *running* machine accepts. Not `.rom`: a ROM is what a machine is built **of**, `media::insert`
+/// refuses one outright, and telling somebody to drop a file that will be turned away is worse
+/// than not mentioning it.
 const OPENING_MESSAGE: &str = "Tab or Ctrl = SYMBOL SHIFT   -   arrows are set for games; \
-     F7 for the BASIC cursor keys   -   drop a .tap/.z80/.sna";
+     F7 for the BASIC cursor keys   -   drop a .tap/.tzx/.z80/.sna";
 
 /// Point size of the status text.
 const STATUS_TEXT: f32 = 16.0;
+
+/// What the `snd` field says when no audio device has appeared. See [`Status::queue`].
+const NO_DEVICE: &str = "--";
+
+/// What the `snd` field says when a device is being sent nothing. See [`Status::queue`].
+const MUTED: &str = "mute";
 
 /// The second line [`complain`] draws, under whatever went wrong.
 ///
@@ -199,10 +225,19 @@ async fn main() {
     let mut loss = LossMeter::new(LOSS_WINDOW, get_time());
 
     // The machine's own clock decides its sample rate, and the two machines differ: 3,500,000
-    // against 3,546,900 T-states a second. `ay()` is how a frontend asks which it is holding —
-    // `Spectrum::model()` is still absent, and the AY's presence *is* the 128-ness, so this is
-    // the honest question rather than a workaround for a missing accessor.
-    let machine_hz = audio::cpu_hz(machine.ay().is_some());
+    // against 3,546,900 T-states a second.
+    //
+    // **This asked `ay().is_some()` and excused it in a comment that had stopped being true.**
+    // The comment said `Spectrum::model()` was "still absent" and that "the AY's presence *is*
+    // the 128-ness, so this is the honest question rather than a workaround for a missing
+    // accessor". The accessor landed with M7 — `crates/spectrum/src/lib.rs` records that it was
+    // added because `media::insert`'s `.tzx` arm needed the model to count a turbo loader's
+    // T-states — so the second half of that argument is what is left, and it does not stand on
+    // its own: what sets the clock rate is the *model*, and a machine is not fast because it has
+    // a sound chip. The two agree today and agree by coincidence. Asking the question this line
+    // actually means costs one comparison and stops a +2A — a 128-clocked machine — from turning
+    // on whether its AY was wired.
+    let machine_hz = audio::cpu_hz(machine.model() == Model::Spectrum128);
     // `None` until a device exists. In a browser that is after the first click or keystroke,
     // because an `AudioContext` is suspended until the user has interacted with the page and no
     // desktop browser can be argued out of it; on a desktop it is after the device opens.
@@ -228,6 +263,13 @@ async fn main() {
         let joystick = keymap::apply_with(is_key_down, machine.keyboard_mut(), scheme);
         *machine.joystick_mut() = joystick;
 
+        // Pushed into the pacer every frame from the one place that owns the choice, exactly as
+        // the keyboard and the joystick above are rebuilt from the host every frame. It is a push
+        // rather than a second copy: `Status` decides, `Pacer` obeys, and there is no third place
+        // the two could drift apart in. `keymap::Hotkey` records what shadowing costs.
+        let speed = pacing::SPEEDS[status.speed];
+        pacer.set_speed(speed);
+
         // `try_from_secs_f32` rather than `from_secs_f32`: the latter panics on a negative or
         // non-finite argument, and `get_frame_time` is a number from a windowing system
         // rather than one this program computed.
@@ -252,7 +294,30 @@ async fn main() {
         // frames and then starts counting what it lost, and a consumer that stops taking would
         // make `Spectrum::dropped_samples` climb for a reason that has nothing to do with audio.
         let produced = machine.take_samples();
-        if let Some(resampler) = resampler.as_mut() {
+        // **Above real time the device is fed nothing, and that is a decision rather than an
+        // omission.** A sound card consumes exactly one second per second whatever the pacer
+        // does, so at 8× the resampler offers it eight seconds of samples per wall second: the
+        // queue grows at seven times real time until the ceiling below clamps it, and what comes
+        // out after that is one frame in eight, chosen by an accounting estimate rather than by
+        // anything musical — twenty-millisecond fragments of unrelated moments, which is a fault
+        // noise and not a fast tune.
+        //
+        // The two alternatives were weighed and are worse. *Decimating* the mixed buffer aliases a
+        // 48 kHz signal down by the multiplier and puts tones in it the machine never made — the
+        // same argument `audio::Resampler::feed` already makes against nearest-neighbour picking,
+        // one octave up. *Resampling at the multiplied ratio* — playing the fast-forward
+        // time-compressed — shifts a beeper tune three octaves at 8×, mostly out of the audible
+        // band, and needs the resampler rebuilt on every speed change, discarding the DC filter
+        // history that `feeding_in_pieces_matches_feeding_in_one_go` exists to preserve.
+        //
+        // So: silence, and the readout says `snd mute` rather than leaving a frozen number that
+        // reads as a device still holding samples. `take_samples` above is called either way —
+        // draining is not optional, because the machine buffers two frames and then counts what
+        // it lost, and `Spectrum::dropped_samples` must keep describing the machine rather than
+        // the speed key.
+        if let Some(resampler) = resampler.as_mut()
+            && speed == Speed::REAL_TIME
+        {
             mixed.clear();
             resampler.feed(produced, &mut mixed);
             // **The ceiling is enforced here, on the returned depth, for both targets.**
@@ -405,6 +470,20 @@ fn act(action: Hotkey, machine: &mut Spectrum, status: &mut Status) {
             let scheme = &keymap::ARROW_SCHEMES[status.arrows];
             status.report(format!("arrows: {} - {}", scheme.name, scheme.hint));
         }
+        // The same shape as the arrows above, for the same reason: an index into a table, moved
+        // by one key, named on the bar every frame. The message says what the multiplier *costs*
+        // as well as what it is — somebody who pressed this and lost the sound needs to be told
+        // why by the thing that took it, not by a README they are not reading.
+        Hotkey::CycleSpeed => {
+            status.speed = (status.speed + 1) % pacing::SPEEDS.len();
+            let speed = pacing::SPEEDS[status.speed];
+            let sound = if speed == Speed::REAL_TIME {
+                "sound on"
+            } else {
+                "sound muted"
+            };
+            status.report(format!("speed: {}x real time - {sound}", speed.factor()));
+        }
     }
 }
 
@@ -508,6 +587,11 @@ struct Status {
     visible: bool,
     /// Which of [`keymap::ARROW_SCHEMES`] the arrow keys currently press.
     arrows: usize,
+    /// Which of [`pacing::SPEEDS`] the machine is being run at.
+    ///
+    /// The **only** copy of that choice. [`Pacer`] is handed it every frame rather than keeping
+    /// its own, so there is nowhere for the two to disagree — the frame loop says why.
+    speed: usize,
     /// Samples the device still has to play, or a negative number when there is none.
     ///
     /// On the readout because a silent emulator otherwise gives a person nothing to reason
@@ -532,6 +616,7 @@ impl Status {
         Self {
             visible: true,
             arrows: 0,
+            speed: 0,
             audio_queued: -1,
             message: OPENING_MESSAGE.to_owned(),
             line: String::with_capacity(128),
@@ -541,6 +626,28 @@ impl Status {
     /// Replace the message shown alongside the readout.
     fn report(&mut self, message: String) {
         self.message = message;
+    }
+
+    /// What the `snd` field says.
+    ///
+    /// Three states, and the two that are not a number mean different things. [`NO_DEVICE`] is
+    /// *nothing is listening* — a browser tab before its first click, a machine with no sound
+    /// card — and [`MUTED`] is *something is listening and is deliberately being sent nothing*,
+    /// which is what a multiplier above real time does. Collapsing them would put a silenced
+    /// emulator and a broken one behind the same two characters, which is the confusion
+    /// [`Status::audio_queued`] exists to prevent, one case wider.
+    ///
+    /// The frozen number is the case worth naming: while fast-forwarding nothing is pushed, so
+    /// the last depth would sit on the bar reading as a device still holding samples it has long
+    /// since played.
+    fn queue(&self, speed: Speed) -> String {
+        if speed != Speed::REAL_TIME {
+            MUTED.to_owned()
+        } else if self.audio_queued < 0 {
+            NO_DEVICE.to_owned()
+        } else {
+            self.audio_queued.to_string()
+        }
     }
 
     /// Draw the readout along the bottom of the window.
@@ -577,19 +684,27 @@ impl Status {
         draw_row(1.0, &self.message, LIGHTGRAY);
 
         self.line.clear();
+        // The multiplier is on the bar unconditionally, at `1x` as much as at `8x`. A machine
+        // running eight times too fast and a machine with a broken clock look identical from the
+        // outside, and a field that only appears when something is unusual is a field nobody
+        // learns to look at — the argument `Status::new` already makes about the readout itself.
+        //
+        // `Hz` beside it is the honest corroboration rather than a duplicate: it reports emulated
+        // frames per **wall** second, so `speed 8x` next to `400.0 Hz` is the machine confirming
+        // it, and `speed 8x` next to `120.0 Hz` says this host cannot sustain what it was asked
+        // for. The colour, from `LossMeter`, is the same question a third way.
+        //
         // Infallible: writing to a `String` cannot fail. The `Result` is there for writers
         // that can, and is discarded here rather than handled.
+        let speed = pacing::SPEEDS[self.speed];
         let _ = write!(
             self.line,
-            "{:.1} Hz   dropped {}   frame {}   snd {}   arrows {}",
+            "{:.1} Hz   speed {}x   dropped {}   frame {}   snd {}   arrows {}",
             meter.hz(),
+            speed.factor(),
             pacer.dropped(),
             machine.frames(),
-            if self.audio_queued < 0 {
-                "--".to_owned()
-            } else {
-                self.audio_queued.to_string()
-            },
+            self.queue(speed),
             keymap::ARROW_SCHEMES[self.arrows].name,
         );
 
@@ -718,22 +833,86 @@ mod tests {
     }
 
     #[test]
+    fn the_opening_message_names_every_format_a_drop_can_load() {
+        // The other half of the same string, and the half nothing was watching. Width has been
+        // gated here since the message got its own row; **contents were not**, and the line spent
+        // a fortnight offering three formats to a machine that accepts four — on the status bar,
+        // from the first frame, where it is the most-read sentence this project has.
+        //
+        // Read out of `media::EXTENSIONS` rather than listed again, because a second list is
+        // precisely what went wrong. `.rom` is skipped on purpose: `media::insert` turns one away,
+        // so naming it here would advertise a drop that cannot work.
+        let mut named = 0;
+        for &(extension, kind) in media::EXTENSIONS {
+            if kind == media::Kind::Rom {
+                continue;
+            }
+            assert!(
+                OPENING_MESSAGE.contains(&format!(".{extension}")),
+                "OPENING_MESSAGE offers no .{extension}, so the first thing anybody reads \
+                 describes a smaller emulator than the one they are running:\n{OPENING_MESSAGE}",
+            );
+            named += 1;
+        }
+        // Vacuously true is this file's recurring failure mode — an `EXTENSIONS` that yielded
+        // nothing would satisfy the loop by never entering it. Four is what the table holds
+        // today; the floor only has to be enough to prove the loop ran.
+        assert!(
+            named >= 4,
+            "only {named} droppable formats were checked — the table has shrunk",
+        );
+    }
+
+    #[test]
     fn the_readout_fits_at_every_value_it_can_hold() {
         // A bound rather than a guess: `u64::MAX` frames and losses, `i32::MAX` queued samples,
         // a rate no meter can reach, and whichever arrow scheme has the longest name. Nothing a
         // running emulator can produce is wider than this, so a pass here is a pass for good
         // rather than a pass for a plausible afternoon.
+        //
+        // The speed is bounded by `pacing::SPEEDS` rather than by `u32::MAX`, and that is the
+        // honest bound rather than a convenient one: `Status::speed` is an index into that table
+        // and `Hotkey::CycleSpeed` is modulo its length, so no other multiplier can reach this
+        // line. A table that grew a five-digit entry would redden this test, which is the point.
         let widest = keymap::ARROW_SCHEMES
             .iter()
             .map(|scheme| scheme.name)
             .max_by_key(|name| name.chars().count())
             .expect("ARROW_SCHEMES is never empty");
+        let fastest = pacing::SPEEDS
+            .iter()
+            .map(|speed| speed.factor())
+            .max()
+            .expect("SPEEDS is never empty");
         let line = format!(
-            "{WIDEST_RATE:.1} Hz   dropped {}   frame {}   snd {WIDEST_QUEUE}   arrows {widest}",
+            "{WIDEST_RATE:.1} Hz   speed {fastest}x   dropped {}   frame {}   \
+             snd {WIDEST_QUEUE}   arrows {widest}",
             u64::MAX,
             u64::MAX,
         );
         assert_fits("the readout at its widest", &line);
+    }
+
+    #[test]
+    fn the_sound_field_tells_a_muted_machine_from_one_with_no_device() {
+        // Both are silence and they are different silences, so the two strings must differ and
+        // both must be drawable — this file's whole `snd` field exists because a person cannot
+        // otherwise tell a browser tab before its first click from a broken mixer, and
+        // fast-forward adds a third case to the same confusion.
+        let mut status = Status::new();
+        assert_eq!(status.queue(Speed::REAL_TIME), NO_DEVICE, "no device yet");
+
+        status.audio_queued = 1024;
+        assert_eq!(status.queue(Speed::REAL_TIME), "1024", "a live device");
+
+        let fast = *pacing::SPEEDS.last().expect("SPEEDS is never empty");
+        assert_ne!(fast, Speed::REAL_TIME, "the table has only one entry");
+        assert_eq!(
+            status.queue(fast),
+            MUTED,
+            "fast-forward left the last queue depth on the bar, which reads as a live device",
+        );
+        assert_ne!(MUTED, NO_DEVICE);
     }
 
     #[test]
