@@ -4,6 +4,11 @@
 //! to compare, not a picture to squint at"* — and it is the first thing in `crates/spectrum`
 //! whose expectations were not written by this project.
 //!
+//! **Two machines since 2026-09-02.** Everything down to *The 128 edition* is the 48K gate, which
+//! came first and which the 128 half reuses wherever the machine does not change the answer. The
+//! 128 gate is the last section of the file, and it exists because the first thing it did was find
+//! two wrong constants — `Timing::SPECTRUM_128` was red on **62 of 70** hardware rows.
+//!
 //! # What every other contention gate cannot do
 //!
 //! `contention_magnitude.rs`, `io_contention.rs`, `block_contention.rs` and
@@ -331,6 +336,14 @@
 //!   has since been fetched — read the next section but one before extending this file to it,
 //!   because the obvious extension is wrong.
 //!
+//!   > **Closed 2026-09-02: this file grades the 128 too, and the warning was worth having.**
+//!   > The four tests at the end run the 128 edition against `Model::Spectrum128` — its detection
+//!   > row and its 70 instruction rows, 71 in all, bit-exact. The "obvious extension" really was
+//!   > wrong in exactly the way the section below predicted, and it cost two constants: the first
+//!   > 128 run was red on **62 of 70**. The bullet is kept because everything in it was true of
+//!   > this file for a milestone, and because *"the 128 edition has been fetched"* sat here that
+//!   > whole time while nothing read it.
+//!
 //! # Group 35, which *is* graded — and the constant it is silently coupled to
 //!
 //! ## 35, 36 and 37 are one program, and the difference between them is the screen
@@ -471,6 +484,19 @@
 //! it is documented in `docs/M7.md` Decision 8 with its provenance and its evidence tier, and it
 //! becomes runnable only when a 128 exists to run it on.
 //!
+//! > **This file reads it, since 2026-09-02, and the sentence above was true for a milestone in
+//! > which a 128 did exist to run it on.** That is the finding, and it is larger than the two
+//! > constants it moved: the corpus was fetched, hashed, documented, and left unread, while the
+//! > machine it grades was built, gated and declared done in the same milestone. **A corpus no
+//! > gate reads is not evidence, and having it in `testdata/` makes it look like evidence** —
+//! > `docs/STATUS.md` already records the sibling shape, an `#[ignore]`d gate no pipeline runs.
+//! > When something finally ran it, the 128 was red on **62 of 70** rows.
+//! >
+//! > It is also a `.z80` conversion of a `.szx` Butler shipped, by a third party, and the run is
+//! > what validates the conversion — see
+//! > `the_128_corpus_is_the_128_edition_and_its_one_table_is_not_the_48ks_leftovers`, whose
+//! > detection-row arithmetic a corrupted file could not satisfy.
+//!
 //! **It carries ONE expected-result table, at `0xE200`.** [`EARLY_TABLE`] and
 //! [`LATE_TABLE_OFFSET`] are 48K constants and **must not be pointed at the 128 file**: the bytes
 //! at `0xE400` in the 128 file are the **48K's `TYPE2 (Late)` table, identical over all 512 bytes
@@ -528,6 +554,20 @@
 //! to test, not a constant to adopt. **Do not change it on the strength of this paragraph**: run
 //! the detection row, and let the 128 file say which value it wants.
 //!
+//! > **The detection row was run, and the file said `33..=43` — the derived band, both edges, to
+//! > the T-state.** Every arithmetic claim in the section above held. 32 reads 1 and reddens 62
+//! > of 70; `33..=43` reads 121 and reddens none; 44 stops terminating, for the same nesting
+//! > reason the 48K's 44 does. The instruction to run the row rather than adopt the band was
+//! > exactly right, and following it cost one afternoon and changed two constants.
+//! >
+//! > **Where the section was wrong is its last sentence — "Nothing about 14361 is involved."**
+//! > Nothing about 14361 is involved *in the detection row*, which is what it was reasoning
+//! > about and is true: that row is bit-exact at every offset from 14355 to 14370. But the
+//! > seventy rows it could not see put the offset at **14362 uniquely**, and 14361 reddens six
+//! > of them. So the run settled both numbers, by two different mechanisms, and a reader who
+//! > took "no contention constant should be touched" as a conclusion about the *file* rather
+//! > than about the *row* would have stopped one gate short of the defect.
+//!
 //! # Absence
 //!
 //! Through `crates/testsupport` unchanged, exactly as every other corpus in this workspace:
@@ -538,11 +578,25 @@
 //! mkdir -p testdata/timing
 //! curl -fSL -o testdata/timing/timing_tests_48k_v1.0.z80 \
 //!   https://raw.githubusercontent.com/MrKWatkins/EmulatorTestSuites/main/src/MrKWatkins.EmulatorTestSuites.ZXSpectrum/Timing/timing_tests_48k_v1.0.z80
+//! curl -fSL -o testdata/timing/timing_tests-128k_v1.0.z80 \
+//!   https://softspectrum48.weebly.com/uploads/6/6/7/5/66753101/timing_tests-128k_v1.0.z80
 //! ```
 //!
-//! Provenance, licensing and the SHA-256 are in `docs/MACHINE.md`.
+//! **Two corpora since 2026-09-02, and they come from different places** — the 128 edition is not
+//! in the MrKWatkins mirror, whose `Timing/` directory holds exactly one `.z80`. The 128's ROM
+//! pair is *committed*, unlike either snapshot, so the 128 gates need only the one fetch.
+//! `ci/ci.yml` fetches the 48K file and says in a comment that the 128 one is *"read by no gate,
+//! so it is not fetched here"* — **that comment is now false and the fetch belongs beside it.**
+//! It is left for whoever owns that file; nothing runs it today, because there is no pipeline and
+//! `ci/README.md` says why.
+//!
+//! Provenance, licensing and both SHA-256s are in `testdata/README.md`; `docs/MACHINE.md` carries
+//! the 48K's.
 
 use spectrum::Spectrum;
+use spectrum::memory::BankIndex;
+use spectrum::snapshot::Snapshot;
+use spectrum::timing::Timing;
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -772,7 +826,15 @@ impl TimingType {
 
 /// One row of an expectation table.
 fn expected(image: &Image, timing: TimingType, group: u8, contended: bool) -> Reading {
-    let at = timing.table() + u16::from(group) * TABLE_STRIDE + if contended { 5 } else { 0 };
+    expected_at(image, timing.table(), group, contended)
+}
+
+/// One row of the table based at `table`, in the suite's own layout.
+///
+/// Split from [`expected`] so the 128 section below can read the one table its own file
+/// carries without inventing a second [`TimingType`] that would have exactly one variant.
+fn expected_at(image: &Image, table: u16, group: u8, contended: bool) -> Reading {
+    let at = table + u16::from(group) * TABLE_STRIDE + if contended { 5 } else { 0 };
     read_reading(image, at)
 }
 
@@ -1136,6 +1198,498 @@ fn every_instruction_group_matches_the_hardware_table_contended_and_not() {
          scores zero against that one.\n\
          Groups {NEEDS_FLOATING_BUS:?} are excluded: they read the floating bus, which this \
          machine does not model.",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The 128 edition
+//
+// The same suite, the same author, the same instrument — a different machine. This is kept
+// as its own section rather than generalised into the 48K path above, and the reason is the
+// module documentation's *The 128 edition*: the two files disagree about what their tables
+// mean and about which banners they carry, so one reader serving both would have to be told
+// which file it was looking at on every call, and the trap that costs is a silent comparison
+// against 48K bytes. What *is* shared is everything that does not depend on the machine —
+// `Reading`, `read_reading`, `expected_at`, `decompress_page`, `corpus_file`, the group
+// numbering and the stop address.
+// ---------------------------------------------------------------------------
+
+/// Where the 128 edition of the suite lives under `testdata/`.
+const CORPUS_128: [&str; 2] = ["timing", "timing_tests-128k_v1.0.z80"];
+
+/// The 128's editor ROM, which the machine starts in.
+const ROM_128_EDITOR: [&str; 2] = ["roms", "128-0.rom"];
+
+/// The 128's 48-BASIC ROM, which the suite runs under.
+const ROM_128_BASIC: [&str; 2] = ["roms", "128-1.rom"];
+
+/// The fetch instructions, repeated in the failure message a developer will actually read.
+///
+/// Not the MrKWatkins mirror the 48K file comes from: that mirror's `Timing/` directory holds
+/// exactly one `.z80` and it is the 48K one. The origin is gone — the whole
+/// `zxspectrum4.net/downloads/timing_tests/` directory 302-redirects to the site root — so
+/// this is SoftSpectrum 48's copy, which is the only live one found.
+const FETCH_128: &str = "curl -fSL -o testdata/timing/timing_tests-128k_v1.0.z80 \
+                         https://softspectrum48.weebly.com/uploads/6/6/7/5/66753101/\
+                         timing_tests-128k_v1.0.z80";
+
+/// The one expectation table the 128 file carries.
+const TABLE_128: u16 = EARLY_TABLE;
+
+/// The eight RAM banks a 128 snapshot carries, indexed by bank number.
+type Banks = [[u8; 0x4000]; 8];
+
+/// Base of the address-space slot a 128 pages a selectable bank into.
+const TOP_SLOT_BASE: u16 = 0xC000;
+
+/// Bytes in one reading, as [`read_reading`] lays it out.
+const READING_WIDTH: u16 = 5;
+
+/// The byte the 48K program pokes to choose between its two tables, and the 128 program does
+/// not: its `IF (PEEK 40004)=1 THEN LET k=k+512` can never fire, which is why there is one.
+const TABLE_SELECTOR: u16 = 40004;
+
+/// The corpus and both ROMs this gate needs, or `None` if any is absent.
+fn corpora_128() -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let snapshot = corpus_file(
+        "Richard Butler's 128 timing test suite (timing_tests-128k_v1.0.z80)",
+        CORPUS_128,
+        Some(FETCH_128),
+    )?;
+    let editor = corpus_file("the Sinclair 128 editor ROM", ROM_128_EDITOR, None)?;
+    let basic = corpus_file("the Sinclair 128 48-BASIC ROM", ROM_128_BASIC, None)?;
+    Some((snapshot, editor, basic))
+}
+
+/// Decode the version 3 128K `.z80` in `file` into its eight banks, and its paging port.
+///
+/// Deliberately not through `spectrum::snapshot`, for the reason the 48K reader above gives:
+/// an oracle that reaches its expectations through the crate under test has one more way to
+/// agree with it than it should. The crate's parser *is* used to build the machine — a 128
+/// needs its paging state installed and nothing else can do that — and
+/// `the_crates_parser_and_this_files_own_decoder_agree_on_all_eight_banks` is what keeps the
+/// two honest about each other.
+fn load_z80_128(file: &[u8]) -> (Banks, u8) {
+    assert!(
+        file.len() > 35,
+        "a version 3 .z80 header is at least 86 bytes"
+    );
+    assert_eq!(
+        u16::from_le_bytes([file[6], file[7]]),
+        0,
+        "expected a version 2/3 .z80, whose version-1 PC field is zero"
+    );
+    let extra = usize::from(u16::from_le_bytes([file[30], file[31]]));
+    assert_eq!(extra, 54, "expected a version 3 additional header");
+    assert_eq!(file[34], 4, "expected hardware mode 4 — a 128");
+
+    let mut banks: Banks = [[0; 0x4000]; 8];
+    let mut seen = [false; 8];
+    let mut at = 32 + extra;
+    while at + 3 <= file.len() {
+        let length = usize::from(u16::from_le_bytes([file[at], file[at + 1]]));
+        let page = file[at + 2];
+        at += 3;
+        // The .z80 128K numbering: page N holds RAM bank N - 3.
+        assert!((3..=10).contains(&page), "page {page} is not a 128 page");
+        let bank = usize::from(page - 3);
+        assert!(!seen[bank], "bank {bank} appears twice");
+        seen[bank] = true;
+
+        if length == 0xFFFF {
+            let end = at + 0x4000;
+            assert!(end <= file.len(), "bank {bank} is truncated");
+            banks[bank].copy_from_slice(&file[at..end]);
+            at = end;
+        } else {
+            let end = at + length;
+            assert!(end <= file.len(), "bank {bank} is truncated");
+            decompress_page(&file[at..end], &mut banks[bank], page);
+            at = end;
+        }
+    }
+    assert_eq!(at, file.len(), "trailing bytes after the last page");
+    assert_eq!(seen, [true; 8], "a 128 snapshot carries all eight banks");
+    (banks, file[35])
+}
+
+/// The address space the snapshot's `0x7FFD` byte describes: ROM, bank 5, bank 2, bank N.
+fn paged_image_128(banks: &Banks, paging: u8) -> Image {
+    let mut image = [0_u8; 0x1_0000];
+    image[0x4000..0x8000].copy_from_slice(&banks[5]);
+    image[0x8000..0xC000].copy_from_slice(&banks[2]);
+    image[usize::from(TOP_SLOT_BASE)..].copy_from_slice(&banks[high_bank(paging) as usize]);
+    image
+}
+
+/// The bank the paging port shows in the top slot.
+const fn high_bank(paging: u8) -> u8 {
+    paging & 0b111
+}
+
+/// The snapshot bytes with the header's T-state counter rewritten to mean *top of the frame*.
+///
+/// The suite's numbers are a count of work completed before an interrupt, so they mean nothing
+/// unless the program starts where the hardware starts it. The 48K path reaches that by
+/// building a fresh machine, which is definitionally at frame zero; a 128 has to be *restored*
+/// — its paging cannot be installed any other way — and a restore carries a position with it.
+/// The `.z80` counter is a quarter-frame plus a countdown, so the position is zero at exactly
+/// one encoding: `high = 3`, `low = frame / 4 - 1`. The shipped header decodes to 35453, which
+/// is half a frame away and would put every reading in a different place.
+///
+/// Three header bytes change and no RAM byte does. That the patch landed is not assumed: the
+/// machine is asserted to stand at `(0, 0)` before it is allowed to run.
+fn at_top_of_frame(file: &[u8]) -> Vec<u8> {
+    const LOW_COUNTER: usize = 55;
+    const HIGH_COUNTER: usize = 57;
+    const LAST_QUARTER: u8 = 3;
+
+    let mut bytes = file.to_vec();
+    let low = u16::try_from(Timing::SPECTRUM_128.frame_t_states() / 4 - 1)
+        .expect("a quarter frame is far below 65536")
+        .to_le_bytes();
+    bytes[LOW_COUNTER] = low[0];
+    bytes[LOW_COUNTER + 1] = low[1];
+    bytes[HIGH_COUNTER] = LAST_QUARTER;
+    bytes
+}
+
+/// A 128 holding the snapshot's RAM and paging map, with a **reset** CPU.
+///
+/// The reset registers are the load-bearing part. `restore` installs the header's CPU state
+/// too, and that state has `IFF1` set — so a machine standing at frame T-state 0 accepts
+/// `/INT` before its first instruction and disappears into the ROM's keyboard scan at
+/// `0x02BF`, having run none of the suite. The 48K path never restores a CPU at all; it writes
+/// RAM into a fresh machine, and a fresh machine's interrupts are disabled. This reproduces
+/// that rather than depending on a snapshot's flags.
+fn machine_128(editor: &[u8], basic: &[u8], snapshot: &Snapshot) -> Spectrum {
+    let mut machine = Spectrum::spectrum_128(editor, basic).expect("two page-sized ROMs");
+    let reset = machine.cpu_state();
+    machine
+        .restore(snapshot)
+        .expect("a 128 snapshot into a 128");
+    machine.set_cpu_state(reset);
+    machine
+}
+
+/// The measurement, read through the address space and checked against the bank it must
+/// come out of.
+///
+/// **The paging lock is load-bearing, and this is what says it held.** Group 35's loop puts
+/// `(C << 8) | C` on the port for every `C` it reaches, which sweeps genuine `0x7FFD`
+/// addresses; with the lock clear the program would page its own banks out mid-measurement and
+/// `RESULT` — which lives at `0xEF00`, in the top slot — would be read out of whichever bank
+/// happened to land there. The snapshot sets the lock, its `0x7FFD` byte being `0x30`. This
+/// asserts the machine still agrees after the run rather than trusting that it did.
+fn read_result_128(machine: &Spectrum, banked: u8) -> Reading {
+    let bank = machine.memory().bank(BankIndex::new(banked));
+    for offset in 0..READING_WIDTH {
+        let address = RESULT + offset;
+        assert_eq!(
+            machine.memory().read(address),
+            bank[usize::from(address - TOP_SLOT_BASE)],
+            "the top slot no longer shows bank {banked}, so the paging lock did not hold and \
+             this measurement was read out of the wrong bank"
+        );
+    }
+    read_reading_from(machine, RESULT)
+}
+
+/// Run one test group on a 128 and return what its interrupt handler recorded.
+///
+/// The two-machine dance is the 48K path's, for the 48K path's reason: the ROM's `USR`
+/// prologue moves the clock off zero, so it runs on one machine and its result — RAM and
+/// registers — is installed into a second that is still at the top of a frame. On a 128 the
+/// carrier is eight banks rather than one flat image, because the suite's own program lives
+/// across them.
+fn run_group_128(
+    editor: &[u8],
+    basic: &[u8],
+    snapshot: &Snapshot,
+    banked: u8,
+    group: u8,
+    contended: bool,
+) -> Reading {
+    let mut prologue = machine_128(editor, basic, snapshot);
+    prologue.memory_mut().write(TEST_NUMBER, group);
+    prologue
+        .memory_mut()
+        .write(CONTENDED_FLAG, u8::from(contended));
+
+    let mut state = prologue.cpu_state();
+    state.pc = USR_ENTRY;
+    state.bc = PROGRAM;
+    state.sp = ENTRY_SP;
+    prologue.set_cpu_state(state);
+
+    // `LD HL,nn` / `PUSH HL` / `PUSH BC` / `RET`. Bounded well above four so a ROM that does
+    // something else fails with a position rather than hanging.
+    for _ in 0..16 {
+        if prologue.cpu_state().pc == PROGRAM {
+            break;
+        }
+        prologue.step();
+    }
+    assert_eq!(
+        prologue.cpu_state().pc,
+        PROGRAM,
+        "the 128 ROM's USR prologue did not reach {PROGRAM:#06X}"
+    );
+
+    let mut ram: Banks = [[0; 0x4000]; 8];
+    for (bank, page) in ram.iter_mut().enumerate() {
+        *page = *prologue
+            .memory()
+            .bank(BankIndex::new(u8::try_from(bank).expect("eight banks")));
+    }
+
+    let mut machine = machine_128(editor, basic, snapshot);
+    for (bank, page) in ram.iter().enumerate() {
+        *machine
+            .memory_mut()
+            .bank_mut(BankIndex::new(u8::try_from(bank).expect("eight banks"))) = *page;
+    }
+    machine.set_cpu_state(prologue.cpu_state());
+    assert_eq!(
+        (machine.frames(), machine.frame_t_state()),
+        (0, 0),
+        "the measurement must start at the top of a frame; see at_top_of_frame"
+    );
+
+    let frame = u64::from(Timing::SPECTRUM_128.frame_t_states());
+    while machine.cpu_state().pc != STOP {
+        machine.step();
+        let elapsed = machine.frames() * frame + u64::from(machine.frame_t_state());
+        assert!(
+            elapsed <= T_STATE_CEILING,
+            "128 test group {group} ({}) ran {elapsed} T-states without reaching {STOP:#06X}; \
+             PC={:#06X}. A window of 44 or more does exactly this — the suite's own \
+             synchronisation nests and its delay loop never converges",
+            label(contended),
+            machine.cpu_state().pc
+        );
+    }
+    assert_eq!(machine.fault(), None, "a Spectrum cannot fault");
+
+    read_result_128(&machine, banked)
+}
+
+#[test]
+fn the_128_corpus_is_the_128_edition_and_its_one_table_is_not_the_48ks_leftovers() {
+    // **The positive control, and it could not have been the 48K's.** That one asserts both
+    // hardware banners and then that the two tables differ on almost every row. Against this
+    // file both halves mislead: the 128 program has the 48K's classification lines deleted, so
+    // it carries the `TYPE1` banner and **not** the `TYPE2` one; and the bytes at
+    // `LATE_TABLE_OFFSET` are the 48K's `TYPE2` table left in place, so "the two tables differ"
+    // is true, is 71 rows wide, and says nothing whatever about a 128. A control that passes
+    // for the wrong reason is worse than no control, so this grades what is distinctive about
+    // *this* file, and every clause below can fail.
+    let Some((snapshot, _, _)) = corpora_128() else {
+        return;
+    };
+    let (banks, paging) = load_z80_128(&snapshot);
+    let image = paged_image_128(&banks, paging);
+
+    let has = |banner: &[u8]| image.windows(banner.len()).any(|window| window == banner);
+    assert!(
+        has(TimingType::Early.banner()),
+        "the snapshot must contain the suite's own TYPE1 banner"
+    );
+    assert!(
+        !has(TimingType::Late.banner()),
+        "the 128 program's classification lines are deleted, so a TYPE2 banner here means this \
+         is the 48K file under the 128's name"
+    );
+    assert_eq!(
+        image[usize::from(TABLE_SELECTOR)],
+        0,
+        "the table selector must be zero: it is what makes this file's `k = k + 512` unreachable"
+    );
+
+    // The paging the file describes, which the run depends on and `read_result_128` re-checks
+    // after every group.
+    assert_eq!(paging & 0x20, 0x20, "the snapshot must have paging locked");
+    assert_eq!(high_bank(paging), 0, "the top slot must show bank 0");
+
+    let mut populated = 0_usize;
+    for group in 0..=GROUPS {
+        for contended in [false, true] {
+            let empty = Reading {
+                refresh: 0,
+                iterations: 0,
+                stack_pointer: 0,
+            };
+            if expected_at(&image, TABLE_128, group, contended) != empty {
+                populated += 1;
+            }
+        }
+    }
+    assert!(
+        populated >= 2 * usize::from(GROUPS),
+        "only {populated} rows of the 128 table are populated; this is not the suite's table"
+    );
+
+    // **The conversion is validated here, and that matters because this file is one.** Butler
+    // shipped the 128 edition as `.szx`; what `testdata/` holds is a third party's `.z80`. Its
+    // detection byte is not free to be anything: `R` counts four-T-state iterations of a loop
+    // that fills the frame, so carrying the identical program from a 69888-T-state frame to a
+    // 70908-T-state one must move the reading by `(70908 - 69888) / 4` iterations, modulo the
+    // seven bits `R` has. It does, exactly — which a corrupted or mis-converted file would not.
+    //
+    // What it does *not* establish is the frame length, and the blind spot is the same one
+    // `timing.rs` records: the reading is periodic in 512 T-states of frame, so this separates
+    // 70908 from 69888 and not from 70396 or 71420.
+    let here = expected_at(&image, TABLE_128, DETECTION_GROUP, false);
+    let leftover = expected_at(
+        &image,
+        TABLE_128 + LATE_TABLE_OFFSET,
+        DETECTION_GROUP,
+        false,
+    );
+    let iterations =
+        (Timing::SPECTRUM_128.frame_t_states() - Timing::SPECTRUM_48K.frame_t_states()) / 4;
+    const REFRESH_MODULUS: u32 = 128;
+    assert_eq!(
+        (u32::from(here.refresh) + REFRESH_MODULUS - u32::from(leftover.refresh)) % REFRESH_MODULUS,
+        iterations % REFRESH_MODULUS,
+        "the 128 table's detection row is {here} and the 48K leftovers' is {leftover}; the gap \
+         between them is not the {iterations} loop iterations the two frames differ by, so this \
+         file is not a faithful conversion of the program that produced the 48K's"
+    );
+}
+
+#[test]
+fn the_crates_parser_and_this_files_own_decoder_agree_on_all_eight_banks() {
+    // The seam this gate cannot avoid, graded rather than trusted. Every *expectation* here is
+    // decoded by `load_z80_128` above, which owes the crate nothing — but the *machine* is
+    // built by `spectrum::snapshot`, because a 128's paging state cannot be installed any other
+    // way. So the two decoders meet, and if they disagreed the gate would be comparing one
+    // file's numbers against another file's machine. They do not disagree, on any of 131072
+    // bytes.
+    let Some((snapshot, _, _)) = corpora_128() else {
+        return;
+    };
+    let (banks, _) = load_z80_128(&snapshot);
+    let parsed = spectrum::snapshot::z80::parse(&at_top_of_frame(&snapshot))
+        .expect("the 128 snapshot parses");
+
+    assert_eq!(parsed.model(), spectrum::Model::Spectrum128);
+    for bank in 0..8_u8 {
+        assert_eq!(
+            parsed.bank(BankIndex::new(bank)).map(|page| &page[..]),
+            Some(&banks[usize::from(bank)][..]),
+            "bank {bank} differs between the crate's parser and this file's decoder"
+        );
+    }
+}
+
+#[test]
+fn the_128_reproduces_the_detection_row_its_own_hardware_table_carries() {
+    // The 128's counterpart of `the_machine_reproduces_one_of_the_two_measured_hardware_timings`
+    // — and a stricter test, because this file carries **one** table. The 48K's detection row
+    // has two right answers and a machine picks one; here there is a single number and a
+    // machine either reads it or does not.
+    //
+    // What it grades is the interrupt window and nothing else. The group is `JP (HL)` jumping
+    // to itself in **uncontended** memory, so contention cannot reach it: it is bit-exact at
+    // every offset from 14355 to 14370 and moves only with `interrupt_t_states`. If this row is
+    // the one that reddens, that constant is what to look at, and the seventy rows below are
+    // what to look at if they are.
+    let Some((snapshot, editor, basic)) = corpora_128() else {
+        return;
+    };
+    let (banks, paging) = load_z80_128(&snapshot);
+    let image = paged_image_128(&banks, paging);
+    let parsed = spectrum::snapshot::z80::parse(&at_top_of_frame(&snapshot))
+        .expect("the 128 snapshot parses");
+
+    let want = expected_at(&image, TABLE_128, DETECTION_GROUP, false);
+    let got = run_group_128(
+        &editor,
+        &basic,
+        &parsed,
+        high_bank(paging),
+        DETECTION_GROUP,
+        false,
+    );
+    assert_eq!(
+        got, want,
+        "the 128's detection row disagrees with the file's own.\n  measured here : {got}\n  \
+         the 128 table : {want}\nThis row is a function of `Timing::SPECTRUM_128`'s \
+         interrupt_t_states and of nothing else: 33..=43 reads the table's value, 32 and below \
+         read 1, and 44 and above never terminate."
+    );
+}
+
+#[test]
+fn every_128_instruction_group_matches_the_hardware_table_contended_and_not() {
+    // Seventy more numbers, each a whole frame of a **128's** contention integrated over
+    // hundreds of iterations, and not one of them derived from this crate's contention phase,
+    // its delay pattern or its four-case I/O rule.
+    //
+    // These are the rows that pin `first_contended_t_state`. Swept against this table with the
+    // window held inside its band, `14362` is the unique zero: 14360 leaves 9 disagreeing,
+    // 14361 — the figure this crate shipped until 2026-09-02 — leaves 6, 14363 leaves 5, 14364
+    // leaves 10 and 14365 leaves 13.
+    let Some((snapshot, editor, basic)) = corpora_128() else {
+        return;
+    };
+    let (banks, paging) = load_z80_128(&snapshot);
+    let image = paged_image_128(&banks, paging);
+    let parsed = spectrum::snapshot::z80::parse(&at_top_of_frame(&snapshot))
+        .expect("the 128 snapshot parses");
+    let banked = high_bank(paging);
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut compared = 0_usize;
+    let mut readings: Vec<Reading> = Vec::new();
+    for group in 1..=GROUPS {
+        assert!(
+            !NEEDS_FLOATING_BUS.contains(&group),
+            "group {group} needs a floating bus and must not be in the graded range"
+        );
+        for contended in [false, true] {
+            let want = expected_at(&image, TABLE_128, group, contended);
+            let got = run_group_128(&editor, &basic, &parsed, banked, group, contended);
+            readings.push(got);
+            compared += 1;
+            if got != want {
+                failures.push(format!(
+                    "  group {group:2} {:<11}  want {want}   got {got}",
+                    label(contended)
+                ));
+            }
+        }
+    }
+
+    assert_eq!(
+        compared,
+        2 * usize::from(GROUPS),
+        "every group must be run in both forms"
+    );
+
+    // The assertion whose failure means "I was not looking at the thing", carried over from the
+    // 48K gate for the same reason: every number above is read out of the guest's own RAM, so a
+    // run in which the program never executed would report whatever was already there,
+    // identically, seventy times. The observed spread is 60 distinct iteration counts.
+    let mut distinct: Vec<u16> = readings.iter().map(|reading| reading.iterations).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert!(
+        distinct.len() >= 20,
+        "only {} distinct loop counts across {compared} groups — the test program is not running",
+        distinct.len()
+    );
+
+    assert!(
+        failures.is_empty(),
+        "{} of {compared} groups disagree with the 128 hardware table.\n{}\n\
+         Take the detection row first: if it is green, this is the contention phase and \
+         `Timing::SPECTRUM_128::first_contended_t_state` is what to sweep. Groups \
+         {NEEDS_FLOATING_BUS:?} are excluded — they read the floating bus, which this machine \
+         does not model.",
         failures.len(),
         failures.join("\n")
     );

@@ -282,7 +282,7 @@ carried a fictional one before — see the note under the ROM section.
 
 ---
 
-## `testdata/timing/` — the 48K timing test suite
+## `testdata/timing/` — the timing test suites, 48K and 128
 
 **The machine-level oracle**, and the first thing in `crates/spectrum` whose expected numbers
 were not written by this project. `timing_tests_48k_v1.0.z80` is Richard Butler's 48K timing test
@@ -330,6 +330,68 @@ window's length is still ungraded.
 **The row counts above are not interchangeable.** Everything measured before group 35 was measured
 against 68 rows and is quoted at 68; only the three I/O rows ran against 70. `docs/MACHINE.md`'s
 mutation table keeps both denominators visible for that reason.
+
+> **One clause above is out of date and is left standing because a reader may have acted on it:**
+> *"the interrupt window's length is still ungraded."* It is graded, on both machines, as a **band**
+> — `17..=32` on a 48K and `33..=43` on a 128 — by sweeping it against each suite's own detection
+> row. What remains ungraded is *which point inside the band* each machine ships, and that is a
+> narrower and still-honest claim. See `crates/spectrum/src/timing.rs`.
+
+## `timing_tests-128k_v1.0.z80` — the 128 edition, and the file that caught a wrong constant
+
+**The same suite, the same author, a different machine — and it sat in this directory unread by any
+gate from 2026-09-01 until 2026-09-02.** When something finally ran it, the 128 was red on **62 of
+70** rows: `Timing::SPECTRUM_128` carried `first_contended_t_state: 14361` where the hardware wants
+**14362**, and an interrupt window of 32 where the hardware wants one in **`33..=43`**. Both are
+corrected, and `crates/spectrum/tests/timing_oracle.rs` now grades all 71 of the file's rows on
+every `cargo test`. **A corpus no gate reads is not evidence; it is a file.**
+
+### Fetching
+
+Not from the MrKWatkins mirror the 48K file comes from — that mirror's `Timing/` directory holds
+exactly one `.z80` and it is the 48K one — and not from the origin, whose whole
+`zxspectrum4.net/downloads/timing_tests/` directory 302-redirects to the site root. The only live
+copy found is SoftSpectrum 48's:
+
+```sh
+mkdir -p testdata/timing
+curl -fSL -o testdata/timing/timing_tests-128k_v1.0.z80 \
+  https://softspectrum48.weebly.com/uploads/6/6/7/5/66753101/timing_tests-128k_v1.0.z80
+shasum -a 256 testdata/timing/timing_tests-128k_v1.0.z80
+```
+
+| | |
+|---|---|
+| Size | 12960 bytes |
+| SHA-256 | `fedc228ddef76cefb7b81dd6e18600cca2fd826fc18b4bc3f773cfdf2e7fffc4` |
+| Verified | 2026-09-02 — hash reproduced, all 71 rows green |
+| Licence | No licence text in the file and none on the page serving it, exactly as for the 48K suite. Fetched, gitignored and not redistributed here; the suite is Richard Butler's |
+
+### It is a conversion, and the run is what validates the conversion
+
+**Butler shipped the 128 edition as `.szx`. What this URL serves is a third party's `.z80`**, so
+"is this file intact?" is a real question and not a formality. The answer is in its own detection
+row, which reads **121**: `R` counts four-T-state iterations of a loop that fills the frame, so
+carrying the identical program from the 48K's 69888-T-state frame to the 128's 70908 must shift the
+reading by `(70908 - 69888) / 4 = 255` iterations, and `255 ≡ -1 (mod 128)` against the 48K's 122.
+It does, exactly — which a corrupted or mis-converted file would not, and which
+`the_128_corpus_is_the_128_edition_and_its_one_table_is_not_the_48ks_leftovers` asserts rather than
+assumes. (It confirms the conversion, not the frame length: the reading is periodic in 512 T-states
+of frame, so it separates 70908 from 69888 and not from 70396.)
+
+### Two traps, both of which produce a plausible wrong answer rather than an error
+
+- **It carries ONE expectation table, at `0xE200`.** The bytes at `0xE400` are the **48K's**
+  `TYPE2 (Late)` table, left in place because the 128 edition was made by editing the 48K program.
+  Pointing the 48K gate's table constants at this file compares a 128 against 48K hardware — red for
+  a reason that has nothing to do with a 128, and near enough to look like a small modelling error.
+  The evidence it is one table is in the program rather than the data: the 48K's classification
+  lines are **deleted**, so the selector both files carry can never fire and the byte at 40004 is
+  zero.
+- **The 48K gate's positive control passes on this file for the wrong reason.** It asserts the two
+  tables differ on almost every row, and they do — 71 rows wide — because one of them is a 48K's.
+  A control that passes for the wrong reason is worse than no control, which is why the 128 has its
+  own.
 
 The suite has two tables because **real Spectrums have two behaviours**, one T-state apart, and
 they do not sort by board issue: the authors record a cold machine reporting late and then early
@@ -447,16 +509,91 @@ timings — which is what `.tap` cannot express at any speed and what most comme
 are distributed as. `crates/spectrum/tests/tzx_corpus.rs` sweeps both directories for `*.tzx`
 and grades every file it finds.
 
+**What this corpus is *not* load-bearing for, and it is worth saying before the fetch section
+below explains why there is no fetch.** A reader meeting a `.tzx` corpus that may be empty could
+reasonably conclude that turbo loading is therefore graded by nothing here. That conclusion would be
+wrong: `crates/spectrum/tests/tzx_turbo_load.rs` builds its own turbo tape *and its own 124-byte Z80
+loader* in code and runs both on the real machine, so it needs no corpus at all and runs on every
+clone. **The turbo format is graded without this directory.** What this directory could add, and
+what nothing else can, is a turbo **game** — a file somebody else's tool wrote, loaded by a loader
+nobody here wrote — and that is the residue `docs/STATUS.md` records at T4.
+
 ### There is no fetch command here, and that is the finding rather than an omission
 
 Every other corpus in this file is fetched from a named URL with a recorded SHA-256. This one
 is not, and the reason is worth stating plainly rather than leaving as a blank section:
 
 - **The `.tzx` files that exist in the wild are games**, and game images may not be
-  redistributed — the same rule that keeps `testdata/games/` gitignored and empty.
+  redistributed — the same rule that keeps `testdata/games/` gitignored. **Gitignored is not
+  empty**, and the difference matters here: the directory holds whatever the person running the
+  tests has put in it, and `.gitignore`'s blanket `testdata/**` is what keeps that out of the
+  repository rather than off the machine. This file used to say *"gitignored and empty"*, which
+  described a clone and was read as describing the corpus.
 - **The sources this workspace already uses have none.** `MrKWatkins/EmulatorTestSuites`,
   which supplies the `.tap` corpus and the timing suite, was enumerated in full on 2026-09-01:
   2178 files, **zero** `.tzx`. So the obvious place to point a `curl` at does not have one.
+
+### Where the local files came from, and who owns that record
+
+**`testdata/games/PROVENANCE.md` owns it, file by file** — what each one is, its size and SHA-256
+taken from the bytes on disk, where it came from, and the licensing search behind it. This file
+does not restate that table, because a second copy of a per-file list is a second thing to go stale
+and the sentences here have to stay true whatever the table says. What belongs here is the policy,
+stated whole so it survives the table being wrong:
+
+- **No game in `testdata/games/` is committed or may be redistributed, whatever is in it.**
+  `.gitignore`'s blanket `testdata/**` covers the directory, and two negations re-admit exactly
+  one path — `PROVENANCE.md`, the record itself. Every game there is ignored, and that holds for
+  one file or a dozen.
+
+  **Check that with `git ls-files -o --exclude-standard testdata/games/`, which returns exactly
+  that one path — not with `git check-ignore`, which this bullet used to cite.** Two traps, both
+  met rather than imagined. `check-ignore` **exits 0 for any match, including a negation**: the
+  status cannot tell *ignored* from *explicitly re-included*, and only the rule it prints can.
+  And the argument form changes the answer — `testdata/games` reports
+  `.gitignore:69:!testdata/games/` while `testdata/games/`, with a trailing slash, reports the
+  blanket `.gitignore:3:testdata/**`. The trailing-slash form is what was pasted here as proof,
+  so the evidence said the opposite of what was true while looking exactly like evidence.
+  (`git status --short` collapses the directory to `?? testdata/games/`; only `-uall` shows the
+  one file.)
+- **Availability is not permission, and the distinction is the whole point of keeping a record.** No
+  sourced rights-holder permission was found for anything in that directory. What exists is
+  availability, archives that disagree with each other about it, and undocumented ownership chains.
+  None of it approaches what the Sinclair ROMs rest on — a permission quoted in full above with its
+  author, forum, date, conditions and hedged scope — and the licensing is **weaker still** for a
+  file taken from a commercial ROM-download site, which publishes no rights status to weigh at all,
+  than for one from World of Spectrum or the Internet Archive, which at least state what they
+  attempt and can be quoted.
+- **Not every file has a recoverable origin, and that is written down as a finding rather than
+  smoothed over.** Where an origin could be recovered it was **recovered rather than invented** —
+  from macOS `kMDItemWhereFroms` metadata, the referring site it records, and, in one case, the
+  tape's own `ID 32` archive-info block naming publisher, year and rip author, read out of the file
+  rather than looked up. Where the URL attribute is simply absent, the record says **origin
+  unrecorded** and gives what is known, which is the downloading application and the moment from the
+  `com.apple.quarantine` record. Inventing a plausible archive for those would be exactly the tidy,
+  wrong provenance the record exists to prevent, and a wrong licensing claim is worse than a wrong
+  technical one because it produces a redistribution nobody was entitled to make.
+- **No gate depends on any of it**, which is why the policy can be this strict without costing
+  coverage. `tzx_corpus.rs` sweeps the directory and skips when there is nothing to sweep, and the
+  one other reader of it is `#[ignore]`d as a measurement rather than a gate.
+
+**`PROVENANCE.md` now ships, and the sentence that stood here rested on its not shipping.** It
+read: *"`PROVENANCE.md` is itself covered by `testdata/**`, so it lives beside the corpus it
+documents and a fresh clone has neither. That is the right place for it — a per-file record is
+worth exactly as much as the files it describes — and it is the reason the policy above is written
+out here instead of delegated by reference."* **Both halves of that premise have evaporated.**
+`.gitignore` gained `!testdata/games/` and `!testdata/games/PROVENANCE.md`, so a clone gets the
+record and still none of the games.
+
+**The conclusion survives — on the reason given four sentences above, not on this one.** The policy
+is written out here because this file owns the *policy* and `PROVENANCE.md` owns the *per-file
+record*, and the two have different lifetimes: the sentences here have to stay true whatever the
+table says. That was already the stated reason for not restating the table, and it never needed the
+clone argument, which was a second and weaker justification that happened to be true and has
+stopped being. Recorded rather than quietly deleted, because **a conclusion that outlives its
+stated premise** is a shape this project keeps catching, and the useful part is noticing that the
+premise was doing no work — the paragraph would have read the same with it removed on the day it
+was written.
 
 ### So this sweep is opportunistic, and it says so
 

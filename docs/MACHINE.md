@@ -107,8 +107,17 @@ it is fetching at T-state `t` is exactly what makes the CPU wait if the CPU want
 |---|---|---|
 | T-states per frame | 69888 | 70908 |
 | Interrupt | 50 Hz, at the frame start | same |
+| First contended T-state after `/INT` | 14335 | 14362 |
+| `/INT` held low for | a value in `17..=32`; 32 shipped | a value in `33..=43`; 36 shipped |
 | Contended | `0x4000–0x7FFF` | banks 1, 3, 5, 7 in **any** slot |
 | Screen | bank 5 | bank 5 or shadow bank 7 |
+
+**Every figure in that table is hardware-graded, and the two rows in the middle are the newest.**
+Both machines are measured by `crates/spectrum/tests/timing_oracle.rs` against Richard Butler's
+suites — the 48K edition since 2026-09-01, the 128 edition since 2026-09-02. The interrupt row is
+a **band** on both machines rather than a value: the point each ships is a choice inside it and
+must not be quoted as a measurement. The 128's two figures moved when it was first run; see
+*The 128 was graded, and it was wrong* below.
 
 The contention pattern is a function of `t mod 8` over the 128 T-states of each display line's
 active window, across 192 lines. The delay table is small; getting the *phase* right is the work.
@@ -278,6 +287,18 @@ artefact runnable at all."*
 What it did **not** move: `.tap` cannot represent a turbo loader at any speed, and most commercial
 titles are turbo-loaded. So *"a real game"* remains T4, remains observation, and remains the only
 tier that grades a loader nobody here wrote.
+
+**That last clause is doing more work than it looks, because half of what stood behind it has since
+moved and the other half has not.** `crates/spectrum/tests/tzx_turbo_load.rs` grades a turbo tape by
+the same mechanism this item turns on — a loader, run on the whole machine, measured by what it
+makes of the signal — with a 124-byte loader of our own reading an `ID 11` block at pilot 1400 /
+sync 500 / bit0 500 / bit1 1200 against the ROM's 2168 / 667 / 855 / 1710. So *a turbo block* is no
+longer a thing nothing here can read. What that gate cannot supply is the part the sentence above
+actually names: an **oracle**. The ROM is code this project did not write and its timings are what a
+`.tap` means, and there is no equivalent third party for turbo timings — so that gate rests on a
+signal this project generates and a loader this project wrote. **The turbo *format* is graded; a
+turbo *game* is what stays at T4**, and it stays there for the reason the whole tier exists, which
+is that `testdata/games/` is gitignored and no commercial title can be committed.
 
 ### Item 2 produced a kind of result this plan did not anticipate — a sourced negative
 
@@ -528,7 +549,7 @@ from held bytes with the SHA-256 compared.
 | → 14334 | **RED**, 8 of 68 |
 | → 14336 | **RED**, 7 of 68 — and **64 of 68 against the *other* table**, so it is not "the late machine", it is neither machine |
 | → 14337 | **RED**, 7 of 68 |
-| → 14361 (the 128's figure) | **RED**, 23 of 68 |
+| → 14361 (then believed to be the 128's figure; **it is 14362**, measured 2026-09-02, and the mutation stands as taken) | **RED**, 23 of 68 |
 | `DELAY_PATTERN` last slot `0` → `1` | **RED**, 14 of 68 |
 | `DELAY_PATTERN` all zero — contention removed | **RED**, 38 of 68 |
 | `Ula::fetch` charges a 3-T read instead of an M1 cycle | **RED**, 29 of 68 |
@@ -678,6 +699,72 @@ discover a closed item sitting in a list of open ones.
   > page. That is the state the 48K was in until this section was written, and saying so plainly
   > matters, because the nearest hazard is letting the 48K's new oracle lend the 128 an authority
   > it has not earned.
+
+### The 128 was graded, and it was wrong
+
+**Both bullets above were overtaken, one of them the same day it was written, and the paragraph
+under them was the most confident thing in this document that a measurement then refuted.** The
+128 file *was* obtained — SoftSpectrum 48 serves a copy, fetched 2026-09-01 into
+`testdata/timing/` — and on 2026-09-02 `crates/spectrum/tests/timing_oracle.rs` ran it. The
+machine was red on **62 of 70** rows, and its detection row read 1 where the file wants 121.
+
+| Constant | Shipped | Measured | How it is pinned |
+|---|---|---|---|
+| `first_contended_t_state` | 14361 | **14362** | the unique zero over `14355..=14370`; 14360 leaves 9 rows disagreeing, 14361 leaves 6, 14363 leaves 5, 14364 leaves 10, 14365 leaves 13 |
+| `interrupt_t_states` | 32 | **`33..=43`**, shipping 36 | below 33 the detection row reads 1 and 62 rows redden; from 44 the suite stops terminating |
+
+At `(36, 14362)` all **71** of the file's rows are bit-exact. Every gate was proven able to fail
+by putting each constant back and watching the right test redden — and reverting
+`first_contended_t_state` alone does not even compile, because `screen.rs` pins it to the display's
+first line.
+
+**The other two 128 figures were confirmed in the same pass, by two mechanisms that are not "the
+rows go red".** Every mutation below had its landing asserted before its verdict was read and its
+restore hash-verified after:
+
+| Mutation | The 128 suite |
+|---|---|
+| `DELAY_PATTERN` → `[7,6,5,4,3,2,1,0]`, the +2A/+3's | **RED**, 40 of 70 |
+| → `[6,5,4,3,2,1,0,1]`, last slot only | **RED**, 12 of 70 |
+| → all zeros, contention removed | **RED**, 40 of 70 |
+| `228 × 311` → `224×312`, `224×311`, `228×312`, `228×310`, `227×312`, `229×310`, `230×308`, `232×305` | **the suite never terminates**, all eight |
+
+**That last row is a result and not a failure to test, and it is a sharper instrument than the
+detection row.** The 128 edition ships its delay loop pre-patched to 281 T-states an iteration,
+re-tuning the same self-synchronising race the 48K program runs for a 70908-T-state frame; against
+any other frame length the race never converges and the program never reaches its stop address. So
+the frame length is graded by **termination**, where the detection row — whose reading is periodic
+in 512 T-states — cannot separate 70908 from 70396.
+
+**Three compile-time pins had to be relaxed to run that geometry sweep at all**, and they are worth
+naming because together they are why a wrong frame length could not have been shipped quietly:
+`screen.rs`'s display-line assertion, `timing.rs`'s own `frame_t_states() == 70908`, and — the
+independent one — `snapshot/z80.rs`'s `quarter_t_states(Model::Spectrum128) == 17727`, which
+transcribes the `.z80` format description rather than this crate's constant.
+
+**The second bullet's argument was sound and its conclusion did not follow.** There really is no
+128 results database — `spectrum128k_timing_results.htm` really is a 404 — and the anti-circularity
+leg the 48K enjoys really has no 128 counterpart. What does not follow is *"so the 128 cannot be
+graded"*, and the reason is worth having: **the 48K's grading never came from that database
+either.** The database publishes eight categorical columns — Model, Z80, Board Issue, ULA, Serial,
+TYPE, Notes, Submitter — and **no numbers at all**; what it supplies is the *anti-circularity*
+argument, twenty-five machines sorting into two classes, not the expectations. The expectations
+have always come from the tables inside the file. The 128 file has such a table, it had it all
+along, and the absence of a *results page* was allowed to stand in for the absence of a *corpus*.
+
+**So the tier is now split rather than uniform.** The 128's numbers are **measured** — against a
+table of the author's own hardware runs, in the same file, by the same instrument as the 48K's.
+What the 128 still lacks, and will keep lacking, is the third leg: nobody else's machines have been
+sorted against it, so a systematic error in Butler's own 128 measurements would be invisible here in
+a way the 48K's two-class split makes visible there. That is a real and narrower caveat than *"no
+oracle"*, and it is the one to quote.
+
+**The lesson, which is not about a 128.** A corpus was fetched, hashed, licence-checked, written up
+in three documents — and read by nothing, for a milestone, while the constants it would have
+refuted were being argued over in prose. *"Verification item 2"* was satisfied for the 48K and
+declared unreachable for the 128 on the strength of a missing web page, with the file that answers
+it already on disk. **Running the corpus you already have outranks any argument about what it could
+show.**
 
 ### The one T-state is not a property of a board, which is a finding in itself
 

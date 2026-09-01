@@ -650,9 +650,14 @@ impl BorderTrace {
 /// ```
 ///
 /// The `+ 1` is because the first contended T-state falls a few T-states **before** the line
-/// boundary the display starts on — one on a 48K, three on a 128 — so the line containing it
+/// boundary the display starts on — one on a 48K, two on a 128 — so the line containing it
 /// is the last border line. Both are asserted at compile time below, which is what makes the
 /// `+ 1` a reading of the constants rather than a fudge that happens to work twice.
+///
+/// *(The 128's offset read **three** until 2026-09-02, when `timing_oracle.rs` graded that
+/// machine against hardware and moved `first_contended_t_state` from 14361 to 14362. The line
+/// it lands on is unchanged — both floor to 62 — so nothing this function computes moved, and
+/// the assertion below is what proves that rather than a claim that it did.)*
 fn first_row(timing: Timing, frame_t_state: u32) -> Option<usize> {
     let line = timing.t_states_per_line();
     let first_line_shown = display_first_line(timing) - BORDER as u32;
@@ -680,7 +685,7 @@ const _: () = assert!(
 const _: () = assert!(
     display_first_line(Timing::SPECTRUM_128) * Timing::SPECTRUM_128.t_states_per_line()
         - Timing::SPECTRUM_128.first_contended_t_state()
-        == 3
+        == 2
 );
 const _: () = assert!(display_first_line(Timing::SPECTRUM_48K) >= BORDER as u32);
 const _: () = assert!(display_first_line(Timing::SPECTRUM_128) >= BORDER as u32);

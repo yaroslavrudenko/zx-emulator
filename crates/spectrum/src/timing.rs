@@ -78,7 +78,34 @@
 //! a question with a single hardware answer. This emulator reproduces the majority class, and
 //! `timing_oracle.rs` says which as a fact rather than as an intention.
 //!
-//! ## The 128's numbers: one is solid, one rests on a single ancestor
+//! ## The 128's numbers: all three are now graded, and two of them moved
+//!
+//! **The 128 has its own oracle since 2026-09-02.** `timing_oracle.rs` runs the 128 edition of
+//! the same suite, and it settled both contested figures in one run: `first_contended_t_state`
+//! is **14362**, not the 14361 this file argued for at length, and `interrupt_t_states` lies in
+//! **`33..=43`**, not at the 32 this file held. See [`Timing::SPECTRUM_128`] for the sweeps and
+//! the argument.
+//!
+//! **The frame length and the delay pattern were confirmed too, and by two different mechanisms
+//! — neither of which is "the rows go red".** Stated as measured rather than as expected:
+//!
+//! | Mutation | What the suite does |
+//! |---|---|
+//! | `[6,5,4,3,2,1,0,0]` → `[7,6,5,4,3,2,1,0]`, the +2A/+3's pattern | **40 of 70** disagree |
+//! | → `[6,5,4,3,2,1,0,1]`, last slot only | **12 of 70** |
+//! | → all zeros, contention removed | **40 of 70** |
+//! | `228 x 311` → any of `224x312`, `224x311`, `228x312`, `228x310`, `227x312`, `229x310`, `230x308`, `232x305` | **the suite never terminates** |
+//!
+//! The last row is the interesting one and it is not a failure to test. The 128 edition ships its
+//! delay loop **pre-patched** to 281 T-states an iteration, re-tuning the same self-synchronising
+//! race for a 70908-T-state frame; against any other frame length the race never converges and the
+//! program never reaches its stop address. So the frame is graded by **termination** rather than by
+//! row values — which is a sharper instrument than the detection row, whose blind spot is periodic
+//! in 512 T-states and cannot separate 70908 from 70396.
+//!
+//! **The table below is the pre-run assessment, kept because two of its verdicts were wrong and
+//! the way they were wrong is the useful part.** Corrections are marked inline. Read past it to
+//! *The lineage carried the right number under the wrong name* for what actually happened.
 //!
 //! **None of the 48K's hardware grading transfers.** The 128 figures here are *transcribed*,
 //! and they are not transcribed from equally good sources:
@@ -86,15 +113,38 @@
 //! | Figure | Standing |
 //! |---|---|
 //! | **70908** T-states per frame | **Three independent lineages agree** — the World of Spectrum 128K reference, `MACHINE.md`'s table, and the `.z80` format description's *"17726 in 128K modes"*, whose `(17726 + 1) x 4` is 70908 exactly. `228 x 311` closes it. Corroborated a fourth time from inside `timing_tests-128k_v1.0.z80`: its detection group reads 121 where the 48K's `Late` table reads 122, and `(70908 - 69888) / 4 = 255`, which is `-1 (mod 128)` on a seven-bit `R`. That check is periodic in 512 T-states, so it separates 70908 from 69888 and not from 70396 or 71420 |
-//! | **14361**, the first contended T-state | **One documentary ancestor, and better corroborated than that sounds.** The World of Spectrum 128K reference states it — *"the 6,5,4,3,2,1,0,0 pattern starts at 14361 T states after the interrupt"* — and the Sinclair Wiki repeats it citing nothing, so the *documents* are one witness. But **six independent implementations embed `14362`** as the top-left pixel and derive 14361 from it (Fuse/libspectrum, JSpeccy, rustzx, jsspeccy2, kosarev/zx, ESPectrum), the FAQ is internally self-consistent about it (its `OUT` window of 14365–14368 is +3, and 14365 − 3 = 14362), and **MAME's source carries a comment that a hardware timing-test program requires exactly this offset** — `m_base_offset = -1; // leave it one for now, but according to Timings_Test it must be -3`, and `63 x 228 - 3 = 14361`. Still **no primary measurement was found**, and it remains at a lower tier than 14335, which has a hardware oracle. *(This row read "a single ancestor seen twice" before the survey; that was true of the documents and understated the implementations.)* |
-//! | **32**, the interrupt window | **A hold, not a belief, and it is the number that actually decides the 128 suite's run.** The suite's detection row is a function of the window and **not** of the contention offset; over 70908 T-states, 32 predicts a reading of 1 and `33..=43` predicts the 121 the file carries. The band is *derived* and deliberately not adopted — see [`Timing::SPECTRUM_128`]. The lesson worth carrying past this table: **the number this milestone spent its care on is not the one the first 128 measurement will be sensitive to** |
+//! | **14361**, the first contended T-state | **One documentary ancestor, and better corroborated than that sounds.** The World of Spectrum 128K reference states it — *"the 6,5,4,3,2,1,0,0 pattern starts at 14361 T states after the interrupt"* — and the Sinclair Wiki repeats it citing nothing, so the *documents* are one witness. But **six independent implementations embed `14362`** as the top-left pixel and derive 14361 from it (Fuse/libspectrum, JSpeccy, rustzx, jsspeccy2, kosarev/zx, ESPectrum), the FAQ is internally self-consistent about it (its `OUT` window of 14365–14368 is +3, and 14365 − 3 = 14362), and **MAME's source carries a comment that a hardware timing-test program requires exactly this offset** — `m_base_offset = -1; // leave it one for now, but according to Timings_Test it must be -3`, and `63 x 228 - 3 = 14361`. Still **no primary measurement was found**, and it remains at a lower tier than 14335, which has a hardware oracle. *(This row read "a single ancestor seen twice" before the survey; that was true of the documents and understated the implementations.)* **CORRECTED — the figure is 14362, measured, and the MAME clause is backwards.** MAME *ships* `m_base_offset = -1`, and `63 x 228 - 1` is **14363**: its running constant disagrees with 14361. The comment quoted is MAME **dissenting from its own value**, not corroborating this one, and reading an unactioned `// it must be` note as though it were the shipped number turned a dissent into support — in the row's only non-lineage witness. The hardware sits at 14362, between MAME's 14363 and the FAQ's 14361, agreeing with neither. **The clause that was right is the one about the implementations**: six of them store 14362 and subtract one, and 14362 is the number |
+//! | **32**, the interrupt window | **A hold, not a belief, and it is the number that actually decides the 128 suite's run.** The suite's detection row is a function of the window and **not** of the contention offset; over 70908 T-states, 32 predicts a reading of 1 and `33..=43` predicts the 121 the file carries. The band is *derived* and deliberately not adopted — see [`Timing::SPECTRUM_128`]. The lesson worth carrying past this table: **the number this milestone spent its care on is not the one the first 128 measurement will be sensitive to** — **CORRECTED, and this row is the one that came off best.** Every arithmetic claim in it held: 32 does read 1, `33..=43` does read 121, and the detection row is provably blind to the offset — it is bit-exact at all sixteen offsets swept. Only the *decision* was wrong; the band is adopted now, at **36**. And the lesson needs its second half, because as written it is misleading: the detection row cannot see the offset, but the **seventy other rows can**, and they pin it to 14362 alone. The care spent on `first_contended_t_state` was not wasted — it was spent defending the wrong value |
 //! | **70908**, the frame | **Four independent lineages**, and the strongest figure here. The World of Spectrum reference; the `.z80` format description's *"17726 in 128K modes"*, whose `(17726 + 1) x 4` is exact; **MAME**, which derives it from separate border and retrace constants rather than carrying it (`228` and `311` reached independently); and the 128 timing suite's own detection row. `228 x 311` closes it, and the Sinclair *Servicing Manual*'s `3.54689 MHz` Z80 clock is the divisor it implies. *(One contradiction, isolated and harmless: the FAQ says the interrupt "occurs at 50.01 Hz"; 3546900 / 70908 is **50.021 Hz**. Its own 48K figure checks out, so this is an arithmetic slip in the ancestor rather than a different model.)* |
 //!
-//! The derivation does not transfer either: the 48K's is `64 x 224 - 1`, the 128's would be
-//! `63 x 228 - 3` — a different offset from the line boundary and a different pre-display line
+//! The derivation does not transfer either: the 48K's is `64 x 224 - 1`, the 128's is
+//! `63 x 228 - 2` — a different offset from the line boundary and a different pre-display line
 //! count. **A derivation whose *shape* changes between two machines is a fit, not a
 //! derivation**, so it is written here as a transcription and not dressed up as arithmetic.
-//! The phases differ too: `14335 mod 8 = 7` against `14361 mod 8 = 1`.
+//! The phases differ too: `14335 mod 8 = 7` against `14362 mod 8 = 2`.
+//!
+//! ## The lineage carried the right number under the wrong name
+//!
+//! This is the finding, and it is worth more than the two-T-state correction it produced.
+//!
+//! **14362 is not a new number.** Fuse and rustzx already store it — under the name
+//! `top_left_pixel` — and derive 14361 from it by subtracting one. Six implementations do the
+//! same. So the value the hardware wants was sitting inside the lineage the whole time, one
+//! `- 1` away, and **this crate inherited the conversion rather than the number**. The
+//! documents and the implementations were never really disagreeing about a quantity; they were
+//! agreeing about a quantity and disagreeing about which event it names.
+//!
+//! **The World of Spectrum FAQ and the Sinclair Wiki are one text, and the 128 section carries
+//! zero citations.** The wiki's oldest revision is a logged copy of the FAQ, by the same author
+//! who wrote Fuse. So the "two documents" this file weighed were one document, and it is
+//! **internally inconsistent by exactly two T-states**: it states 14361 while its own geometry
+//! (`63 x 228`) implies 14363. **The hardware sits precisely between them, at 14362** — which
+//! is what an inconsistency of two normally means, and which nobody could have read off either
+//! number alone.
+//!
+//! The general shape, for the next constant that arrives this way: **when a figure and its
+//! derivation disagree in a source, the source has told you its own error bar.** This one did,
+//! in print, and the file that quoted it recorded the figure and not the disagreement.
 //!
 //! One genuinely good property of the source, worth noticing because it is not automatic: it
 //! states the figure **relative to the interrupt**, which is exactly and only the frame the 48K
@@ -191,12 +241,94 @@ impl Timing {
         cpu_hz: 3_500_000,
     };
 
-    /// The 128's geometry. **Transcribed, and its two numbers are not equally supported** — see
-    /// the module documentation's table. 70908 has three agreeing lineages plus an arithmetic
-    /// corroboration from inside the 128 timing suite; **14361 has one ancestor seen twice and
-    /// no primary source**.
+    /// The 128's geometry. **Hardware-graded since 2026-09-02**, by
+    /// `crates/spectrum/tests/timing_oracle.rs`, which runs the 128 edition of the same suite
+    /// that grades the 48K.
     ///
-    /// # `interrupt_t_states` is the highest-leverage number here, and it is **32 as a
+    /// Two of these numbers were **wrong**, and both were argued for at length before the file
+    /// was ever run. The argument is kept below rather than overwritten, because this project
+    /// corrects loudly and because a reader who acted on either number needs to find out.
+    ///
+    /// # What the run settled
+    ///
+    /// | Field | Shipped | Now | Standing |
+    /// |---|---|---|---|
+    /// | `first_contended_t_state` | 14361 | **14362** | **Measured**, and uniquely — the only zero over `14355..=14370` |
+    /// | `interrupt_t_states` | 32 | **36** | **A point chosen inside a measured band.** `33..=43` is bit-exact and nothing here separates its eleven values |
+    /// | `frame_t_states` | 70908 | 70908 | **Measured** — confirmed rather than merely un-refuted |
+    ///
+    /// At `(36, 14362)` every one of the 71 rows the file grades — its detection row and the
+    /// 70 instruction rows, contended and not — is bit-exact. At the shipped `(32, 14361)`,
+    /// **62 of 70 disagree** and the detection row reads 1 where the file wants 121.
+    ///
+    /// ## The two numbers are graded by different rows, which is why one run settled both
+    ///
+    /// The detection group is `JP (HL)` in **uncontended** memory, so contention cannot reach
+    /// it: it moves with the window and with nothing else. The 70 instruction rows integrate a
+    /// whole frame of contention, and they are what pins the offset. Sweeping each axis with
+    /// the other held — every mutation proved to have landed before its verdict was read, both
+    /// files restored and hash-verified afterwards:
+    ///
+    /// | Window, at 14362 | Detection row | The 70 rows |
+    /// |---|---|---|
+    /// | 28..=32 | reads 1 — neither table | 59 disagree |
+    /// | **33..=43** | **121 — the file's own** | **0 disagree** |
+    /// | from 44 | the suite never terminates, spinning in its delay loop at `0xC0DA` | — |
+    ///
+    /// | Offset, at window 36 | The 70 rows |
+    /// |---|---|
+    /// | 14360 | 9 disagree |
+    /// | 14361 — the figure this shipped | 6 disagree |
+    /// | **14362** | **0** |
+    /// | 14363 | 5 |
+    /// | 14364 | 10 |
+    /// | 14365 | 13 |
+    ///
+    /// The detection row is bit-exact at **every** offset in that second sweep, which turns
+    /// this module's own standing prediction — *"the number this milestone spent its care on is
+    /// not the one the first 128 measurement will be sensitive to"* — from a derivation into a
+    /// measurement. It was right about the detection row, and it would have been wrong as a
+    /// claim about the run: the offset is not invisible to the file, it is invisible to **that
+    /// one row**, and the other seventy see it sharply.
+    ///
+    /// # 36 is a choice; the band is the measurement
+    ///
+    /// Nothing here distinguishes 36 from 33 or from 43, and this constant must not be quoted
+    /// as though something did. What picks the point is the 48K's own idiom rather than a new
+    /// one: [`Timing::SPECTRUM_48K`] is graded as the band `17..=32` and ships **32** — the
+    /// value an outside source states, kept because the band admits it. The 128 has two
+    /// outside values, and the hardware has now removed one:
+    ///
+    /// | Value | Who | Against the measured band `33..=43` |
+    /// |---|---|---|
+    /// | 32 | ZEsarUX, rustzx, MAME | **refuted** — outside it, and the detection row is what refutes it |
+    /// | **36** | Fuse/libspectrum, JSpeccy | inside it |
+    ///
+    /// So 36 is the only externally-stated value still standing, and the census that outvoted
+    /// it three to two is the same census that carried 32 and 14361 — both now refuted by this
+    /// file. The corroboration goes one step further, and it is the part worth stating: **36
+    /// entered Fuse in the same 2005 commit as 14362, and that commit simultaneously deleted a
+    /// `FIXME: These are almost certainly wrong` warning covering both.** This module rejected
+    /// both on census grounds. Hardware has now vindicated both.
+    ///
+    /// That is an argument for taking the point *here*. It is **not** evidence that the ULA
+    /// holds `/INT` for exactly 36 T-states; it holds it for somewhere in `33..=43`, and this
+    /// field is a choice inside that.
+    ///
+    /// # What the old comment argued, and the one part of it that was right
+    ///
+    /// **The derivation was correct and a census of implementations overruled it.** The closed
+    /// form below predicted `33..=43` before anything ran, and the hardware landed exactly
+    /// there — both edges. What went wrong was not the reasoning but the decision made against
+    /// it: three implementations saying 32 were read as outweighing an arithmetic prediction,
+    /// and the prediction was the thing that turned out to be a measurement. That is the
+    /// lesson `docs/STATUS.md` carries forward, and it is why the whole argument stays legible
+    /// below rather than being replaced by its conclusion.
+    ///
+    /// The text from here to the end of this comment is the pre-run argument, unedited except
+    /// where a claim in it has since been shown false, which is marked inline.
+    ///
+    /// ## `interrupt_t_states` is the highest-leverage number here, and it was **32 as a
     /// deliberate hold rather than as a belief**
     ///
     /// This field's comment used to read *"inherited from the 48K and measures nothing"*. The
@@ -227,12 +359,25 @@ impl Timing {
     /// | **32**, this value | **1** | **red, and red on every row** |
     /// | any of `33..=43` | **121** | matches |
     ///
+    /// > **Both rows were confirmed exactly, and the first understated itself.** 32 reads 1 and
+    /// > reddens 62 of 70 — not quite *every* row, because eight of the seventy happen to be
+    /// > insensitive to the shift. `33..=43` reads 121 and reddens none. The band's two edges
+    /// > are hardware too: 44 stops terminating, for the same nesting reason the 48K's 44 does.
+    ///
     /// **33..=43 is deliberately not adopted.** It is *derived* — the handler and setup bytes
     /// are diff-identical between the 48K and 128 files, and there is no 128 here to run it on
     /// — so adopting it would promote a prediction to a fact, at the same evidence tier as
     /// 14361 and above what anything has measured. It is a **falsifiable prediction to test the
     /// first time the 128 suite is run**, and it is the first constant to move when that run
     /// goes red — before anyone touches `first_contended_t_state`, which that row cannot see.
+    ///
+    /// > **Overturned by the run, and the paragraph was right about everything except its
+    /// > conclusion.** The band was indeed a prediction rather than a fact, it was indeed the
+    /// > first constant to move, and moving it was indeed what the red run called for. What it
+    /// > got wrong is the last clause: `first_contended_t_state` also had to move, because the
+    /// > seventy rows *this* row cannot see were not green either. Holding a derived band out
+    /// > of the shipped value was the right call while nothing had run it; it stopped being the
+    /// > right call the moment something did.
     ///
     /// `the_128s_detection_row_is_predicted_by_the_interrupt_window` holds the arithmetic.
     ///
@@ -259,17 +404,35 @@ impl Timing {
     /// the pcb on the /int line from the ULA"*, which is a mechanism by which the pulse would be
     /// stretched — but it yields no number.
     ///
+    /// > **The one item in the "for" column was misread, and it must not be re-cited.** The
+    /// > RC-capacitor remark describes the interrupt arriving **later**, not lasting **longer**
+    /// > — a delayed edge, not a stretched pulse — and its speaker disclaims recall in the same
+    /// > sentence. It is evidence for neither window length, and the sentence above turned an
+    /// > unrelated mechanism into support by reading "capacitor" as "stretch". So the pre-run
+    /// > tally was really two against 36 and **nothing** for it. That 36 is nonetheless the
+    /// > value inside the measured band is worth sitting with: the argument for it was bad and
+    /// > its conclusion was right, which is exactly the coincidence that makes a bad argument
+    /// > hard to retire.
+    ///
     /// **So two independent routes point in opposite directions**: the closed form says
     /// `33..=43`, the implementation census says 32 by majority. That disagreement is the
     /// finding, and 32 is what is shipped because it is the one value that is not a promotion —
     /// it is the 48K's, inside the 48K's measured band, inherited and labelled as such.
+    ///
+    /// > **The disagreement was the finding, and the run resolved it against the census.** Of
+    /// > the two routes, the derived one was right and the majority of implementations was
+    /// > wrong — including on `first_contended_t_state`, where the same three-to-two split
+    /// > recurs. **A census counts copies, not witnesses**, and this one was counting a lineage.
     pub const SPECTRUM_128: Self = Self {
         t_states_per_line: 228,
         lines_per_frame: 311,
         frame_t_states: 70908,
-        first_contended_t_state: 14361,
+        // Measured: the unique zero over 14355..=14370 against the 128 timing suite.
+        first_contended_t_state: 14362,
         contended_span: 192 * 228,
-        interrupt_t_states: 32,
+        // A point inside the measured band 33..=43 — see this constant's comment. The band is
+        // the measurement; 36 is a choice, and it is Fuse's.
+        interrupt_t_states: 36,
         cpu_hz: 3_546_900,
     };
 
@@ -319,7 +482,18 @@ impl Timing {
     ///
     /// The interrupt is not an instant. A CPU with interrupts disabled for longer than this
     /// misses the frame entirely, which is a real effect and the reason this is a window
-    /// rather than a single moment. **Ungraded on both machines** — see [`Timing::SPECTRUM_128`].
+    /// rather than a single moment.
+    ///
+    /// **Graded on both machines, as a band rather than a value, and this comment said
+    /// "ungraded on both" for a milestone after each was measured.** `timing_oracle.rs` pins
+    /// the 48K to `17..=32` and the 128 to `33..=43`, in each case by sweeping the window
+    /// against the suite's own detection row. Each machine ships a point inside its own band —
+    /// 32 and 36 — and **neither point is distinguished from its neighbours by anything here**.
+    /// Quote the band, never the point. See [`Timing::SPECTRUM_48K`] and
+    /// [`Timing::SPECTRUM_128`].
+    ///
+    /// The two bands do not overlap, which is a result in itself: whatever a 48K's ULA does
+    /// with `/INT`, a 128's does it for longer.
     #[must_use]
     pub const fn interrupt_t_states(self) -> u32 {
         self.interrupt_t_states
@@ -677,11 +851,10 @@ mod tests {
 
     #[test]
     fn the_128s_detection_row_is_predicted_by_the_interrupt_window() {
-        // **The prediction this milestone hands forward, and the reason it is written as a
-        // test rather than as a sentence.** The 128 file's detection row reads 121. Over 70908
-        // T-states the closed form reaches 121 only from the two-interrupt entry — so the row
-        // is decided by whether a second interrupt nests, which is a property of
-        // `interrupt_t_states` and of nothing else.
+        // **The prediction this milestone handed forward, and the run that collected on it.**
+        // The 128 file's detection row reads 121. Over 70908 T-states the closed form reaches
+        // 121 only from the two-interrupt entry — so the row is decided by whether a second
+        // interrupt nests, which is a property of `interrupt_t_states` and of nothing else.
         const FILE_READING: u32 = 121;
         let frame = Timing::SPECTRUM_128.frame_t_states();
 
@@ -692,20 +865,27 @@ mod tests {
             "one interrupt predicts 1, which is not what the file carries"
         );
 
-        // So the shipped 32 predicts a red run, deliberately: see `SPECTRUM_128`'s comment for
-        // why a derived 33..=43 is not adopted in its place. This assertion is what makes the
-        // prediction falsifiable rather than a note — it goes red the moment somebody changes
-        // the constant, which is exactly when they should be reading that comment.
-        assert_eq!(
-            Timing::SPECTRUM_128.interrupt_t_states(),
-            32,
-            "if this has moved, the 128 suite's detection row is what to check first"
+        // The band the arithmetic predicted and `timing_oracle.rs` then measured, to the
+        // T-state at both edges. The shipped value has to lie inside it: below 33 the machine
+        // takes one interrupt and 62 of the 70 rows go red, and from 44 the suite stops
+        // terminating. Which point inside is a choice — see `SPECTRUM_128`'s comment — so this
+        // asserts the band and deliberately not the value.
+        const SHORTEST_GREEN_WINDOW: u32 = 33;
+        const LONGEST_GREEN_WINDOW: u32 = 43;
+        let window = Timing::SPECTRUM_128.interrupt_t_states();
+        assert!(
+            (SHORTEST_GREEN_WINDOW..=LONGEST_GREEN_WINDOW).contains(&window),
+            "the 128's window is {window}, outside the band the hardware suite is green over"
         );
-        assert_ne!(
-            detection_row(frame, ONE_INTERRUPT),
-            FILE_READING,
-            "32 takes one interrupt, so it predicts the suite goes red on every row"
-        );
+
+        // The lower edge is not folklore either: the suite's handler lets the CPU sample /INT
+        // again exactly 32 T-states after it accepted the last one, so 33 is the shortest
+        // window that is still asserted when it looks.
+        assert_eq!(SHORTEST_GREEN_WINDOW, TWO_INTERRUPTS - ONE_INTERRUPT + 1);
+
+        // And the two machines' bands do not overlap, which is why one `Timing` field cannot
+        // serve both.
+        assert!(Timing::SPECTRUM_48K.interrupt_t_states() < SHORTEST_GREEN_WINDOW);
     }
 
     #[test]
@@ -778,7 +958,10 @@ mod tests {
     fn the_two_machines_differ_in_every_way_the_type_exists_to_express() {
         // `timing_oracle.rs` refuted a single shared contention constant by mutation — 14361
         // on a 48K is red by 23 rows of 68 — so a `Timing` whose two values coincided on any
-        // of these would be expressing something the hardware says is false.
+        // of these would be expressing something the hardware says is false. **Both machines
+        // are now graded, so this is refuted from both ends**: the 128 wants 14362 and a window
+        // in 33..=43, the 48K wants 14335 and a window in 17..=32, and neither band contains
+        // the other machine's point.
         let (a, b) = (Timing::SPECTRUM_48K, Timing::SPECTRUM_128);
         assert_ne!(a.t_states_per_line(), b.t_states_per_line());
         assert_ne!(a.lines_per_frame(), b.lines_per_frame());
@@ -788,24 +971,42 @@ mod tests {
     }
 
     #[test]
-    fn the_128s_contention_phase_is_the_transcribed_one_and_its_derivation_does_not_transfer() {
-        // 14361 is recorded as a transcription and not as arithmetic. The 48K's shape is
-        // `64 x 224 - 1`; applying that shape to the 128 gives a different number, and the
-        // shape that does reach 14361 is `63 x 228 - 3` — a different line count and a
+    fn the_128s_contention_phase_is_the_measured_one_and_its_derivation_does_not_transfer() {
+        // 14362 is `timing_oracle.rs`'s unique zero over 14355..=14370, not arithmetic. The
+        // 48K's shape is `64 x 224 - 1`; applying that shape to the 128 reaches nothing here,
+        // and the shape that does reach 14362 is `63 x 228 - 2` — a different line count and a
         // different offset. A derivation whose shape changes between two machines is a fit.
-        assert_eq!(Timing::SPECTRUM_128.first_contended_t_state(), 14361);
+        let line = Timing::SPECTRUM_128.t_states_per_line();
+        assert_eq!(Timing::SPECTRUM_128.first_contended_t_state(), 14362);
         assert_eq!(64 * 224 - 1, Timing::SPECTRUM_48K.first_contended_t_state());
         assert_ne!(
-            64 * 228 - 1,
+            64 * line - 1,
             Timing::SPECTRUM_128.first_contended_t_state(),
-            "the 48K's derivation applied to the 128's line length does not reach 14361"
+            "the 48K's derivation applied to the 128's line length does not reach 14362"
         );
-        assert_eq!(63 * 228 - 3, Timing::SPECTRUM_128.first_contended_t_state());
+        assert_eq!(
+            63 * line - 2,
+            Timing::SPECTRUM_128.first_contended_t_state()
+        );
+
+        // The source's own two-T-state inconsistency, which is where the answer was hiding.
+        // The World of Spectrum FAQ states 14361 and its own `63 x 228` geometry implies
+        // 14363; hardware is exactly between them, and neither figure alone could say so.
+        assert_eq!(63 * line - 3, 14361, "the figure the one document states");
+        assert_eq!(
+            63 * line - 1,
+            14363,
+            "the figure that document's geometry implies"
+        );
+        assert!(
+            (14361..=14363).contains(&Timing::SPECTRUM_128.first_contended_t_state()),
+            "the measured value sits between the source's two self-inconsistent figures"
+        );
 
         // And the pattern's alignment within its group is not preserved either, which is the
         // concrete reason nothing about the 48K's phase can be reused.
         assert_eq!(Timing::SPECTRUM_48K.first_contended_t_state() % 8, 7);
-        assert_eq!(Timing::SPECTRUM_128.first_contended_t_state() % 8, 1);
+        assert_eq!(Timing::SPECTRUM_128.first_contended_t_state() % 8, 2);
     }
 
     #[test]
