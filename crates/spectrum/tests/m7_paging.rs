@@ -78,7 +78,7 @@ fn a_guest_out_reaches_the_paging_port_and_moves_the_bank_at_c000() {
 /// bank 2 is the one paged into `0xC000`, `0xC000` **is** that same byte. A signature written
 /// there is the program's first opcode, and the next `page()` call overwrites it. That is the
 /// aliasing this gate exists to detect, arriving through the fixture instead of through the
-/// model; `paging_bank_two_into_c000_aliases_the_program` asserts it deliberately.
+/// model; `paging_bank_two_into_c000_aliases_the_program_at_8000` asserts it deliberately.
 const SIGNATURE: u16 = 0xE000;
 
 #[test]

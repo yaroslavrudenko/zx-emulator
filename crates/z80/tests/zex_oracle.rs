@@ -164,18 +164,24 @@ const EXERCISER_SCALE: RunScale = RunScale {
 ///
 /// **An ignored gate that nothing runs is not a gate** — that is this project's own
 /// recorded failure (`Z80_FUSE_REQUIRED` "appeared only in its own definition and a README
-/// example"). So the obligation moves to CI, in release, where the pair costs ~90 s:
+/// example"). The obligation therefore belongs to CI, in release, where the pair costs ~90 s:
 ///
 /// ```sh
 /// cargo test --release -p z80 --test zex_oracle -- --ignored --nocapture
 /// ```
 ///
-/// Run them locally the same way. The harness tests around them are **not** ignored, so
+/// **It has not been discharged, and saying so is the point of this paragraph.** There is no
+/// CI: `.github/` does not exist, the workflow that would install it is parked at `ci/ci.yml`
+/// outside the directory that would run it, and `ci/README.md` opens by saying the repository
+/// has none. So the command above is the whole mechanism — somebody types it — and every
+/// verdict this file has ever produced was produced that way. The harness tests around them
+/// are **not** ignored, so
 /// `cargo test -p z80` still proves the CP/M shell, the report parser and every gate rule
 /// on each run, without needing `testdata/` at all.
 #[test]
-#[ignore = "5.8 billion instructions: ~43 s in release, ~20 min in dev. Run with --release \
-            -- --ignored; CI runs it that way."]
+#[ignore = "5.8 billion instructions: ~43 s in release, ~20 min in dev. Run it with \
+            `cargo test --release -p z80 --test zex_oracle -- --ignored`. Nothing runs that \
+            automatically: this repository has no CI, and `ci/README.md` says why."]
 fn zexdoc_conformance() {
     run_exerciser(&ZEXDOC);
 }
@@ -189,8 +195,9 @@ fn zexdoc_conformance() {
 /// summary — "`zexall` passes, so the undocumented flags are right" — is true of the first
 /// claim and false of the second.
 #[test]
-#[ignore = "5.8 billion instructions: ~43 s in release, ~20 min in dev. Run with --release \
-            -- --ignored; CI runs it that way."]
+#[ignore = "5.8 billion instructions: ~43 s in release, ~20 min in dev. Run it with \
+            `cargo test --release -p z80 --test zex_oracle -- --ignored`. Nothing runs that \
+            automatically: this repository has no CI, and `ci/README.md` says why."]
 fn zexall_conformance() {
     run_exerciser(&ZEXALL);
 }

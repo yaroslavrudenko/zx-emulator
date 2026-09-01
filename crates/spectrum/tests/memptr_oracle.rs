@@ -80,7 +80,7 @@
 //!
 //! | Mutation | Result |
 //! |---|---|
-//! | delete the `wz` write that was then the only one, at `crates/z80/src/instructions.rs:660` | **RED**, exit 101 — failing groups **45 → 143** |
+//! | delete the `wz` write that was then the only one — `crates/z80/src/instructions.rs:660` that day, and `fn indexed_address`'s `self.set_memptr(effective)` at `:795` since the single-writer refactor | **RED**, exit 101 — failing groups **45 → 143** |
 //! | flip **one byte** of the tape's 14390: the `CODE` block's parity | **RED**, exit 101 — the ROM refuses the block, the run stops at [`LOAD_FAILED`] having read no verdict at all |
 //!
 //! The second is this gate's own proof that the program arrives through the loader: `.tap`
@@ -666,8 +666,9 @@ const FAILING_GROUPS: &[&str] = &[];
             exerciser: 127,406,000 instructions / 910,573,713 T-states. Those two are \
             deterministic and reproduce exactly; the wall clock is not, so it carries its \
             conditions — 2.66 s in release and 24.25 s in the dev profile cargo test uses by \
-            default, Apple M3 Max, nothing else running, 2026-09-01. Run with --release -- \
-            --ignored; CI runs it that way."]
+            default, Apple M3 Max, nothing else running, 2026-09-01. Run it with \
+            `cargo test --release -p spectrum --test memptr_oracle -- --ignored`. Nothing runs \
+            that automatically: this repository has no CI, and `ci/README.md` says why."]
 fn the_memptr_exerciser_reports_the_verdict_this_core_earns() {
     let Some(rom) = sinclair_rom() else {
         return;
