@@ -612,9 +612,25 @@ impl<B: Bus> Cpu<B> {
     /// project's own test for whether a rule is real: two of those four instructions are the
     /// only ones any available oracle can see, and the rule covers the other two anyway.
     ///
-    /// `OTIR`/`OTDR` are therefore implemented on the hardware evidence alone and are graded
-    /// by nothing here: the exerciser's self-overwriting `->NOP'` trick has no output
-    /// counterpart, so it has no group for them.
+    /// `OTIR`/`OTDR` are therefore implemented on the hardware evidence alone, and **no oracle
+    /// available to this project grades them**: the exerciser's self-overwriting `->NOP'` trick
+    /// has no output counterpart, so it has no group for them.
+    ///
+    /// > **This used to end *"and are graded by nothing here"*, which is no longer true — and
+    /// > the two halves it ran together are worth keeping apart.** *No oracle group* is a
+    /// > permanent property of the available instruments and still holds. *Graded by nothing*
+    /// > was a statement about this repository, and
+    /// > `crates/z80/tests/memptr_rules.rs` now carries two assertions for these two
+    /// > encodings — one repeating, one stopping.
+    /// >
+    /// > The distinction is not pedantry, because the exemption this paragraph describes is a
+    /// > thing that actually happened once. Reintroducing it **for the output family alone** —
+    /// > wrapping the write below in `if opcode & 0x07 != 0x03` — was run as a mutation on
+    /// > 2026-09-01 in an isolated clone: `cargo test --workspace --no-fail-fast` went red on
+    /// > exactly one test, `a_repeating_otir_takes_its_own_instruction_address_plus_one`, while
+    /// > `cargo test --release -p spectrum --test memptr_oracle -- --ignored` **exited 0**.
+    /// > That is this caveat measured rather than asserted, and it is why the two assertions
+    /// > exist: they are the whole of what stands between this rule and a silent revert.
     fn repeat_block(&mut self, opcode: u8, outcome: BlockOutcome) {
         if !repeats(opcode) || !outcome.repeat {
             return;

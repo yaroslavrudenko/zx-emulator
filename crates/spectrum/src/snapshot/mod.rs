@@ -82,6 +82,7 @@ pub mod z80;
 
 use std::fmt;
 
+use crate::ay::{self, Ay};
 use crate::memory::{BANK_COUNT, BankIndex, PAGE_SIZE};
 use crate::model::Model;
 use crate::screen::Colour;
@@ -193,6 +194,17 @@ pub enum Error {
         page: u8,
     },
 
+    /// A `.z80` file does not carry a page the machine it claims to be has.
+    ///
+    /// The other half of [`Error::DuplicatePage`]'s ruling: a bank carried twice is refused
+    /// because the result would be built from two snapshots, and a bank carried **not at all**
+    /// is refused because the result would be built partly from the machine it is loaded into.
+    #[error("page {page} is missing, and the machine this file claims to be has it")]
+    MissingPage {
+        /// The page number that should have been there.
+        page: u8,
+    },
+
     /// A `.z80` page appears more than once.
     #[error("page {page} appears more than once")]
     DuplicatePage {
@@ -290,6 +302,33 @@ pub struct Snapshot {
     /// banks on a 128 — so a `Snapshot` carrying eight banks without it would describe a
     /// machine it could not restore.
     paging_port: u8,
+    /// The sound chip's register file and address latch, on a machine that has one.
+    ///
+    /// `None` for a 48K, which has no chip — the same shape [`crate::Spectrum::ay`] uses, and
+    /// for the same reason. A 48K `.z80` reserves the bytes anyway and they describe hardware
+    /// the machine does not contain, so reading them into a 48K snapshot would make the round
+    /// trip carry a value nothing can put back.
+    ay: Option<AyState>,
+}
+
+/// What a snapshot carries of the sound chip: its registers and its address latch.
+///
+/// **Fifteen registers, because the chip has fifteen.** `.z80` version 3 reserves sixteen
+/// bytes at offsets 39–54 and the sixteenth describes `R15`, the second I/O port an
+/// AY-3-8910 has and an AY-3-8912 does not. `docs/M7.md` Decision 6 names the hazard: whatever
+/// a model puts there *"round-trips perfectly and is invisible to every round trip"*. Making
+/// this array fifteen long is what stops a sixteenth value existing to round-trip.
+///
+/// The ruling on what the writer emits at offset 54, for whoever lands `.z80`'s 128 support:
+/// **zero**, because the byte describes a register the machine does not have and zero is what
+/// the writer already emits for every other field describing absent hardware. It cannot be
+/// gated by a round trip and must be gated by a transcribed vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AyState {
+    /// The last value written to `0xFFFD`, whatever it was.
+    pub(crate) selected: u8,
+    /// `R0`–`R14`, already masked to the widths the chip has.
+    pub(crate) registers: [u8; ay::REGISTER_COUNT],
 }
 
 impl Snapshot {
@@ -306,7 +345,28 @@ impl Snapshot {
             banks: [const { None }; BANK_COUNT],
             model: DEFAULT_MODEL,
             paging_port: DEFAULT_MODEL.paging_port_at_reset(),
+            ay: None,
         }
+    }
+
+    /// The sound chip's state, on a snapshot of a machine that had one.
+    pub(crate) fn ay(&self) -> Option<&AyState> {
+        self.ay.as_ref()
+    }
+
+    /// Record the sound chip's state.
+    ///
+    /// Takes the chip rather than the numbers, and that is what keeps `snapshot(restore(s))`
+    /// exact. Every register in an [`Ay`] has already been masked to the width the hardware
+    /// has, so a value that comes out of a chip goes back into one unchanged. A setter taking
+    /// a bare array would let a caller store `0xFF` in a four-bit register, and the round trip
+    /// would then return `0x0F` and disagree with itself — a failure about the setter rather
+    /// than about anything the machine does.
+    pub(crate) fn set_ay(&mut self, ay: &Ay) {
+        self.ay = Some(AyState {
+            selected: ay.selected(),
+            registers: *ay.registers(),
+        });
     }
 
     /// Which machine this snapshot describes.
@@ -454,6 +514,64 @@ fn bank_for_page(page: u8) -> Option<BankIndex> {
         .iter()
         .find(|entry| entry.page == page)
         .map(|entry| BankIndex::new(entry.bank))
+}
+
+/// The `.z80` page number a 128's RAM bank is stored as.
+///
+/// **Pages 3 to 10 are banks 0 to 7**, in order — a shift of three and nothing more, which is
+/// what makes this an offset where [`BANKS_48K`] has to be a table. The 48K's three pages are
+/// *neither contiguous nor derivable* from this rule, which `docs/M6.md` Decision 2 gives as
+/// the reason `Snapshot` is bank-keyed rather than address-keyed in the first place.
+const PAGE_128_OFFSET: u8 = 3;
+
+/// The bank a 128 `.z80` page number names, if it names one.
+fn bank_for_page_128(page: u8) -> Option<BankIndex> {
+    let bank = page.checked_sub(PAGE_128_OFFSET)?;
+    (usize::from(bank) < BANK_COUNT).then(|| BankIndex::new(bank))
+}
+
+/// The page number a 128 `.z80` stores `bank` as.
+fn page_for_bank_128(bank: BankIndex) -> u8 {
+    bank.get() + PAGE_128_OFFSET
+}
+
+/// The bank a page number names on `model`.
+///
+/// One function rather than two call sites choosing, because the reader and the writer must
+/// agree about it and a shared helper is what stops them drifting — the same argument
+/// `BANKS_48K`'s own comment makes about its two users.
+pub(super) fn bank_for_page_of(model: Model, page: u8) -> Option<BankIndex> {
+    // No `_` arm: a model added later must be given a page mapping rather than silently
+    // getting none, which would read as "this file carries no banks I recognise".
+    match model {
+        Model::Spectrum48K => bank_for_page(page),
+        Model::Spectrum128 => bank_for_page_128(page),
+    }
+}
+
+/// Every `(bank, page)` a `model`'s file carries, **in the order the file carries them**.
+///
+/// The order is part of the canonical form and not an implementation detail: a 48K file's
+/// blocks go in **address** order — bank 5 at `0x4000` first, then 2, then 0 — which is not
+/// ascending bank order, and `snapshot_vectors.rs` transcribes a file in exactly that order.
+/// A first cut at the 128 writer iterated `Model::banks()`, which is ascending, and silently
+/// reordered every 48K file it wrote. The vector caught it at byte 88, the page number of the
+/// first block.
+///
+/// So the order lives here, once, beside the mapping it belongs to.
+pub(super) fn pages_of(model: Model) -> Vec<(BankIndex, u8)> {
+    match model {
+        Model::Spectrum48K => BANKS_48K
+            .iter()
+            .map(|entry| (BankIndex::new(entry.bank), entry.page))
+            .collect(),
+        Model::Spectrum128 => (0..BANK_COUNT)
+            .map(|bank| {
+                let bank = BankIndex::new(u8::try_from(bank).unwrap_or(0));
+                (bank, page_for_bank_128(bank))
+            })
+            .collect(),
+    }
 }
 
 /// Store an address-ordered 48 KB image into `snapshot`, bank by bank.

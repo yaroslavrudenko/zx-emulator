@@ -24,10 +24,43 @@ description = "macroquad frontend, native and WASM."
 # `--manifest-path crates/frontend/Cargo.toml` works on a member exactly as it would on a
 # detached crate.
 
+[features]
+# Compile a ROM and a game into the binary, so that one artefact boots straight into a game with
+# no arguments and no files to find.
+#
+# **Off by default, and the payload is never committed.** This repository redistributes nothing
+# but the Sinclair ROMs, on a permission quoted in `testdata/README.md` with its author and
+# date; a game is covered by no such permission, so a binary with one compiled in is a
+# redistribution nobody here is entitled to make. The game lives in gitignored
+# `testdata/games/`, and this is something the owner of that file builds on their own machine.
+#
+#     ZX_BUNDLE_ROM=testdata/roms/48.rom \
+#     ZX_BUNDLE_MEDIA=testdata/games/manic.tap \
+#     cargo build --release --manifest-path crates/frontend/Cargo.toml \
+#         --features bundled --bin zx
+#
+# `build.rs` fails the build when the feature is on and neither variable is set, or when the
+# file is missing, empty, or a format this emulator cannot load. A standalone that starts and
+# shows nothing is the outcome the check exists to prevent.
+#
+# > **Consequence, stated here rather than left to be discovered: `--all-features` will fail.**
+# > It turns this feature on without setting either variable, and `build.rs` then does exactly
+# > what it is for. Cargo cannot tell "the user asked for `bundled`" from "the user asked for
+# > everything", so a feature whose payload comes from the environment cannot coexist with that
+# > flag. The trade is deliberate — a silent standalone is worse than a flag combination that
+# > does not apply — and `web/gate.sh` therefore runs clippy without it. Use
+# > `--features bundled` with the variables set, or neither.
+bundled = []
+
 [dependencies]
 # `spectrum` is the whole machine; this crate is a consumer of it and adds no emulation.
 spectrum.workspace = true
 macroquad.workspace = true
+# The browser's half of `src/host.rs`'s seam. Depended on unconditionally and with no `#[cfg]`
+# here, which is the point: both of its entry points compile and behave on every target — empty
+# query string, `Handoff::NoPage` — so this crate stays free of target-conditional code and
+# `tests/portability.rs` can assert that as a property rather than a habit.
+page.workspace = true
 # The same small typed-error crate `spectrum` already uses, so this crate's errors match its
 # siblings' shape. It replaces the `anyhow` the skeleton declared: `anyhow` erases the type,
 # and the two failures here — a malformed file and an unwritable path — are both worth

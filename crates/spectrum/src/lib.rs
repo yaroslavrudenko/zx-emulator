@@ -1,4 +1,9 @@
-//! A ZX Spectrum 48K: paged memory, the ULA, contention, the keyboard, and the frame loop.
+//! A ZX Spectrum — 48K or 128: paged memory, the ULA, contention, the keyboard, the frame
+//! loop, and the two things that make a noise.
+//!
+//! *(This line read "A ZX Spectrum 48K" until M7's sound half. It was true when written and
+//! had been false since the 128 landed, which is the class `docs/STATUS.md` names — every one
+//! of those comments was true when written, and milestone boundaries are when they stop being.)*
 //!
 //! ```no_run
 //! use spectrum::{Key, Spectrum};
@@ -148,7 +153,13 @@
 //! | Paging is what makes the 128 different | `tests/m7_bank_signature.rs` — a program that passes on a 128 **and fails in an asserted way on a 48K**. Without the negative half it could be passing for a reason unrelated to paging |
 //! | The interrupt **acknowledge** as one machine cycle | `tests/m7_acknowledge.rs`, through a real `Cpu<Ula>` with `IR` in a contended bank. **Pinned, not graded, and nothing can grade it** — no software on either machine reaches a contended acknowledge, which `ula`'s documentation re-derives on the 128's own geometry rather than inheriting |
 //! | Floating bus | **nothing** — not modelled; see [`ula`] |
-//! | Progressive drawing: multicolour, border stripes | **nothing** — not modelled; see [`screen`] |
+//! | Progressive drawing: multicolour, Nirvana sprites | **nothing** — not modelled; see [`screen`]. *(This row read "multicolour, **border stripes**". The border half is no longer true — see the four rows below — and the bitmap and attribute halves are unchanged)* |
+//! | The **border** drawn as the beam painted it | `tests/border_stripes.rs` — a write at a known T-state landing in the row the timing model says, hand-derived per machine and asserted on both. The mapping comes out of [`timing::Timing`] and nothing else, so there is no second beam-position model beside contention's |
+//! | That the border change is **visible to a frontend** | `tests/border_stripes.rs`'s `the_frontends_own_loop_shows_the_bands`. **Not a formality**: a record served only for the frame *running* shows a `run_frame(); render();` loop a uniform border every time, while passing every test that renders mid-frame. It did, and that gate is what caught it |
+//! | That a frame with **no** border write is unchanged | `tests/border_stripes.rs` — byte-identical to what [`screen::render`] draws with one colour, over all 81920 pixels. That is what keeps every other screen gate meaning what it meant |
+//! | The border's **resolution** | **one rendered row, derived rather than chosen.** Vertically the frame buffer maps to hardware exactly; horizontally it does not, since [`screen::BORDER`] is a uniform 32 px where the hardware's is not — so a T-state-to-column mapping would invent precision the buffer cannot carry. Measured against the effect that prompted it: the real ROM's loader changes the border every **1884–2159 T-states**, a band every **8.4 to 9.6 rows**, and the rendered result is 27 bands of 9–10 rows |
+//! | A border change **within** a line | **nothing, and it cannot be shown.** Border-multicolour demos rewrite `0xFE` every 8–24 T-states; every one of those writes lands in the same row here and the last before the row begins is the one it gets. `several_writes_inside_one_row_collapse_to_the_last` gates the collapse so it is a known cost |
+//! | That a loading screen **looks right** | **nothing.** `the_roms_own_loader_paints_more_than_one_band` runs the real ROM's `LD-BYTES` against a real tape and asserts the bands are present, more than one, and of the thickness the measurement predicts. That is a long way short of the appearance, which is observation |
 //! | The 32 T-state interrupt window's *length* | **nothing** — pinned against drift, never measured |
 //! | I/O contention through a real `Cpu<Ula>` | `tests/io_contention.rs` — real `IN A,(n)`, `OUT (n),A` and `IN A,(C)` instructions, three forms × four ports × eight contention phases. It was **nothing** until that gate landed; [`ula`]'s unit tests synthesise the tick stream by hand and grade the rule, not the wiring |
 //! | Keyboard ghosting / rollover | **nothing** — not modelled |
@@ -175,6 +186,37 @@
 //! | The `EAR` sampling point within an `IN` cycle | **nothing.** Approximated to the start of the cycle, ≤4 T-states early — far inside the ROM's tolerance, and a turbo loader failing is what would decide it |
 //! | Turbo loaders, and a real game | **nothing.** `.tap` cannot represent a turbo loader at any speed; `.tzx` can and is deferred. A real game is T4 — observation, corpus-dependent, and **not done** |
 //! | `CpuState::wz`, `CpuState::q`, `halted` across a load | **no format carries them.** Enumerated in [`snapshot::UNPRESERVED`] and each one proven to be dropped, because a field dropped in *both* directions is the one defect a round trip is green for |
+//! | The **beeper** reaching the speaker — bit 4 of a `0xFE` write | `tests/m7_beeper.rs` — a guest executing real `OUT`s, and the sample stream compared **by value** against a T-state derivation written before it was run. `ula.rs:528` carried an open finding for a milestone saying this bit was dropped; this is what closed it |
+//! | That a **border** write does not click | `tests/m7_beeper.rs`'s negative control: the same program with one byte changed. Without it, a model driving the speaker from any `0xFE` write, or from the wrong bit, passes the positive case exactly as well |
+//! | `MIC` — bit 3 of a `0xFE` write | **nothing** — not modelled. It is tape *save*, which no milestone has claimed |
+//! | The `0xFE` port's **four output levels** | **nothing** — not modelled. On real hardware `MIC` shifts the speaker's level; the shift is a magnitude with no source this project can adjudicate, so the speaker is two-level. See [`ula`] |
+//! | The AY reached from a guest's `OUT`/`IN` | `tests/m7_ay_ports.rs` — the select latch, the data write, the read-back, and that a 48K answers neither port. The read arm sits *before* the floating-bus fallback, and placed after it the machine would read as "the chip is write-only" |
+//! | The AY's **address decode** — which lines select `0xFFFD` and `0xBFFD` | **nothing, and no source for it was found.** Inferred from the two addresses and from the `0x7FFD` decode's style; `docs/M7.md` calls it that design's least-supported claim, and `ula::AY_PORT_MASK` repeats the label where the constant is. The family gates in `tests/m7_ay_ports.rs` grade this crate against the inference and **cannot** discover the inference is wrong |
+//! | The AY's **noise period** | `ay`'s own tests — run the register and count. It needs no source at all, and its **blind spot is enumerated rather than described**: sweeping all sixteen tap positions, a period test kills ten and cannot tell the remaining six (3, 5, 6, 11, 12, 14) apart. The shipped tap is one of the six |
+//! | The AY's **envelope aliasing** — sixteen shape values, eight behaviours | `ay`'s own tests, and **derived rather than tabulated**: [`ay`] implements the four `CONT`/`ATT`/`ALT`/`HOLD` bits, so the collapse into two blocks of four emerges and the test grades the decode. *Which* two upper shapes they alias onto — 9 and 15 — is a transcription, asserted in a separate test so the two claims are not read as one |
+//! | The AY's **counter periodicity** | `ay`'s own tests, exhaustive over all 4096 tone values, and `tests/m7_ay_stream.rs` for the same claim surviving the trip into the sample stream |
+//! | The AY's **mixer polarity** — active low | `ay`'s own tests and `tests/m7_ay_stream.rs`. A boolean rather than a magnitude, and the distinction the model must keep is that a disabled channel sits at its *level* — silence to a speaker, and not the same statement as "the amplitude is zero" |
+//! | The AY's **register write masks** | **graded against the transcription**, in `ay` and again through a guest's own `OUT`/`IN` in `tests/m7_ay_ports.rs`. Worth having despite that, because software reads registers back, so a wrong mask is a wrong value returned to a guest |
+//! | The AY's **magnitudes** — the volume table, the tone/noise/envelope divisors, the AY:CPU clock ratio | **nothing, and nothing here can.** Each carries its source in its own doc comment and says so. Only the table's *structure* is asserted — monotonic, silence at 0, full scale at 15 — which a reordered or truncated transcription fails and a wrong fourth digit does not |
+//! | `R15`, which `.z80` v3 reserves and the `-8912` does not have | `tests/m7_ay_ports.rs`, **not** a round trip — which is blind to it by construction. [`ay::Ay::register`] returns `None` for it and a guest's read gets the floating bus. The `.z80` writer's byte 54 is ruled in [`snapshot`] and is unreachable until the 128 hardware modes land |
+//! | The **sample stream**'s shape | `tests/m7_ay_stream.rs` — a tone's wave period in samples, derived from the two constants; the envelope as sixteen strictly monotonic levels; the noise varying and not repeating at any short period |
+//! | That the stream is **deterministic** | `tests/m7_ay_stream.rs` and [`audio`]'s own tests. It is what every hash below rests on: a generator whose output depended on when it was asked would make each of them a gate on the consumer's call pattern instead |
+//! | Whether the AY's numbers are **right** | **nothing.** `tests/m7_ay_stream.rs`'s frame hash proves **change** — `docs/MACHINE.md`'s verification item 4, *"does not prove correctness"* — and it is the only recorded-rather-than-derived number in this suite. Its positive control is what keeps it from being a hash of nothing |
+//! | That the AY's hash cannot be falsified by the **beeper** | `tests/m7_ay_stream.rs` — the constraint `docs/M7.md` Decision 6 imposes, as a failing case. The two sources are separate fields of a [`Sample`] and are mixed nowhere in this crate |
+//! | The AY's **generator** state across a load — tone phases, the noise register, the envelope's position | **no format carries them**, so a restore starts them from power-on. A convention chosen for determinism, documented at [`ay::Ay::restore`] and asserted in `tests/snapshot_apply.rs`. It is **not** in [`snapshot::UNPRESERVED`], which is scoped to `CpuState` fields |
+//! | The chip's registers across a load | `tests/snapshot_apply.rs` — R1 over a 128, **and** a direct assertion that they travel, because a `snapshot` that never wrote them and a `restore` that never read them would leave R1 entirely green |
+//! | AY write **timing within the frame** | **nothing.** Music drivers write the chip from the interrupt handler and the audible result depends on when the writes land; no gate measures it |
+//! | The **sample rate** | **derived.** [`timing::Timing::cpu_hz`] divided by [`audio::SAMPLE_PERIOD_T_STATES`]. Both clocks are transcriptions; what is checked is that each implies a 50 Hz frame against its own frame length, which catches a transposed digit and establishes neither figure |
+//! | What **sound costs on the hot path** | **measured, and it is nothing.** [`Ula::tick`], `Ula::contend` and `Ula::advance` are byte-identical to their pre-M7-sound selves — nothing generates audio per T-state. `benches/frame.rs` is the command that exists to keep it that way, and it is the bench `docs/M7.md` Decision 3 recorded as missing |
+//! | Whether it **sounds right** | **nothing.** A human ear, `docs/M7.md`'s T4, and the honest bottom of this table |
+//! | The **Kempston joystick** reached from a guest's `IN` | `tests/kempston.rs` — five switches through a real `IN A,(0x1F)`, on both machines, with the bit layout as five transcribed literals. It also gates that the joystick and the keyboard cannot disturb each other, which is the whole reason a frontend maps arrow keys to a port rather than to the membrane |
+//! | The joystick's **active-high** convention | `tests/kempston.rs` — asserted against the membrane's active-low in one comparison, because a Kempston modelled the keyboard's way round reads `0x1F` idle: every direction and fire held, forever |
+//! | The Kempston **decode** | **nothing, and no source for it was found.** [`joystick::KEMPSTON_PORT_MASK`] matches the canonical address's low byte and deliberately claims nothing about address lines — narrow on purpose, because a decode wider than the evidence takes ports from devices not yet written, and the Beta Disk's FDC register is already known to sit at this address |
+//! | What the joystick's **unused top three bits** read as | **nothing.** Zero here; a bus buffer driving five bits would float the other three. A game misbehaving with the stick idle is the observation that would decide it |
+//! | That a real **game** responds to the joystick | **nothing** — T4, a person and a look |
+//! | A **128 snapshot** surviving a file | `tests/snapshot_apply.rs` — R3 over a 128, all eight banks fingerprinted, and the chip's registers at their transcribed offsets. **This was wrong from M7 until now**: the writer emitted hardware mode `0` for every model, so a 128 became a 48K file carrying three of its eight banks. The information was never missing — `Snapshot::model` existed for exactly this — and the gate's absence is why it survived |
+//! | That teaching the writer about the 128 moved **no 48K byte** | `tests/snapshot_apply.rs` — and it caught a real regression: a first cut iterated banks in ascending order where the canonical form is address order, silently reordering the page blocks of every 48K file |
+//! | A **128 file missing banks** | `tests/snapshot_hostile.rs` — refused. M6's guard compared the parser's bank set against the *slot map*; on a 128 that premise dissolves, so it compares against the **model**'s set instead, and it is scoped to the 128 because a 48K's three banks are always addressable and a missing one is visible without it |
 //!
 //! The rows reading **nothing** are the point of this table. `docs/MACHINE.md` asks for what
 //! is *not* covered to be written down rather than inferred from the absence of a failing
@@ -182,6 +224,9 @@
 
 #![deny(missing_docs)]
 
+pub mod audio;
+pub mod ay;
+pub mod joystick;
 pub mod keyboard;
 pub mod memory;
 pub mod model;
@@ -191,6 +236,9 @@ pub mod tape;
 pub mod timing;
 pub mod ula;
 
+pub use audio::Sample;
+pub use ay::Ay;
+pub use joystick::Joystick;
 pub use keyboard::{Key, Keyboard};
 pub use memory::{Memory, RomSizeError};
 pub use model::Model;
@@ -264,7 +312,18 @@ impl Spectrum {
     }
 
     /// Which machine this is.
-    fn model(&self) -> Model {
+    ///
+    /// # Public because the alternative copies 48 KB to read an enum
+    ///
+    /// `docs/M7.md` listed `Spectrum::model()` under *deliberately absent* — *"nothing asks"* —
+    /// and something now does. The only route that compiled without it was
+    /// `machine.snapshot().model()`, which clones **every RAM bank** to read one discriminant:
+    /// 48 KB on a 48K and 128 KB on a 128, per call.
+    ///
+    /// Additive, and `Model` is already `#[non_exhaustive]`, so the semver cost is the
+    /// addition and nothing more.
+    #[must_use]
+    pub fn model(&self) -> Model {
         self.cpu.bus().memory().model()
     }
 
@@ -335,12 +394,7 @@ impl Spectrum {
     /// the frame — see [`screen`] for what that costs.
     pub fn render(&self, frame: &mut Frame) {
         let ula = self.cpu.bus();
-        screen::render(
-            ula.memory(),
-            ula.border(),
-            screen::flash_phase(self.frames()),
-            frame,
-        );
+        screen::render_border_trace(ula.memory(), ula.border_trace(), self.frames(), frame);
     }
 
     /// The complete CPU state — what a `.z80` or `.sna` snapshot carries.
@@ -397,10 +451,63 @@ impl Spectrum {
         self.cpu.bus_mut().keyboard_mut()
     }
 
+    /// The Kempston joystick.
+    #[must_use]
+    pub fn joystick(&self) -> Joystick {
+        self.cpu.bus().joystick()
+    }
+
+    /// The Kempston joystick, mutably — how a frontend pushes it.
+    ///
+    /// The cleanest of the three ways a Spectrum game can be steered, and the only one that
+    /// cannot collide with the keyboard: it is a port rather than part of the membrane, so a
+    /// frontend mapping arrow keys to it does not have to know which letters the game itself
+    /// reads. See [`joystick`].
+    pub fn joystick_mut(&mut self) -> &mut Joystick {
+        self.cpu.bus_mut().joystick_mut()
+    }
+
     /// The colour last written to the border.
     #[must_use]
     pub fn border(&self) -> Colour {
         self.cpu.bus().border()
+    }
+
+    /// The sound chip, on a machine that has one.
+    ///
+    /// `None` on a 48K, which does not contain it. The `Option` is the machine's shape and
+    /// not a caller's convenience: a 48K's `OUT (0xBFFD)` reaches nothing and its
+    /// `IN (0xFFFD)` floats, and an accessor that returned a chip anyway would be asserting
+    /// hardware the machine does not have.
+    #[must_use]
+    pub fn ay(&self) -> Option<&Ay> {
+        self.cpu.bus().ay()
+    }
+
+    /// Generate the sound up to now and hand over everything since the last call.
+    ///
+    /// The consumer's whole job: call it once a frame and copy what it returns. It borrows a
+    /// buffer allocated once at construction and refilled in place, so a frontend draining
+    /// every frame allocates nothing at all — which is what `docs/M8.md` asks for.
+    ///
+    /// **The AY's three channels and the beeper arrive separate.** Mixing them is the
+    /// frontend's job, by `docs/M8.md` Decision 9, and keeping them apart is also what makes
+    /// the AY's own gate immune to the beeper — `docs/M7.md` Decision 6.
+    ///
+    /// See [`Spectrum::dropped_samples`] for what happens to a consumer that calls it less
+    /// often than that.
+    pub fn take_samples(&mut self) -> &[Sample] {
+        self.cpu.bus_mut().take_samples()
+    }
+
+    /// Samples lost because [`Spectrum::take_samples`] was not called often enough.
+    ///
+    /// Zero for a consumer draining once a frame; the buffer holds two of the longest frame
+    /// this crate models. It is counted rather than swallowed because an unexplained gap in
+    /// audio gets blamed on everything except the buffer that caused it.
+    #[must_use]
+    pub fn dropped_samples(&self) -> u64 {
+        self.cpu.bus().dropped_samples()
     }
 
     /// This machine's whole state, as a value a snapshot format can encode.
@@ -431,6 +538,9 @@ impl Spectrum {
         for &bank in memory.model().banks() {
             let bank = BankIndex::new(bank);
             snapshot.set_bank(bank, Box::new(*memory.bank(bank)));
+        }
+        if let Some(ay) = ula.ay() {
+            snapshot.set_ay(ay);
         }
         snapshot
     }
@@ -497,6 +607,13 @@ impl Spectrum {
 
         for (bank, page) in snapshot.banks() {
             *ula.memory_mut().bank_mut(bank) = *page;
+        }
+        // The model check above already guarantees these agree: a snapshot with a chip is a
+        // 128's and so is a machine with one. Written as a pair anyway, because a `let else`
+        // that silently skipped would be indistinguishable from a restore that dropped the
+        // sound chip — which is the same shape as the five banks the refusal exists to catch.
+        if let (Some(state), Some(ay)) = (snapshot.ay(), ula.ay_mut()) {
+            ay.restore(state.selected, &state.registers);
         }
         Ok(())
     }

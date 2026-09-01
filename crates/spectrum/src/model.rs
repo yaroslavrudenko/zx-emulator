@@ -133,6 +133,23 @@ impl Model {
         }
     }
 
+    /// Whether this machine has an AY-3-8912.
+    ///
+    /// The 128 does; the 48K does not, and the difference is a chip that is physically absent
+    /// rather than a chip that is idle. That is why [`crate::audio`] holds an `Option<Ay>`
+    /// rather than an `Ay` and a flag: a 48K's `0xBFFD` write reaches nothing, its `0xFFFD`
+    /// read floats, and [`crate::Spectrum::ay`] says so instead of returning a chip the
+    /// machine does not contain.
+    ///
+    /// The +2 (grey) has one and is not a variant here — it is a ROM pair, `M7.md` Decision
+    /// 10 — so no row is missing.
+    pub(crate) const fn has_ay(self) -> bool {
+        match self {
+            Self::Spectrum48K => false,
+            Self::Spectrum128 => true,
+        }
+    }
+
     /// This machine's frame geometry.
     pub(crate) const fn timing(self) -> Timing {
         match self {
@@ -274,6 +291,15 @@ mod tests {
             forty_eight.first_contended_t_state(),
             one_two_eight.first_contended_t_state()
         );
+    }
+
+    #[test]
+    fn only_the_128_has_a_sound_chip() {
+        // The one fact that decides whether `0xFFFD` and `0xBFFD` decode at all, and whether
+        // `Spectrum::ay` has anything to return. A 48K with a chip would answer those ports
+        // and would be a machine nobody ever built.
+        assert!(!Model::Spectrum48K.has_ay());
+        assert!(Model::Spectrum128.has_ay());
     }
 
     #[test]

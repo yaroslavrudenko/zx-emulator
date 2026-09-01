@@ -1,0 +1,59 @@
+[package]
+name = "page"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The browser page's half of the frontend's host seam, and the only `unsafe` in this workspace."
+
+# NOTE — this crate has no dependencies, and that is the point.
+#
+# `docs/M8.md` Decision 4 weighed three routes to a download button and took option B: keep
+# `unsafe_code = "forbid"` on `crates/frontend`, and confine the FFI to a crate small enough to
+# read in one sitting. Option C — take a dependency that contains the `unsafe` — was priced
+# higher than it looks because `docs/ARCHITECTURE.md` pins every dependency to a stated
+# verification date. A crate that adds one of its own would be paying that price twice.
+
+# The desktop audio device. **Target-gated at the manifest level**, so it is never resolved for
+# `wasm32` — where it has no backend this project uses, and where the AudioWorklet in
+# `web/zx_page.js` is the device instead.
+#
+# `tinyaudio` over `cpal`, and the argument is against this project's dependency ledger rather
+# than taste. Measured on 2026-09-01: **3 runtime crates** (`tinyaudio`, `core-foundation-sys`,
+# `coreaudio-sys`) against `cpal`'s much larger tree; `cargo build` from a cold registry took
+# **11 s**; it builds on macOS here, and carries first-party ALSA, DirectSound, CoreAudio and
+# AAudio backends in its own source rather than through per-platform crates. We use exactly one
+# function of it — `run_output_device` with a callback — which is the whole of what a ring
+# buffer needs, so almost none of it is surface we could get wrong.
+#
+# **The costs, stated rather than skipped.** Its `coreaudio-sys` runs `bindgen` at build time,
+# which pulls ~28 build-only crates and needs `libclang` present — fine here, and a real
+# obstacle on a machine without it. Only macOS has been built; Linux would need ALSA headers and
+# Windows is unverified from here. `cpal` remains the answer if a platform this cannot reach
+# turns out to matter.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tinyaudio = "1.1.0"
+
+[lints.rust]
+# Deliberately NOT `unsafe_code = "forbid"`, and this is the only crate in the workspace that
+# is not. `crates/z80`, `crates/spectrum` and `crates/frontend` keep the `forbid` that makes
+# the guarantee structural; the exception lives here, in one file, so that a reviewer looking
+# for `unsafe` has exactly one place to look.
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+# Every `unsafe` block must carry a `// SAFETY:` comment, and may contain exactly one unsafe
+# operation. Both are `restriction` lints — off by default — and both turn a convention this
+# project would otherwise have to police by eye into a compile error.
+#
+# > **They only fire on code the current target actually compiles**, and every unsafe block
+# > below is behind `#[cfg(target_arch = "wasm32")]`. So `cargo clippy` on a desktop host
+# > lints *none* of them. That is a gate that grades less than it appears to, in the shape
+# > `docs/STATUS.md` keeps recording, and the two mitigations are named rather than assumed:
+# > `web/gate.sh` runs clippy with `--target wasm32-unknown-unknown`, and
+# > `tests/unsafe_inventory.rs` reads the source as text, so it sees every block on every
+# > target regardless of `cfg`.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"

@@ -92,10 +92,29 @@ const EXPECTED_MEMBRANE: [(KeyCode, Key); 40] = [
     (KeyCode::Key9, Key::Num9),
 ];
 
-/// The second host key for the two shifts.
-const EXPECTED_ALIASES: [(KeyCode, Key); 2] = [
+/// The extra host keys for the two shifts: the right-hand pair, and `Tab`.
+///
+/// > **`docs/M8.md` Decision 2 says adding `Tab` here is *"covered by gates that exist, without
+/// > editing them"*, and that is wrong — this file had to be edited, and the edit is the
+/// > gate working.** The claim was true of five of the seven tests in this file:
+/// > `an_alias_targets_a_key_some_membrane_binding_already_owns` iterates this literal table,
+/// > so a row nothing added here is simply not checked, and the bijection tests filter
+/// > `Binding::Alias` out by construction. It is false of
+/// > `the_table_holds_the_three_kinds_and_nothing_else`, which pins
+/// > `BINDINGS.len()` against `EXPECTED_MEMBRANE + EXPECTED_ALIASES + EXPECTED_CHORDS` — so a
+/// > row added to the subject and not to this table turns it **red**.
+/// >
+/// > That is exactly what that test was written for, in its own words: *"an assertion whose
+/// > failure means 'I was not looking at the thing'"*. The design document reasoned about
+/// > which tests would *pass* and missed the one whose whole job is to notice a table it has
+/// > not been told about. **A gate that must be edited to accept a change is not a gate that
+/// > failed to cover it**; it is the only kind that could have caught an alias added by
+/// > accident, and the correction is recorded in `docs/M8.md` rather than absorbed by quietly
+/// > bumping a number here.
+const EXPECTED_ALIASES: [(KeyCode, Key); 3] = [
     (KeyCode::RightShift, Key::CapsShift),
     (KeyCode::RightControl, Key::SymbolShift),
+    (KeyCode::Tab, Key::SymbolShift),
 ];
 
 /// Every chord, as `(host key, shift, key)`.
@@ -121,13 +140,16 @@ const EXPECTED_CHORDS: [(KeyCode, Key, Key); 14] = [
 ];
 
 /// Every hotkey, written out by hand.
-const EXPECTED_HOTKEYS: [(KeyCode, Hotkey); 6] = [
+const EXPECTED_HOTKEYS: [(KeyCode, Hotkey); 7] = [
     (KeyCode::F1, Hotkey::ToggleStatus),
     (KeyCode::F2, Hotkey::SaveSnapshot),
     (KeyCode::F3, Hotkey::PlayTape),
     (KeyCode::F4, Hotkey::StopTape),
     (KeyCode::F5, Hotkey::RewindTape),
     (KeyCode::F6, Hotkey::Reset),
+    // The arrow keys are a *choice* — the Spectrum has none, and games disagree about what to
+    // read — so the choice needs a key. `docs/M8.md` Decision 13, and `keymap::ArrowScheme`.
+    (KeyCode::F7, Hotkey::CycleArrows),
 ];
 
 /// What the table under test says about `code`.

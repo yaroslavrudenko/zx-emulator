@@ -11,6 +11,21 @@
 //! - Selecting is active-low and pressing is active-low. Both inversions are real; only
 //!   one of them cancelling is a bug.
 //! - Bits 5–7 do not belong to the keyboard at all; [`crate::Ula`] supplies them.
+//!
+//! # A multi-half-row scan is a real thing software does, and here is the one that bites
+//!
+//! *"A scan with several rows selected returns the AND of them"* reads like a curiosity. It
+//! is not, and the sharpest available demonstration came from disassembling a game rather
+//! than from any test here: **Manic Miner reads `LD BC,0x7EFE` for its jump key**, and
+//! `B = 0x7E` holds **A8 and A15 low together** — merging the `CAPS SHIFT` half-row with the
+//! `B N M SYMBOL SHIFT SPACE` one.
+//!
+//! The consequence lands on anything mapping a host key to the machine's own cursor keys,
+//! which are `CAPS SHIFT` with `5`–`8`: holding `CAPS SHIFT` to walk left makes Willy **jump
+//! continuously**, because the game's merged scan cannot tell the two half-rows apart. That
+//! is the machine behaving exactly correctly and a mapping being wrong, and it is the
+//! strongest argument for a frontend reaching for [`crate::joystick`] — a *port*, which no
+//! keyboard scan can touch — rather than for the membrane.
 
 /// Half-rows the ULA scans.
 pub const HALF_ROWS: usize = 8;

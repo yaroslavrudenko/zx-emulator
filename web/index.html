@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZX Spectrum 48K</title>
+
+<!--
+  Vendored, not linked. macroquad's own template points its script tag at
+  https://not-fl3.github.io/miniquad-samples/mq_js_bundle.js, and `docs/M8.md` Decision 6
+  refuses it: that is a third-party CDN in the trust path of a page that runs a ROM, it cannot
+  be pinned to the miniquad version in `Cargo.lock`, and it makes the page depend on a host
+  being up. `mq_js_bundle.js` beside this file is a byte-for-byte copy of the pinned crate's,
+  with its size, SHA-256 and provenance in `web/README.md`.
+
+  Load order matters and is not cosmetic:
+    1. mq_js_bundle.js  defines `miniquad_add_plugin`, `load`, and the `env` import object.
+    2. zx_page.js       calls `miniquad_add_plugin`, which must happen before instantiation.
+    3. load("zx.wasm")  registers the plugins and instantiates the module.
+  Swap 2 and 3 and the module links against stubs: `add_missing_functions_stabs` replaces every
+  missing import with a warning and a return of `undefined`, so the page still runs and F2
+  silently saves nothing.
+
+  `id="glcanvas"` is not configurable — `gl.js` hardcodes `document.querySelector("#glcanvas")`.
+  `tabindex` is not decoration either: miniquad binds `canvas.onkeydown`, not
+  `window.onkeydown`, so the canvas must be focusable or no key reaches the emulator at all.
+  `zx_page.js` focuses it on init; the attribute is what makes that possible.
+-->
+
+<style>
+  :root {
+    color-scheme: dark;
+    --ink: #d8d8d8;
+    --dim: #8a8a8a;
+    --rule: #2a2a2a;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #000;
+    color: var(--ink);
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  /* The canvas takes whatever is left. `gl.js`'s `resize` reads `clientWidth`/`clientHeight`,
+     so CSS is what sizes the framebuffer, and `viewport::fit` floors the scale on the limiting
+     axis — a narrow window shows the whole screen small rather than part of it crisply. */
+  #glcanvas {
+    flex: 1 1 auto;
+    display: block;
+    width: 100%;
+    min-height: 0;
+    outline: none;
+  }
+  footer {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--rule);
+    padding: 8px 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 24px;
+    align-items: baseline;
+  }
+  footer p { margin: 0; }
+  .keys { color: var(--ink); }
+  .keys kbd {
+    font: inherit;
+    font-weight: 600;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+  .notice { color: var(--dim); }
+  .notice strong { color: var(--ink); font-weight: 600; }
+  a { color: inherit; }
+  @media (max-width: 600px) { footer { font-size: 12px; } }
+</style>
+</head>
+<body>
+
+<canvas id="glcanvas" tabindex="1"></canvas>
+
+<footer>
+  <p class="keys">
+    <kbd>Shift</kbd> is CAPS SHIFT &middot;
+    <kbd>Tab</kbd> or <kbd>Ctrl</kbd> is SYMBOL SHIFT &middot;
+    <kbd>F1</kbd> readout &middot;
+    <kbd>F2</kbd> save a .z80 &middot;
+    <kbd>F3</kbd>/<kbd>F4</kbd>/<kbd>F5</kbd> tape &middot;
+    <kbd>F6</kbd> reset &middot;
+    <kbd>F7</kbd> arrow keys &middot;
+    drop a .tap, .z80 or .sna anywhere on this page to load it.
+  </p>
+
+  <!--
+    The arrows need saying out loud, because the Spectrum has none and games disagree about what
+    to read. Six of the owner's own games were disassembled to settle it: three read no fixed
+    keys at all, Manic Miner reads the bare digits 5/8/7 (and pressing the CAPS SHIFT cursor
+    chord instead makes it jump continuously, because its jump check merges the CAPS SHIFT row),
+    and Cybernoid II defaults to O/P/Q. So there is no single right answer and the mapping is a
+    choice. `docs/M8.md` Decision 13.
+  -->
+  <p class="keys">
+    The Spectrum has <em>no</em> arrow keys, and games disagree about what to read &mdash; so
+    <kbd>F7</kbd> cycles what the arrows press, and the current choice is shown at the bottom of
+    the screen. <strong>cursor</strong> is right for BASIC; <strong>5678</strong> is what most
+    games mean by &ldquo;cursor keys&rdquo; and is the one for Manic Miner; <strong>QAOP</strong>
+    suits Cybernoid and Exolon; <strong>Kempston</strong> drives the joystick port, which no game reads by accident. Sound starts on your first click or keystroke.
+  </p>
+
+  <!--
+    Use `Tab` for the bracket chords. This is not a style preference: `(` is SYMBOL SHIFT+8 and
+    `)` is SYMBOL SHIFT+9 on the hardware, and a browser keeps Ctrl+8 and Ctrl+9 for switching
+    tabs without offering them to the page — so `preventDefault` has nothing to cancel and the
+    keystroke is simply gone. `docs/M8.md` Decision 2.
+  -->
+  <p class="keys">Type <kbd>Tab</kbd>+<kbd>8</kbd> for <code>(</code> and <kbd>Tab</kbd>+<kbd>9</kbd> for <code>)</code> &mdash; the browser keeps Ctrl+digit for its own tabs.</p>
+
+  <!--
+    The acknowledgement, in the permission's own words, on the page itself.
+
+    `testdata/README.md` is the single source for the licensing claim and quotes Cliff Lawson of
+    Amstrad plc in full; `README.md` repeats the acknowledgement because the permission asks
+    that "the program/manual" carry it. For a URL-launched emulator this page is both: a person
+    who opens the link never sees either file and never obtains a checkout, and serving 48.rom
+    beside index.html is a redistribution to exactly that person. So the note is here, as
+    visible text, not in a comment and not behind a link. The wording is the permission's, not a
+    paraphrase.
+  -->
+  <p class="notice">
+    <strong>Amstrad have kindly given their permission for the redistribution of their
+    copyrighted material but retain that copyright.</strong>
+    The Sinclair ROM this page loads is redistributed on that permission &mdash; Cliff Lawson,
+    Amstrad plc, <code>comp.sys.sinclair</code>, 31 August 1999. Its copyright messages are
+    unaltered. The emulator itself is MIT OR Apache-2.0.
+  </p>
+</footer>
+
+<script src="mq_js_bundle.js"></script>
+<script src="zx_page.js"></script>
+<script>load("zx.wasm");</script>
+
+</body>
+</html>

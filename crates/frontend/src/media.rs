@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use spectrum::snapshot::{Snapshot, sna, z80};
-use spectrum::tape::tap;
+use spectrum::tape::{tap, tzx};
 use spectrum::{RomSizeError, Spectrum};
 
 /// What a file named on the command line is.
@@ -23,6 +23,15 @@ pub enum Kind {
     Z80,
     /// A `.sna` snapshot.
     Sna,
+    /// A `.tzx` cassette.
+    ///
+    /// A separate [`Kind`] from [`Kind::Tape`] and not a second name for it, for the same reason
+    /// `.z80` and `.sna` are separate: the two are told apart by their **name**, and the
+    /// converters take different arguments — `tzx::parse` needs the [`Model`](spectrum::Model),
+    /// because a turbo loader's pulse lengths are counted in T-states and the two machines do not
+    /// run at the same rate. Folding them together would mean sniffing the signature, which is a
+    /// guess dressed as a fact.
+    Tzx,
 }
 
 /// The extensions this emulator answers to.
@@ -36,6 +45,7 @@ const EXTENSIONS: &[(&str, Kind)] = &[
     ("tap", Kind::Tape),
     ("z80", Kind::Z80),
     ("sna", Kind::Sna),
+    ("tzx", Kind::Tzx),
 ];
 
 /// What `path`'s extension says it is, or `None` for anything else.
@@ -46,6 +56,50 @@ pub fn kind_of(path: &str) -> Option<Kind> {
         .iter()
         .find(|(suffix, _)| suffix.eq_ignore_ascii_case(extension))
         .map(|&(_, kind)| kind)
+}
+
+/// Formats this emulator recognises by name and cannot load yet.
+///
+/// # A refusal that becomes support by deleting a row
+///
+/// Without this table a `.tzx` — which is what most commercial games actually ship as, because
+/// `.tap` cannot represent a turbo loader at any speed — falls into the generic
+/// *"not a .rom, .tap, .z80 or .sna"* message, which reads as *"this emulator is broken"*
+/// rather than *"this format is not done yet"*. `docs/STATUS.md`'s standing complaint about
+/// silence applies to a user-facing refusal as much as to a gate.
+///
+/// It is a **table** and not a branch in [`insert`] for one specific reason. `docs/M6.md`
+/// Decision 5 chose a pulse train over a block list precisely so that `.tzx` would be a second
+/// *converter* rather than a second tape engine, and `crates/spectrum` cashed that in as
+/// `tape::tzx::parse`, producing the same `Tape` that `tap::parse` produces.
+///
+/// # The table is empty, and that is the point rather than a reason to delete it
+///
+/// `.tzx` landed on 2026-09-01 and its row came out. The mechanism stays: [`unsupported`] is
+/// `pub`, [`accept`] still consults it before [`kind_of`], and the next format that is recognised
+/// by name and not yet loadable — `.dsk`, `.szx`, `.trd` — becomes a legible refusal by adding
+/// one row rather than by rediscovering why the generic message is not good enough.
+///
+/// **The prediction above was nearly right and it is worth recording that it undercounted.** It
+/// said the cost was *"a row to [`EXTENSIONS`], one arm to [`insert`], and delete the row"*. It
+/// was five: [`Kind`] gained a variant, [`verb`] needed an arm — which is the wildcard-free match
+/// working exactly as designed, refusing to compile rather than picking a verb for a kind nobody
+/// had thought about — and the sentence listing what is loadable appears **twice**, here and in
+/// [`accept`]. A dispatch that costs three edits and a string that costs two is the honest shape,
+/// and the string is the half that no compiler was ever going to catch.
+const NOT_YET: &[(&str, &str)] = &[];
+
+/// Why `path` cannot be loaded even though the format is a known one.
+///
+/// [`None`] means the extension is either loadable — ask [`kind_of`] — or not recognised at all,
+/// which are different answers a caller should give different messages for.
+#[must_use]
+pub fn unsupported(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path).extension()?.to_str()?;
+    NOT_YET
+        .iter()
+        .find(|(suffix, _)| suffix.eq_ignore_ascii_case(extension))
+        .map(|&(_, reason)| reason)
 }
 
 /// Why a file could not be used.
@@ -152,11 +206,88 @@ pub fn start(roms: &[&[u8]]) -> Result<Spectrum, Error> {
 pub fn insert(machine: &mut Spectrum, kind: Kind, bytes: &[u8]) -> Result<(), Error> {
     match kind {
         Kind::Tape => machine.insert_tape(tap::parse(bytes)?),
+        // The machine's own model, not a constant: `.tzx` speaks in T-states, and a 48K and a
+        // 128 do not run at the same rate. `insert_tape` takes `&mut` while `model` takes `&`,
+        // which the two-phase borrow allows in this position.
+        Kind::Tzx => machine.insert_tape(tzx::parse(bytes, machine.model())?),
         Kind::Z80 => machine.restore(&z80::parse(bytes)?)?,
         Kind::Sna => machine.restore(&sna::parse(bytes)?)?,
         Kind::Rom => return Err(Error::RomAfterStart),
     }
     Ok(())
+}
+
+/// Hand `bytes` to the machine under the name `name`, and say what happened in one sentence.
+///
+/// # This is the one place all four byte sources meet
+///
+/// A command line, a URL's query string, a payload compiled in by [`crate::bundle`], and a file
+/// dropped on the window all end here, with a name and some bytes, and none of them is told
+/// which it is. That is the same argument that routes a query string into the `Vec<String>`
+/// [`crate::host::partition`] already reads: a second way to decide *"what is this file and
+/// what do we do with it"* is a second thing that can disagree.
+///
+/// # It lives in the library because the decision does
+///
+/// It was in `src/main.rs`, which that file's own header says is *"the untestable part, and it
+/// is kept thin on purpose — everything with a decision in it … is in the library next door and
+/// is reachable from `cargo test`."* Which verb applies to which extension, what an unsupported
+/// format is told, and what a model mismatch says are all decisions, and none of them was
+/// graded while they sat in a binary that needs a window.
+///
+/// # Saying what happened is the feature
+///
+/// A file that arrives and does nothing visible is indistinguishable from a broken build, and
+/// the sharpest case is the one this shell now has: dropping a tape **appears to do nothing**,
+/// because a tape is inserted stopped. [`insert`] says why — the loader would otherwise meet
+/// the middle of a block — and that is only defensible if the machine says so. Hence the verb,
+/// and hence the key that starts it.
+///
+/// Three failures are told apart rather than folded together, because they send a person to
+/// three different places: a format we know and cannot load yet ([`unsupported`]); a format we
+/// do not recognise at all; and a file that parsed and cannot be used.
+pub fn accept(machine: &mut Spectrum, name: &str, bytes: &[u8]) -> String {
+    if let Some(reason) = unsupported(name) {
+        return format!("{name}: {reason}");
+    }
+    let Some(kind) = kind_of(name) else {
+        return format!("{name}: not a .rom, .tap, .tzx, .z80 or .sna");
+    };
+    match insert(machine, kind, bytes) {
+        Ok(()) => format!("{} {name}", verb(kind)),
+        // **The library's answer and the frontend's genuinely differ here, and neither is a
+        // bug.** [`Spectrum::restore`] refuses a 128 snapshot on a 48K, which is right for a
+        // library: silently dropping five banks is the defect `docs/M6.md` refused for
+        // duplicate pages, and a library that guesses is worse than one that declines. The
+        // frontend's ideal answer is the opposite — build the machine the snapshot describes,
+        // since the snapshot carries its own model — and it is **not reachable from here**,
+        // because constructing a 128 needs two ROM images this process may never have been
+        // given. Reusing the 48K ROM, or guessing which of two is the editor, would be
+        // inventing a machine and calling it the user's. So the refusal stands, and the message
+        // names the one thing that would fix it.
+        Err(error @ Error::Model(_)) => {
+            format!("{name}: {error} - restart naming the ROMs that machine needs")
+        }
+        Err(error) => format!("{name}: {error}"),
+    }
+}
+
+/// What was done to the machine, in the words its own manual would use.
+fn verb(kind: Kind) -> &'static str {
+    match kind {
+        // The one that must not be silent: [`insert`] deliberately inserts a tape stopped, so
+        // the visible effect of dropping a tape is nothing at all until the tape is started.
+        Kind::Tape | Kind::Tzx => "tape in the drive, press F3 to play:",
+        Kind::Z80 | Kind::Sna => "snapshot restored from",
+        // Unreachable at run time — [`insert`] refuses a ROM before returning `Ok` — and named
+        // anyway, because that is what makes this match exhaustive.
+        Kind::Rom => "built from",
+        // **No wildcard arm, deliberately.** [`Kind`] is `#[non_exhaustive]`, which obliges a
+        // wildcard in every *other* crate and obliges nothing inside this one — so here the
+        // compiler checks that a kind added later has a verb, and a `_ => "loaded"` would be
+        // precisely the arm that swallowed it silently. `crates/spectrum/src/keyboard.rs` makes
+        // the same trade for `Key::position` and states the same reason.
+    }
 }
 
 /// The machine's state as a `.z80`.

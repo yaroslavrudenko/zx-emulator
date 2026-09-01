@@ -13,6 +13,14 @@ thiserror.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 testsupport.workspace = true
+# `docs/M7.md` Decision 3 recorded that no benchmark in this workspace exercises
+# `spectrum::Ula`, and that naming one that measures a different bus is worse than naming
+# none. `benches/frame.rs` is what closes that.
+divan.workspace = true
+
+[[bench]]
+name = "frame"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

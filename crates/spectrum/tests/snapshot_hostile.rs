@@ -294,12 +294,45 @@ fn the_same_page_twice_is_refused_rather_than_last_write_wins() {
 }
 
 #[test]
-fn a_hardware_mode_that_is_not_a_48k_is_refused() {
-    // And the two versions disagree about mode 3, which is the trap: a **128K** in version 2
-    // and a 48K with a MGT interface in version 3. Accepting it unconditionally would load a
-    // 128 snapshot as a 48K and quietly lose five banks.
+fn a_128_mode_carrying_a_48ks_pages_is_refused_rather_than_half_loaded() {
+    // The 128 modes are accepted now, so the question is what happens to a file that *claims*
+    // to be a 128 and carries a 48K's three page numbers. Under the 128's page mapping those
+    // are three banks of eight, and a restore would leave the other five as whatever the
+    // target machine happened to hold — the same silent half-load `ModelMismatch` refuses,
+    // arriving through the parser instead.
+    //
+    // It is refused by the bank-set guard rather than by the mode check, which is why the
+    // error names a **page** and not a mode.
     let mut v3 = v3_vector();
-    for mode in [2_u8, 4, 5, 6, 7, 9, 12, 255] {
+    for mode in [4_u8, 5, 6] {
+        if let Some(byte) = v3.get_mut(34) {
+            *byte = mode;
+        }
+        assert_eq!(
+            z80::parse(&v3),
+            Err(Error::MissingPage { page: 3 }),
+            "version 3, mode {mode}"
+        );
+    }
+}
+
+#[test]
+fn a_hardware_mode_that_is_not_a_48k_is_refused() {
+    // **This test's premise moved and it is worth saying how.** It was written when this
+    // parser accepted 48K modes only, so modes 4, 5 and 6 were refused as *unsupported*.
+    // They are now the version 3 **128K** modes and are read as 128s — which is the fix for a
+    // writer that had been emitting mode 0 for a 128, silently turning every 128 snapshot into
+    // a 48K file carrying three of its eight banks.
+    //
+    // So what this now grades is narrower and sharper: the modes that name **no machine this
+    // crate is** are refused, and the version disagreement about mode 3 still holds. The 128
+    // modes moved to the test below, where they are asserted to be *accepted as 128s* — a
+    // stronger claim than the one they used to satisfy here.
+    //
+    // The two versions disagree about mode 3, which is the trap: a **128K** in version 2 and a
+    // 48K with a MGT interface in version 3.
+    let mut v3 = v3_vector();
+    for mode in [2_u8, 7, 9, 12, 255] {
         if let Some(byte) = v3.get_mut(34) {
             *byte = mode;
         }
@@ -317,14 +350,25 @@ fn a_hardware_mode_that_is_not_a_48k_is_refused() {
         "mode 3 is a 48K + M.G.T. in version 3"
     );
 
+    // **The trap itself, and the refusal is now for a sharper reason than it used to be.**
+    // Version 2's mode 3 is a 128K, and this vector carries a 48K's three page numbers. It
+    // used to be refused as an unsupported mode; it is now *recognised* as a 128 and refused
+    // by the bank-set guard, because three banks of eight is a half-load. Either way it does
+    // not load as a 48K, which is the claim — but the second refusal is the stronger one,
+    // since it survives this parser learning about 128s and the first did not.
     let mut v2 = v2_vector();
     if let Some(byte) = v2.get_mut(34) {
         *byte = 3;
     }
+    let parsed = z80::parse(&v2);
     assert_eq!(
-        z80::parse(&v2),
-        Err(Error::UnsupportedHardware { mode: 3 }),
+        parsed,
+        Err(Error::MissingPage { page: 3 }),
         "mode 3 is a 128K in version 2 and must not load as a 48K"
+    );
+    assert!(
+        parsed.is_err(),
+        "whatever the reason, it must not become a 48K snapshot"
     );
 }
 
