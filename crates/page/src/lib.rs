@@ -1,11 +1,33 @@
 //! The browser page's half of the frontend's host seam.
 //!
-//! # Two functions, and the only `unsafe` in this workspace
+//! # The whole browser FFI, and the only `unsafe` in this workspace
 //!
 //! `crates/frontend/src/host.rs` opens *"This module is the entire `wasm32` seam"* and counts
 //! the non-portable calls: **where the arguments come from**, and **how bytes get out**. This
 //! crate is the browser's answer to both, and it exists because those answers cannot be
 //! written where the questions are.
+//!
+//! *This heading said **"Two functions"**, and of its two halves exactly one is still true.* The
+//! count was right when the seam was [`query_string`] and [`offer_download`] alone; the crate has
+//! since grown [`handoff`], the `wasm32`-only `zx_page_crate_version` export and the audio pair
+//! [`audio_rate`] / [`audio_push`], so the figure is stale. It has been dropped rather than
+//! re-pinned, because a number in a heading is a copy that nothing checks — which is the whole
+//! reason `tests/unsafe_inventory.rs` holds this crate's other sizes in named constants.
+//!
+//! **The `unsafe` half was re-checked rather than assumed, and it survives.** Every other
+//! member of this workspace declares `unsafe_code = "forbid"` in its own manifest, and
+//! `crates/page/Cargo.toml` is the only one that deliberately does not. That is stated as a
+//! complement rather than as a roster of crate names, for the reason the heading's count was
+//! dropped rather than re-pinned: it would be a second copy of a fact the clause beside it
+//! already carries whole, and the copy is the half that goes stale when a member is added.
+//! `rg -l '^unsafe_code = "forbid"' crates/*/Cargo.toml` returns every member but this one;
+//! the `^` is load-bearing, for the reason `crates/page/Cargo.toml`'s own `[lints.rust]`
+//! comment records. Sweeping every `.rs` file outside this crate for
+//! `unsafe` **syntax** — `unsafe {`, `unsafe extern`, `unsafe fn`, `unsafe impl`, `unsafe trait`,
+//! `#[unsafe(` — returns exactly one hit, in `crates/frontend/src/host.rs`, and it is inside a
+//! `//!` line quoting the `#[unsafe(no_mangle)]` argument made below: a sentence about `unsafe`,
+//! not an instance of it. *The word itself appears in several files' prose, which is why the
+//! sweep is over syntax and is written down here as the syntax it matched.*
 //!
 //! Every route for getting bytes across the JavaScript boundary needs `unsafe` — including the
 //! one that looks like it does not, because in edition 2024 an export is
@@ -45,7 +67,7 @@
 //!
 //! # The far side
 //!
-//! `web/zx_page.js` provides the three imports declared below, registered through
+//! `web/zx_page.js` provides every import declared below, registered through
 //! `miniquad_add_plugin` before the module is instantiated. It is vendored and versioned
 //! beside `web/index.html`; see `web/README.md`.
 
@@ -87,7 +109,7 @@ pub enum Handoff {
 /// console nobody has open — and if 0 meant success, `F2` would report `saved snapshot-1.z80`
 /// and nothing would be saved.
 ///
-/// `docs/M8.md` Decision 4 names that as one of three non-negotiable rules for this route:
+/// `docs/M8.md` Decision 4 names that among the rules it holds non-negotiable for this route:
 /// *"the Rust side must not report `saved …` on the strength of having made the call — the JS
 /// must return a value the Rust side checks."* Making the success code **1** rather than 0 is
 /// what turns the missing-shim case from a silent no-op into a reported failure.
@@ -132,8 +154,9 @@ pub const fn handoff(code: i32) -> Handoff {
 // is the loud kind**: a missing import module is a link error, not a module that instantiates
 // against stubs, so this is one hazard on this route that cannot be silent.
 //
-// `web/gate.sh` asserts all three are present in the built module *under the module name
-// `env`*, which is what makes the page's `importObject.env.zx_*` assignments meet them.
+// `web/gate.sh` asserts every `zx_*` import this crate declares — not only this block's — is
+// present in the built module *under the module name `env`*, which is what makes the page's
+// `importObject.env.zx_*` assignments meet them.
 //
 // `usize` rather than `u32` because it is what the Rust side already has; on `wasm32` a
 // `usize` **is** 32 bits, so each of these lowers to the ABI's `i32` and arrives in
