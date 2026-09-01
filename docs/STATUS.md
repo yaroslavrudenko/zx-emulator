@@ -84,6 +84,19 @@ present in the file before its verdict was trusted — occurrence count asserted
 file re-read after, and the restore made from a byte-level backup and `diff`ed rather than from
 `git checkout --`:
 
+**Both rows are M6's, and so is every range in them.** They were taken against the gates as M6 left
+them — the milestone that merged as `0d3e7ef` on 2026-09-01 — and the `.z80` frame-position counter
+was a 48K-only function then: its sweep covered that machine's 69888 positions and no others, and
+the six hand-worked positions are six **on a 48K**. M7 made the quarter a function of the model and
+widened both halves — each machine swept over its own frame, 69888 **and** 70908; six hand-worked
+positions **per machine**; and an assertion that the two machines encode frame position 0
+differently, which a loop over a single model structurally cannot contain. **Nothing records a
+mutation taken since.** So the verdicts below are left at the gate they were taken on rather than
+restated against the wider one: a mutation verdict carries its gate, and re-stating one against a
+range it never ran on asserts something nobody measured, which is worse than a stale number.
+`crates/spectrum/src/snapshot/z80.rs`'s `encode_t_states` draws the same boundary from the code's
+side, and `docs/M6.md`'s own copy of this table carries the same framing.
+
 | Symmetric mutation | Every round trip | What went red |
 |---|---|---|
 | `HL` and `DE` permuted in the parser **and** the writer | **green** — R2, R3 **and** the third-party corpus sweep | the three hand-transcribed `.z80` vectors; the hand-built `.sna`/`.z80` cross-format pair; the **third-party** `fire.z80`/`fire.sna` pair |
@@ -486,7 +499,7 @@ awaiting apology; it is the shape of what M5's green means.
   **derivation** from documented frame structure — not a measurement. Nothing compares it to
   hardware, and **an issue 2 machine is one T-state earlier and would pass the gate identically.**
   `contention_phase` pins it against drift; it does not establish it.~~
-  **Closed by `tests/timing_oracle.rs`.** The row's evidence, its thirteen mutations and its
+  **Closed by `tests/timing_oracle.rs`.** The row's evidence, its sixteen mutations and its
   precise scope are in the **Closed** table; the anti-circularity reasoning, which is the reusable
   part, is under *Is this oracle circular?*. Two things about the struck text are worth keeping
   visible rather than deleting: *"an issue 2 machine is one T-state earlier"* is **the wrong
@@ -531,8 +544,37 @@ awaiting apology; it is the shape of what M5's green means.
   **where** the index-computation T-states are spent is observed rather than asserted. "By
   construction" was an argument; it is now a verdict.
 - **Floating bus, progressive drawing (multicolour, border stripes) and keyboard ghosting are not
-  modelled**, so they are not gradeable rather than ungraded. The oracle's groups 35–37 are
-  excluded **by name** for exactly that reason, so its green says nothing about them.
+  modelled**, so they are not gradeable rather than ungraded. ~~The oracle's groups 35–37 are
+  excluded **by name** for exactly that reason, so its green says nothing about them.~~
+
+  > **Corrected 2026-09-01: the excluded groups are 36 and 37. Group 35 is graded, and the reason
+  > it can be is a coupling rather than a modelling success.** The three are **one program** — the
+  > suite's dispatch table sends all of them to `0xC91D` — differing only in how many rows of text
+  > the BASIC prints first (`l` = 0, 13, 21). Inside the loop, `IN B,(C)` puts the value it reads
+  > into the port's **own high byte**, so what is on the screen decides whether the four
+  > `IN r,(C)` after it are contended. That is why 36 and 37 cannot be graded here, and it is
+  > measured rather than assumed: group 36 run with the screen filled with `0x00`, with `0xFF` and
+  > with a text pattern gives **identical** readings, which a constant floating bus predicts and
+  > hardware cannot do.
+  >
+  > **Group 35 matches both its hardware rows bit-exactly — because `FLOATING_BUS_BYTE` is `0xFF`,
+  > which lies outside the contended range `0x4000..=0x7FFF`**, so those four bus-dependent cycles
+  > are never charged and the only contention the row measures is the part that does not depend on
+  > the bus. Two consequences, both of which belong to this row rather than to the gate:
+  >
+  > - **Whoever implements a floating bus should take group 35's two rows as part of that work's
+  >   acceptance criterion, not as a pre-existing gate to keep green.** A model returning the byte
+  >   the ULA is fetching returns display bytes inside `0x40..=0x7F` for ordinary screen content,
+  >   so the row can redden for a reason that has nothing to do with contention — and the next
+  >   reader would have every reason to misread that as a regression.
+  > - **It is not established why hardware agrees with a constant `0xFF` here.** Both rows were
+  >   measured with text on screen whose glyph bytes fall inside `0x40..=0x7F` (`Z` is `0x7E`), and
+  >   the *uncontended* row is the harder case: the BASIC runs it **before** its own `CLS`, and the
+  >   suite never clears between tests, so it is taken with thirty-four tests' worth of report text
+  >   on display — and being uncontended buys it nothing, because I/O contention is a function of
+  >   the port address, not of where the code sits. Recorded as open in
+  >   `crates/spectrum/tests/timing_oracle.rs`'s *Group 35* section. **It is the gap that would
+  >   make grading that row safe rather than merely green.**
 - **The frame's origin is a convention, not a measurement.** We assert `/INT` at frame T-state 0
   and the oracle grades the interval from there; moving the origin and the window together — `/INT`
   one T-state later *and* `FIRST_CONTENDED_T_STATE` at 14336 — leaves `timing_oracle.rs` green.
@@ -551,9 +593,52 @@ awaiting apology; it is the shape of what M5's green means.
 - **An interrupt arriving mid-loop while the loop is being *contended*.** `block_interrupt.rs`
   runs wholly uncontended on purpose, so the iteration an interrupt lands on is arithmetic rather
   than a simulation of the model `block_contention.rs` grades. The contended case is M7's shape.
-- **The four-case I/O rule's fourth term.** A mutation dropping it leaves the oracle green, because
-  its groups 1–34 never reach a contended non-ULA port. `io_contention.rs` remains its only gate,
-  and that is now a measured statement rather than an assumption.
+- ~~**The four-case I/O rule's fourth term.** A mutation dropping it leaves the oracle green,
+  because its groups 1–34 never reach a contended non-ULA port. `io_contention.rs` remains its
+  only gate, and that is now a measured statement rather than an assumption.~~
+  **Closed 2026-09-01 by extending `tests/timing_oracle.rs` from 34 groups to 35** — 68 hardware
+  rows to **70**.
+
+  > **The struck row's measurement was right and its *scope* was wrong, which is the interesting
+  > part.** Groups 1–34 genuinely never reach a contended non-ULA port. But *"the suite's groups"*
+  > was the oracle's **then-range** spoken of as a property of the corpus, and group 35 was
+  > outside it only because it sits in the same three-group block as the two that really do need a
+  > floating bus. **Group 35 reaches the term directly**: its loop addresses `(C<<8)|C` with `C` a
+  > counter advancing once per iteration from zero, so it sweeps every high byte and both parities
+  > of A0, and every *odd* `C` in `0x41..=0x7F` is exactly `C:1, C:1, C:1, C:1`.
+  >
+  > Re-measured in a scratch clone on the day of the change — the same mutations against the two
+  > ranges, each landing asserted before its verdict was read and each restore checked against
+  > held bytes:
+  >
+  > | mutation of the `(true, false)` arm | oracle at 34 groups (68 rows) | oracle at 35 groups (70 rows) | `io_contention.rs` |
+  > |---|---|---|---|
+  > | deleted — `(true, false) => 0` | **GREEN**, 3 passed | **RED**, 2 of 70 — and both are group 35's | **RED**, 2 of 3 |
+  > | weakened to the two-stall shape | **GREEN**, 3 passed | **RED**, 2 of 70 — both group 35's | **RED**, 2 of 3 |
+  > | the fourth term alone dropped | **GREEN** — the other 68 rows unmoved | **RED**, 1 of 70 — group 35 uncontended only | **RED**, 1 of 3 |
+  >
+  > The right-hand columns are what makes this an extension worth having rather than two more
+  > green rows: **the mutation is invisible at 34 groups and caught at 35, and no other row moves**
+  > — the disagreement is exactly the two rows that were added, which is also the evidence that
+  > the other 68 are untouched by the change.
+  >
+  > **Three edits, not two, and the third is the one that grades the fourth term specifically.**
+  > This table carried the first two for a while and `io_contention.rs` carried a different pair,
+  > so read against each other the two records looked like a disagreement about what the fourth
+  > term is worth. They were both right and both partial. Dropping the term alone is the smallest
+  > verdict of the three because the first two change the arm's cost at every group position while
+  > this one changes it at **one position in eight** — a row that is easy to mistake for a weaker
+  > version of its neighbours and is in fact the only one of them aimed at the term. The counting
+  > standard that settles it is [`MACHINE.md`](MACHINE.md)'s: **a mutation is an edit, not a
+  > verdict and not a constant**, which is what makes this arm three and not one.
+  >
+  > So the term now has an **external** check as well as this project's own, and the two are
+  > complementary rather than redundant: `io_contention.rs` is exhaustive over four ports × eight
+  > phases with every expectation derived by hand from the published rule, while the oracle's row
+  > is integrated over a whole frame against a number this project did not write. **Group 35 also
+  > reaches `OUT (C),r`**, which `io_contention.rs` names in its own *what is not graded here* —
+  > six of them are in the loop. **The oracle's row carries a coupling `io_contention.rs` does
+  > not**; it is the floating-bus row above, and it must be read before this closure is relied on.
 
 The struck rows are kept with their closures attached rather than deleted, for the reason the
 Closed table exists: **a row that vanished is indistinguishable from a row nobody re-read.** The
@@ -1049,7 +1134,7 @@ row is the survivor.
 | **M5** — the interrupt window's length is pinned to a **band**, not a point | Closed as "ungraded" below, but not to a single value: the oracle is green across **`17..=32`** and cannot separate those sixteen. 32 is the community's figure and is what this crate uses. **One boundary in the sweep is unexplained and is recorded rather than smoothed away**: at windows **14–16** the detection group still reads `TYPE1` while contended rows disagree, so something in the contended groups is sensitive to a short window and this gate does not say what. A boundary nobody predicted is worth more than one that was | A timing program that varies when it enables interrupts *within* the window — the band's interior is invisible to a suite that only needs the interrupt accepted at the top of the frame |
 | **M5** — the 64-line pre-display count's **factors** | Its *product* is now measured — see the Closed table. Any compensating pair that still lands on 14335 would pass identically | Nothing available; it is the documented frame structure's reading of a measured total |
 | The flag latch has almost no instrument | Two FUSE vectors (`37_1`, `3f`) are the **only** gate that can see it. `zexdoc` masks the bits off; `zexall` passes against three different rules including a stuck-at-zero latch | A corpus with a flag-setter → no-flag instruction → `SCF` sequence. Neither existing corpus has one |
-| CI does not run the M3 gate | `.github/workflows/ci.yml` has the `zexdoc` job written, but `.github/` cannot be pushed from the session that wrote it — the token lacks `workflow` scope | Someone with `workflow` scope pushing it. Until then the gate is verified locally and enforced nowhere, which is the `Z80_FUSE_REQUIRED` defect again |
+| CI does not run the M3 gate | The workflow lives at **`ci/ci.yml`**, outside `.github/`, and `ci/README.md` beside it gives the one-line install and names the credential it needs. It is there because a push whose diff touches `.github/workflows/**` is refused by a token without `workflow` scope — the refusal is on the *path*, not on the branch, the content or the author. The copy that sat on the `ci-pending` branch was checked against `main` before being moved there and **would not have run**: it fetched the FUSE corpus from a mirror that is not the one `testdata/README.md` names and is not byte-identical to it, it named `Z80_FUSE_ALLOW_MISSING` as the live opt-out when both that spelling and `Z80_FUSE_REQUIRED` are now hard errors, it installed no ALSA headers so `crates/page` could not build on a Linux runner at all, and it ran none of `zexdoc`, `zexall` or the MEMPTR exerciser — the three `#[ignore]`d gates. **Those three used to end their `#[ignore]` reason with *"CI runs it that way"*, and that sentence was read by every developer who ran `cargo test` and skipped them.** It now names the command and says plainly that nothing runs it, which is the same correction as this row applied where a reader actually meets it: a register entry recording that CI is absent does not help someone who is being told, at the point of the skip, that it is present | Someone with `workflow` scope running `cp ci/ci.yml .github/workflows/ci.yml` and pushing it. Until then the gate is verified locally and enforced nowhere, which is the `Z80_FUSE_REQUIRED` defect again |
 | **A green MEMPTR oracle is not 160 correct rules, and the gap has a number** | Every un-prefixed rule is implemented and `tests/memptr_oracle.rs` reads **0 of 160 groups failing** — but MEMPTR is observable only through bits 3 and 5 of `BIT n,(HL)`, so the exerciser grades each group's *aggregate* and cannot see a compensating pair of errors inside one. Two measurements bound it, both recorded at `FAILING_GROUPS` in that file rather than re-derived here: breaking the accumulator-store quirk — one line, three instructions wrong — reddens **four** `memptr_rules.rs` tests but only **two** oracle groups, so **`104 OUT (N),A` passes with its rule broken**; and groups **`113 JP (HL)` and `114 JP (XY)` failed while already correct**, needing no rule at all, and came green when the instructions the exerciser *sets up* with were fixed. **A group's verdict is not a report on its own rule, in either direction.** Separately, **`OTIR`/`OTDR` are covered by the repeat rule and graded by nothing** — the exerciser's self-overwriting `->NOP'` trick has no output counterpart, so no group reaches their repeat path; `crates/z80/src/instructions.rs` carries that caveat at `otir`/`otdr` | Nothing closes the first half: it is a property of a two-bit probe folded into a CRC, and `memptr_rules.rs` — 30 tests, one rule each, asserting the full sixteen-bit result — is the mitigation rather than the cure. Neither instrument subsumes the other, which is why both exist: unit tests cannot catch a rule nobody thought to write, and the oracle cannot say which rule is wrong. The `OTIR`/`OTDR` half needs a test program able to grade an output block repeat. **A third instance, measured 2026-09-01 and sharper than either of the two above: the whole `RET` family's rule is graded by NOTHING.** Deleting all three of its write sites — `return_from_interrupt`, `return_unconditional`, `return_conditional`, the only three of the six `set_memptr(target)` calls that are returns — leaves `memptr_rules.rs` at **30/30** *and* the exerciser at **`all tests passed.`**. Run in an isolated clone, the deletion proven by diff, with a positive control in the same clone (dropping the repeat rewind still moved 0 → 8) to show the harness bites. So groups `120`–`124` were among the 45 that came green **without their own rule being what fixed them** — the `JP (HL)` phenomenon again, and the reason *45 → 0* must not be read as 160 rules independently confirmed |
 | **The I/O block repeat rule diverges from its own cited primary source, deliberately** | Boo-boo and Kladov's 2006 document — the source every other rule in this core is quoted from — exempts the I/O block forms: *"INIR — exactly as INI on each execution"*. **That is wrong.** David Banks traced the repeat's extra M-cycle on real parts (one Zilog NMOS, two NEC NMOS), MAME adopted it, and Patrik Rak's exerciser carries CRCs expecting it, so the uniform rule is implemented on that evidence — which collapsed a per-family flag into a constant and let it be deleted. The mutation confirming it, and the two groups it moves that the 2006 document denies, are recorded in `tests/memptr_oracle.rs`'s module doc rather than restated here | Nothing pending. Recorded because a deliberate divergence from a cited source reads as a defect to whoever finds it next, so the reason has to be reachable from the divergence. **Also not modelled:** the **KP1858BM1 / T34BM1** clones write **zero** into MEMPTR's high byte where an NMOS part writes `A` — exactly `LD (nn),A`, `LD (rp),A` and `OUT (n),A`. Modelling them needs a part-variant switch on the public API, and nothing in this emulator asks for one |
 | **`crates/frontend`** — which membrane key a **non-US keyboard** produces differs between `miniquad`'s backends | Read out of the pinned `miniquad-0.4.11` source on 2026-09-01. The browser (`js/gl.js:1215`, `event.code`), Windows (`windows.rs:694`, `HIWORD(lparam) & 0x1FF` — a **scan code**, not the virtual-key code) and macOS (`apple_util.rs:154`, `NSEvent.keyCode`) all key off the **physical position**; X11 (`linux_x11/keycodes.rs:10`, `keysyms[0]`) and Wayland key off the **layout's keysym**. On AZERTY the key printed `A` is `KeyCode::Q` on the first three and `KeyCode::A` on the last two. **Not fixable in `keymap.rs`** — the table is downstream, and by the time a `KeyCode` arrives the distinguishing information is gone. It is `derived` from five mapping tables; **no key has been pressed** | One person on AZERTY or QWERTZ pressing one key, in a browser and on Linux. **Nobody here can perform it**, and no US-layout tester can see it: on a US board all five backends agree |
@@ -1092,13 +1177,22 @@ of them were false rather than merely out of date**.
   `enum Target` already sits at `decode.rs:146`, the line it is on today. A row can go stale enough
   to name nothing, and this one did so on the day it came due.
 - *`WZ` / MEMPTR* — **its central claim was false.** *"Never written"* was contradicted by
-  `instructions.rs:660`, by `crates/z80/src/lib.rs:1415` asserting the written value
+  `fn indexed_address` (`instructions.rs:795`, `self.set_memptr(effective);`), by
+  `crates/z80/src/lib.rs:1484` asserting the written value
   (`assert_eq!(cpu.state().wz, 0xA381, "the indexed access recorded MEMPTR")`), by four
-  `CORPUS_OMISSIONS` that exist *because* it is written, by the crate's own `//!` block at
-  `lib.rs:69-72`, and by `CHANGELOG.md:394` announcing the change — *"`MEMPTR`/`WZ` is now **live
-  rather than inert**"*. Every one of those contradicts the row, and the register outlasted all of
-  them. One witness points the other way and is itself stale: `lib.rs:326` still carries the old
-  sentence, so the crate contradicts itself within a single file.
+  `CORPUS_OMISSIONS` whose `reason` fields read *"MEMPTR gives 0, the corpus expects…"*
+  (`crates/z80/tests/fuse_vectors.rs:213`, `:219`, `:225`, `:231`) and which exist *because* it is
+  written, by the crate's own `//!` block at `lib.rs:69-72`, and by `CHANGELOG.md:499` announcing
+  the change — *"`MEMPTR`/`WZ` is now **live rather than inert**"*. Every one of those contradicts
+  the row, and the register outlasted all of them.
+
+  **The crate is not divided against itself, and the claim that it was is the more useful
+  correction.** This bullet used to end by naming a holdout — *"`lib.rs:326` still carries the old
+  sentence"* — and there is no such sentence: `lib.rs:326` is a blank line, and the nearest prose
+  about the field, the `//!` block at `:69`, says the **opposite** of what it was accused of
+  saying. So a reader was being sent to repair something already right, which is the failure mode
+  the phantom-guardian family usually produces in its milder form and is not milder at all: a
+  false accusation costs a reader the time to disprove it, and a plausible one gets acted on.
 - *Contention within a cycle* — **its premise was false and its remedy already existed.** The gate
   the settling condition asked for is `every_t_state_reports_the_address_the_z80_drives`, and it
   pins whole runs rather than cycle starts.
@@ -1118,18 +1212,18 @@ is indistinguishable from a row nobody re-read.
 
 | Item | What it was | What closed it |
 |---|---|---|
-| **M1 fetch vs operand read** | *"Not blocking. Contention depends on address and `t mod 8`, both of which the machine has. A defaulted `fn fetch(&mut self, addr) -> u8 { self.read(addr) }` is non-breaking whenever a debugger or a precise floating-bus model wants it."* | **The reasoning was wrong and M5 measured it.** `LD A,B` and the read-modify half of `INC (HL)` emit byte-identical streams — `read(addr)` then four `tick(addr)` — while owing one contention point and two respectively, so address and phase are not sufficient however true it is that contention depends on them. `crates/spectrum/src/machine_cycle.rs` had to reconstruct the boundaries by deferral, at a residual of one contention point on the read-modify-write family — **an isolated stall of 0–6 T-states, which is not the same quantity as the observable error; see the correction below the table.** `Bus::fetch` landed in `crates/z80/src/bus.rs`, defaulted, with every M1 opcode fetch routed through it. **Both halves are now closed.** `crates/spectrum/src/ula.rs:241` implements `fetch`, `machine_cycle.rs` is deleted, and the residual is gone rather than pinned: with every cycle's length disclosed the moment it opens, there is nothing left to reconstruct. Full account in [`MACHINE.md`](MACHINE.md); the two rulings it forced are in [`Z80-REFERENCE.md`](Z80-REFERENCE.md) |
+| **M1 fetch vs operand read** | *"Not blocking. Contention depends on address and `t mod 8`, both of which the machine has. A defaulted `fn fetch(&mut self, addr) -> u8 { self.read(addr) }` is non-breaking whenever a debugger or a precise floating-bus model wants it."* | **The reasoning was wrong and M5 measured it.** `LD A,B` and the read-modify half of `INC (HL)` emit byte-identical streams — `read(addr)` then four `tick(addr)` — while owing one contention point and two respectively, so address and phase are not sufficient however true it is that contention depends on them. `crates/spectrum/src/machine_cycle.rs` had to reconstruct the boundaries by deferral, at a residual of one contention point on the read-modify-write family — **an isolated stall of 0–6 T-states, which is not the same quantity as the observable error; see the correction below the table.** `Bus::fetch` landed in `crates/z80/src/bus.rs`, defaulted, with every M1 opcode fetch routed through it. **Both halves are now closed.** `crates/spectrum/src/ula.rs:685` — `fn fetch(&mut self, address: u16) -> u8` — implements it, `machine_cycle.rs` is deleted, and the residual is gone rather than pinned: with every cycle's length disclosed the moment it opens, there is nothing left to reconstruct. Full account in [`MACHINE.md`](MACHINE.md); the two rulings it forced are in [`Z80-REFERENCE.md`](Z80-REFERENCE.md) |
 | **M5 — read-modify-write contention residual** | *"One contention point, 0–6 T-states, per instruction that performs exactly one internal cycle at the address it just read. Pinned by a test that asserts the loss rather than hiding it. **Now closable**: `Bus::fetch` has landed in the CPU."* | `Ula` implemented `fetch`. Closed by the row above and with it — the two were one item split across two tables, which is itself worth noticing: the Open row's settling condition named `Ula` implementing `fetch`, and it does. `machine_cycle.rs` and its residual-pinning test are deleted together. The **quantity** the heuristic lost was one contention point; the **error** it produced was 0 or 1 T-state — see the correction below |
 | **M5 — five mutations leave the boot gate green** | *"`/INT` never asserted; the keyboard reporting every key held; the ROM slot made writable; contention removed entirely; contention phase off by one… Until they land, the boot gate grades the memory map's read side and the screen, and nothing else."* | **Closed by being re-measured, and the re-measurement changed the finding.** Those verdicts were taken against the boot *example*, which nothing runs. Re-measured at `2157331` against the pre-gate lib target, **four of the five were already red** from unit tests inside `src` — 5, 7, 1 and 13 failing tests — and **the contention-phase mutation is the only survivor of the five**. (A keyboard-matrix permutation also survives and is why `keyboard_matrix.rs` exists, but it was never one of the five; this row said "three" and "two survivors" and both were wrong — see the M5 section.) Seven gates now exist and ten mutations turn them red — the tables are in the M5 section above |
 | **M5 — nothing runs the boot gate** | *"It is `crates/spectrum/examples/boot.rs`; `cargo test` builds an example without calling `main`. Deleting the committed ROM left the suite at 72 passed."* | `crates/spectrum/tests/boot.rs` exists and runs the ROM under `cargo test`, asserting both the message **and the frame it appears on** — the one number the example printed and never checked. The example remains, as an example. See *A gate that nothing runs, for the third time*, which this closes |
 | **`Q` latch — latch lifecycle** | *"`((q ^ f) \| a) & 0x28` has landed, but `begin_operation()` zeroes `q` before `SCF`/`CCF` read it… **FUSE is red: 288/290**… **Blocks M3**."* | The `q_prev` fix landed in `crates/z80/src`: `begin_operation` now assigns `self.q_prev = self.q` before clearing, and both `SCF`/`CCF` call sites read `q_prev`. Re-measured here rather than inherited — `cargo test -p z80 --test fuse_vectors` reports **290 executed, 290 passed, 0 failed** and **1045 executed, 1045 passed, 0 failed**. The row had been red in the register through two merged milestones. **What it does *not* close** is the row above it: the rule is still graded by two FUSE vectors and nothing else |
 | **`Cpu<B: Bus>` struct-level bound** | *"Downstream types naming `Cpu<Ula>` must carry `where Ula: Bus`… Removable at any time."* | Removed. The declaration is `pub struct Cpu<B>` |
-| **M5 — `timing::FIRST_CONTENDED_T_STATE = 14335` has no oracle** | *"Pinned to `64 × 224 − 1`, a derivation from documented frame structure. Nothing measures it against hardware… `contention_phase` pins it against drift; it does not establish it."* The row also said **an issue 2 machine is one T-state earlier**, which is on the wrong axis and is corrected below | **`tests/timing_oracle.rs`** — Richard Butler's 48K timing suite, a `.z80` snapshot carrying 34 instruction groups and **two** expected-result tables measured on real Spectrums, run contended and uncontended: 68 hardware rows, 0 disagreements, and the machine reproduces `TYPE1 (Early)`. **Green on the first run, so thirteen mutations were run against it**, each landed and each restored from held bytes. `FIRST_CONTENDED_T_STATE` at 14333/14334/14336/14337 mismatches 13/8/7/7 hardware rows and only 14335 is clean; at 14336 the machine scores **7 against Early and 64 against Late — it does not become the other machine, it stops being either.** Deleting the delay pattern is 38 rows, `fetch` as a 3-T read 29, internals never contending 34. **The scope is narrower than the row's disappearance suggests and is stated in the three new Open rows above:** what is measured is the *interval* from `/INT` to the first contended T-state, because moving the origin and the window together leaves the oracle green |
+| **M5 — `timing::FIRST_CONTENDED_T_STATE = 14335` has no oracle** | *"Pinned to `64 × 224 − 1`, a derivation from documented frame structure. Nothing measures it against hardware… `contention_phase` pins it against drift; it does not establish it."* The row also said **an issue 2 machine is one T-state earlier**, which is on the wrong axis and is corrected below | **`tests/timing_oracle.rs`** — Richard Butler's 48K timing suite, a `.z80` snapshot carrying 37 machine-code groups — 34 over the documented instruction set, and three sharing one program — and **two** expected-result tables measured on real Spectrums, run contended and uncontended: 70 hardware rows, 0 disagreements, and the machine reproduces `TYPE1 (Early)`. **Green on the first run, so thirteen mutations were run against it**, each landed and each restored from held bytes, and **three more arrived with group 35 — sixteen in total.** The thirteen is left as it was measured: it is the count taken that day against the 68-row range, and re-stating a dated verdict against a range it never ran on asserts something nobody measured. What grew is the live figure, and it grew by three rather than one because the `(true, false)` arm was edited three separate ways — deleted, weakened to the two-stall shape, and the fourth term dropped alone — which [`MACHINE.md`](MACHINE.md)'s standard counts as three mutations, *an edit, not a verdict and not a constant*. `FIRST_CONTENDED_T_STATE` at 14333/14334/14336/14337 mismatches 13/8/7/7 hardware rows and only 14335 is clean; at 14336 the machine scores **7 against Early and 64 against Late — it does not become the other machine, it stops being either.** Deleting the delay pattern is 38 rows, `fetch` as a 3-T read 29, internals never contending 34 — all of them taken against the 68-row range that preceded group 35, and carried rather than re-run, because a mutation verdict carries the gate it was taken on. **The scope is narrower than the row's disappearance suggests and is stated in the three new Open rows above:** what is measured is the *interval* from `/INT` to the first contended T-state, because moving the origin and the window together leaves the oracle green |
 | **M5 — the interrupt window's *length* is ungraded** | *"32 T-states. `tests/frame_boundary.rs` pins **both** edges against drift with two literals (31 accepted, 32 missed) and is the only test in the workspace that 32 → 24 reddens. The oracle is green at 24, so it cannot settle this."* | **`tests/timing_oracle.rs` — and the row's own evidence was one sample mistaken for a band.** 32 → 24 leaving the oracle green was read as *"the oracle cannot measure this"*. Sweeping the window over **1–65** with the contention constant fixed shows what it actually was: the green band is **`17..=32`**, and 24 sits inside it. Below 17 contended rows disagree; at **33** the machine's whole classification flips from `TYPE1 (Early)` to `TYPE2 (Late)` and **65 of the 68 graded rows follow**; from **44** the suite stops terminating. **Both edges were derived from the suite's own code *before* the sweep ran, and both measured exactly there.** The mechanism is the closure's real content: the suite installs a handler beginning `INC C` / `EI` / `RET C`, and because **`EI` does not re-enable interrupts until after the following instruction**, the earliest the CPU can see `/INT` again is `19 + 4 + 4 + 5 = 32` T-states after accepting the last one — *exactly* the far edge of a 32-T-state window. If that tie resolves as "still asserted", a second, nested interrupt is taken, eight fewer four-T-state iterations fit, and `2 − 8 ≡ 122 (mod 128)`: the tables' 120 gap. **That retires a puzzle rather than merely correcting it.** The suite's authors record a board reporting Late when cold and Early once warm, and issues 3B, 4B and 6A in *both* classes — nonsense as "one T-state of contention", exactly what you would predict as an **edge race in the interrupt**. Any window shorter than the tie point behaves identically, which is why 24 was invisible. Two things stay open in the table above: the three rows that resist at 33, and the unexplained **14–16** boundary |
-| **M1 — resolved-target refactor** | *"`read_operand`, `write_operand` and `tick_read_modify_delay` each recompute `pair(base)` independently. Free for `(HL)`; for `(IX+d)` the displacement must be fetched once and the addition charged once."* Settled by: *"**M2's opening move.** Needs a `Register(RegIndex) \| Memory(u16)` computed once and threaded"* | **Landed, in exactly the shape the settling condition names.** `crates/z80/src/decode.rs:146` is `pub(crate) enum Target { Register(RegIndex), Memory(u16) }`. `instructions.rs:638 fn resolve` is the single point that determines a memory operand's address: the displaced branch calls `fetch_signed_byte()` **once** and `indexed_address` **once**, and `indexed_address` (`:655`) performs the addition once. `read_target` (`:685`), `write_target` (`:693`) and `tick_read_modify_delay` (`:703`) all take `Target` **by value**; `increment_operand` (`:912`) threads one `Target` through read → delay → write, and `execute_cb` (`:543`) does the same for `DDCB`. `tick_index_computation` (`:677`) charges the addition once, at four sites each guarded by `matches!(target, Target::Memory(_))`. **The decisive check is negative, and git dates it exactly.** `rg '\bread_operand\b\|\bwrite_operand\b'` across the tree matches **nothing in any crate** — every hit is prose in this document. `git grep -c read_operand 01c93ac -- crates/z80/src/` gives **5 occurrences in `instructions.rs` at M1**; the same grep at `8021b4f` — **M2** — gives **none**, and `git grep 'enum Target' 8021b4f` puts it at `crates/z80/src/decode.rs:146`, **the line it occupies today**. So the refactor landed in the very milestone the row named as its settling condition, *"M2's opening move"*, and the row then survived M2, M3, M4, M5 and M6 unchanged. **Five milestones describing three functions that had already been deleted when the row's own deadline arrived** |
+| **M1 — resolved-target refactor** | *"`read_operand`, `write_operand` and `tick_read_modify_delay` each recompute `pair(base)` independently. Free for `(HL)`; for `(IX+d)` the displacement must be fetched once and the addition charged once."* Settled by: *"**M2's opening move.** Needs a `Register(RegIndex) \| Memory(u16)` computed once and threaded"* | **Landed, in exactly the shape the settling condition names.** `crates/z80/src/decode.rs:146` is `pub(crate) enum Target { Register(RegIndex), Memory(u16) }`. `instructions.rs:773 fn resolve` is the single point that determines a memory operand's address: the displaced branch calls `fetch_signed_byte()` **once** and `indexed_address` **once**, and `fn indexed_address` (`:790`) performs the addition once. `fn read_target` (`:820`), `fn write_target` (`:828`) and `fn tick_read_modify_delay` (`:838`) all take `Target` **by value**; `fn increment_operand` (`:1082`) threads one `Target` through read → delay → write, and `fn execute_cb` (`:676`) does the same for `DDCB`. `fn tick_index_computation` (`:812`) charges the addition once, at four sites each guarded by `matches!(target, Target::Memory(_))`. **Each of those eight carries its declaration rather than a bare number, and that is a repair rather than a flourish:** the row previously offered `:638`, `:655`, `:677`, `:685`, `:693`, `:703`, `:912` and `:543`, every one of them stale by between 133 and 170 lines and every one landing on unrelated code — an evidentiary apparatus that had drifted off its subject entirely inside a row whose own thesis is that a claim must be mechanically checkable. A line number paired with `fn resolve` can be checked by grep; a line number alone can only be believed. **The decisive check is negative, and git dates it exactly.** `rg '\bread_operand\b\|\bwrite_operand\b'` across the tree matches **nothing in any crate** — every hit is prose in this document. `git grep -c read_operand 01c93ac -- crates/z80/src/` gives **5 occurrences in `instructions.rs` at M1**; the same grep at `8021b4f` — **M2** — gives **none**, and `git grep 'enum Target' 8021b4f` puts it at `crates/z80/src/decode.rs:146`, **the line it occupies today**. So the refactor landed in the very milestone the row named as its settling condition, *"M2's opening move"*, and the row then survived M2, M3, M4, M5 and M6 unchanged. **Five milestones describing three functions that had already been deleted when the row's own deadline arrived** |
 | **M1 — contention within a cycle** | *"Only cycle *starts* are pinned; nothing asserts the address holds constant across a cycle's remaining T-states. It does — but by implementation, not by gate."* Settled by: *"One assertion over `tick_addresses` between consecutive transfers, if it earns its place"* | **The gate exists and the row's premise was false.** `crates/z80/src/lib.rs:1055`, `every_t_state_reports_the_address_the_z80_drives`, asserts the **entire per-T-state address stream** — one `assert_eq!` over the whole `Vec<u16>` — for seven instructions: `ADD HL,BC`, `INC BC`, `JR e`, `CALL nn`, `RST 38h`, `EX (SP),HL`, `OUT (n),A`. It is written as *runs*, e.g. `stream(&[(0x0000, 4), (0x0001, 7)])`, so within-cycle constancy is what it pins, not cycle starts. That is precisely the assertion the settling condition asked for. What *is* start-only is the **FUSE corpus comparison** (`crates/z80/tests/common/report.rs:168`), deliberately and correctly — see the contradiction below, which is the sharper item this closure exposed |
-| **MEMPTR — nothing grades the *value*** | *"And nothing grades the value: FUSE has no MEMPTR column. The instrument exists, is documented, and is neither committed nor run — `tape_corpus.rs` sweeps `z80memptr.tap` as tape-format corpus (pulse-train decode + parity) and **never executes it on the CPU**. Running it through the ROM loader the way M6's T3 runs a `.tap` is what would settle it."* | **`tests/memptr_oracle.rs`, which is exactly the settling condition the row named.** Patrik Rak's `z80test` v1.2a MEMPTR build is loaded from `z80memptr.tap` by the **real ROM's `LD-BYTES`** off the `EAR` bit — all four blocks, 309,241,005 T-states of emulated tape out of a 921,998,240-T-state run — then run on the whole machine, printing through the ROM into the display file, with the verdict read back by `screen::read_text` against the glyphs of the machine's **own** character set. It reports **`Result: 045 of 160 tests failed.`**, and the 45 are pinned **by name** so a rule landing is a red gate rather than a silent improvement. **Green was proven able to fail, by two mutations, each counted before the write and re-read after it, each restored from held bytes.** Deleting the sole `wz` write (`instructions.rs:660`) takes the failing count **45 → 143** (exit 101). Flipping **one byte** of the tape's 14390 — the CODE block's parity — makes the ROM refuse the block and the gate stops at `LOAD_FAILED` before reading any verdict (exit 101), which is this gate's own proof that the program arrives through the loader and not by some other route. **What it does *not* close is the row above it:** the rules are still unimplemented, and *a passing group is not a correct rule* — the first mutation demonstrates that directly, since stranding MEMPTR at zero made **17 currently-failing groups start passing**. A verdict identical under several implementations is evidence for none of them, which is `zex_oracle.rs`'s claim 2 in a second setting. **Since superseded, and the stale half is the clause about the row above:** *"the rules are still unimplemented"* was true when written and is not now — that row closed on 2026-09-01 and is two rows below. The verdict quoted here, `045 of 160`, is this pass's record and not a live figure; the gate reads `all tests passed.` today. The caveat this row ends on did **not** expire with the defect — it is restated, with a number against it, in the Open row *A green MEMPTR oracle is not 160 correct rules* |
-| **M1 — `WZ` / MEMPTR** | *"Carried in `CpuState`, never written."* Settled by: *"M4, when `BIT n,(HL)` first makes it observable"* | **The row's claim was false and its settling condition is met — but only for one of MEMPTR's rules, so it closes into the narrower Open row above rather than outright.** `crates/z80/src/instructions.rs:660` — `self.wz = effective;` — writes it on every indexed effective-address computation, and `test_bit` (`:589-602`) reads the high byte back for **both** memory forms of `BIT n,s`. It is observable and *observed*: `crates/z80/tests/fuse_vectors.rs:213-231` carries four `CORPUS_OMISSIONS` for `BIT 1/3/5/6,(HL)` whose stated reason is *"MEMPTR gives 0, the corpus expects…"*, and `crates/z80/src/lib.rs:1405` asserts `wz == 0xA381` after an indexed access. `CHANGELOG.md:394` recorded the change — *"`MEMPTR`/`WZ` is now **live rather than inert**"* — and the register never caught up. The residue is that **one** site writes it and nothing grades its value |
+| **MEMPTR — nothing grades the *value*** | *"And nothing grades the value: FUSE has no MEMPTR column. The instrument exists, is documented, and is neither committed nor run — `tape_corpus.rs` sweeps `z80memptr.tap` as tape-format corpus (pulse-train decode + parity) and **never executes it on the CPU**. Running it through the ROM loader the way M6's T3 runs a `.tap` is what would settle it."* | **`tests/memptr_oracle.rs`, which is exactly the settling condition the row named.** Patrik Rak's `z80test` v1.2a MEMPTR build is loaded from `z80memptr.tap` by the **real ROM's `LD-BYTES`** off the `EAR` bit — all four blocks, 309,241,005 T-states of emulated tape out of a 921,998,240-T-state run — then run on the whole machine, printing through the ROM into the display file, with the verdict read back by `screen::read_text` against the glyphs of the machine's **own** character set. It reports **`Result: 045 of 160 tests failed.`**, and the 45 are pinned **by name** so a rule landing is a red gate rather than a silent improvement. **Green was proven able to fail, by two mutations, each counted before the write and re-read after it, each restored from held bytes.** Deleting the sole `wz` write — `instructions.rs:660` on the day it was measured, which is `fn indexed_address`'s `self.set_memptr(effective)` at `:795` since the single-writer refactor — takes the failing count **45 → 143** (exit 101). Flipping **one byte** of the tape's 14390 — the CODE block's parity — makes the ROM refuse the block and the gate stops at `LOAD_FAILED` before reading any verdict (exit 101), which is this gate's own proof that the program arrives through the loader and not by some other route. **What it does *not* close is the row above it:** the rules are still unimplemented, and *a passing group is not a correct rule* — the first mutation demonstrates that directly, since stranding MEMPTR at zero made **17 currently-failing groups start passing**. A verdict identical under several implementations is evidence for none of them, which is `zex_oracle.rs`'s claim 2 in a second setting. **Since superseded, and the stale half is the clause about the row above:** *"the rules are still unimplemented"* was true when written and is not now — that row closed on 2026-09-01 and is two rows below. The verdict quoted here, `045 of 160`, is this pass's record and not a live figure; the gate reads `all tests passed.` today. The caveat this row ends on did **not** expire with the defect — it is restated, with a number against it, in the Open row *A green MEMPTR oracle is not 160 correct rules* |
+| **M1 — `WZ` / MEMPTR** | *"Carried in `CpuState`, never written."* Settled by: *"M4, when `BIT n,(HL)` first makes it observable"* | **The row's claim was false and its settling condition is met — but only for one of MEMPTR's rules, so it closes into the narrower Open row above rather than outright.** `fn indexed_address` (`crates/z80/src/instructions.rs:795`) writes it on every indexed effective-address computation — `self.wz = effective;` when this row was written, `self.set_memptr(effective);` since the single-writer refactor — and `fn test_bit` (`:724`) reads the high byte back for **both** memory forms of `BIT n,s`. It is observable and *observed*: `crates/z80/tests/fuse_vectors.rs` carries four `CORPUS_OMISSIONS` for `BIT 1/3/5/6,(HL)` at `:213`, `:219`, `:225` and `:231`, each with the stated reason *"MEMPTR gives 0, the corpus expects…"*, and `crates/z80/src/lib.rs:1484` asserts `wz == 0xA381` after an indexed access. `CHANGELOG.md:499` recorded the change — *"`MEMPTR`/`WZ` is now **live rather than inert**"* — and the register never caught up. The residue is that **one** site writes it and nothing grades its value |
 | **MEMPTR is written at exactly one site** | *"`rg 'self\.wz\s*=' crates/z80/src` still returns **exactly one hit**, so every *other* hardware rule — `LD (nn),A`, `JP nn`, `CALL`, `RET`, `EX (SP),HL`, the repeating block ops, `IN`/`OUT`, `ADD/ADC/SBC HL,rr` — is **unimplemented**"*, at a measured cost of **45 of 160** groups | **Every un-prefixed rule in Boo-boo and Kladov is implemented**, behind the single writer `Cpu::set_memptr`. `grep -rn 'self\.set_memptr(' crates/z80/src \| wc -l` returned **28** call sites on 2026-09-01 — 26 in `instructions.rs`, 2 in `lib.rs` for interrupt acceptance and NMI — and `self.wz =` appears nowhere but `set_memptr` and `set_state`. `tests/memptr_oracle.rs` moved **45 of 160 → 0 of 160**, printing `Result: all tests passed.`, and `tests/memptr_rules.rs` grades each rule's exact sixteen-bit result on its own. **The row's self-contradiction closed with it:** `lib.rs` no longer documents the field as *"not yet updated by any instruction"*. What did **not** close is the two narrower Open rows this opened — the oracle's blind spot, `OTIR`/`OTDR`, and the clone variant |
 
 > **What of that oracle row this pass derived, and what it carried across.** The **workspace**
@@ -1297,6 +1391,23 @@ absent.
 >
 > Corrected here rather than deleted, because a reader who acted on *"CI now exists"* — by not
 > checking whether their change was gated anywhere — needs to find out that they did.
+>
+> > **The location above has since gone stale, and it is corrected rather than rewritten because
+> > it is a pointer somebody would follow.** The `ci-pending` branch is deleted; the workflow is
+> > at **`ci/ci.yml`** with `ci/README.md` beside it, which says why it cannot live in
+> > `.github/workflows/` and gives the command that installs it. Nothing else in this note
+> > changes: no pipeline executes it, and the M3 gate is still verified locally and enforced
+> > nowhere.
+> >
+> > What the move surfaced is worth more than the new path. The parked file was checked against
+> > `main` before it was moved and **it would not have run** — its FUSE mirror was not the one
+> > `testdata/README.md` names, its opt-out variable had been renamed and the old spelling made
+> > an error, its runner was missing a system library `crates/page` cannot build without, and it
+> > ran none of the three `#[ignore]`d gates. **That is the cost of parking a file, and it is a
+> > different cost from the missing scope.** A branch that cannot be pushed does not hold still;
+> > it rots against a tree that keeps moving, and every day it waits the thing it will eventually
+> > install is less true. Worth separating from the scope problem, because only one of the two is
+> > fixed by finding the right token.
 
 ### Comments rot at milestone boundaries, so the sweep belongs in "done"
 
@@ -1674,12 +1785,25 @@ pushed. M5 produced the third instance and the most complete one.
 > gates that **nothing ran**. They are not *"occasions where this project shipped evidence that
 > graded less than it appeared to"*, which is the phrase five documents wrap around the number.
 > That broader family is recorded in this document repeatedly and **counted nowhere** — a harness
-> reporting green while verifying nothing (`:1200`), a codegen gate passing vacuously on an
-> artefact that did not contain the subject (`:1366`), the keyboard matrix graded against itself
-> (`:413`), an interrupt window graded against its own constant (`:1504`), an exhaustive sweep
-> narrower than the sample it replaced (`:1530`). Five instances are visible from that list alone,
-> which is presumably where a *"five"* came from — but nobody derived it, the five are not a
-> closed set, and this document has never claimed one.
+> reporting green while verifying nothing (*The harness was reviewed, and it could report green
+> while verifying nothing*), a codegen gate passing vacuously on an artefact that did not contain
+> the subject (*A gate can pass vacuously, and only a positive control catches it*), the keyboard
+> matrix graded against itself (*The keyboard matrix was graded against itself*), an interrupt
+> window graded against its own constant (*A window graded against its own constant*), an
+> exhaustive sweep narrower than the sample it replaced (*Exhaustive on one axis can be weaker
+> than a sample on another*). Five instances are visible from that list alone, which is presumably
+> where a *"five"* came from — but nobody derived it, the five are not a closed set, and this
+> document has never claimed one.
+>
+> **Those five are named by section and not by line, and the reason is the subject of this whole
+> note.** They were written as `:1200`, `:1366`, `:413`, `:1504` and `:1530`, and **not one of the
+> five still resolved** when they were followed — four of them landed more than a hundred lines
+> from the section they claimed, on prose about an unrelated subject. A bare line number carries
+> no redundancy: nothing inside it can be compared against what it points at, so it cannot fail
+> loudly, only drift silently. A section title can be grepped, and a wrong one announces itself.
+> **No replacement numbers are given here on purpose** — this document is edited in the middle far
+> more often than at the end, so any five line numbers written into this paragraph would be wrong
+> again by the next pass, including the pass that wrote them. The titles above are the citation.
 >
 > **The phrase everybody quotes is not this document's.** *"The worst form so far"* is
 > [`MACHINE.md`](MACHINE.md)`:132`'s. On 2026-09-01, **before this note existed**,
@@ -1694,8 +1818,62 @@ pushed. M5 produced the third instance and the most complete one.
 > about the broader family and **must not carry an integer**, because there is not one to carry.
 > `crates/frontend/src/lib.rs` and `src/bin/zx-shot.rs` said *"five"*; `M6.md` (twice), `M7.md`,
 > `crates/spectrum/src/tape/mod.rs`, `tape_corpus.rs` and `snapshot_corpus.rs` said *"three"* with
-> the wrong noun or the wrong attribution or both; `ARCHITECTURE.md:362` and `README.md:101` say
-> *"three gates that ran nowhere"* and are **correct as they stand**.
+> the wrong noun or the wrong attribution or both.
+>
+> **Two sentences elsewhere carry it correctly, and they are the ones to copy.** `ARCHITECTURE.md`
+> says *"a gate that runs nowhere, which `STATUS.md` records three times already"* — in its M6 row,
+> beside the T4 tier it declines to gate on — and `README.md` says the same thing in its own words,
+> *"a milestone gated on it would be a gate that runs nowhere — which `docs/STATUS.md` records this
+> project shipping three times already"*. Right count, right family, right noun, in both.
+>
+> **The exemplars were right and the citation of them was not, which is the sharper half.** This
+> note used to send readers to ~~`docs/ARCHITECTURE.md:362`~~ and ~~`README.md:101`~~ for those
+> sentences, and **neither coordinate ever held one**: at the commit that introduced the pair,
+> `:362` was a sentence about a design's two halves and `:101` was a **blank line** — a dated claim
+> about a commit, which is why drift cannot touch it. The phrase it put in their mouths,
+> *"three gates that ran nowhere"*, is not theirs either — `rg 'gates that ran
+> nowhere'` returns `docs/M6.md` and `crates/spectrum/tests/snapshot_corpus.rs`, which are two of
+> the files listed a paragraph above as needing correction. **Those two coordinates carried line
+> numbers until now, and one of them had already drifted** — the `M6.md` hit moved from `:649` to
+> `:672` — inside the paragraph whose subject is that exact failure. The command is printed beside
+> them, so the digits bought nothing and rotted anyway; running it is the citation. So this note acquitted two
+> sentences it had not read, in words borrowed from the files it was convicting, at addresses that
+> pointed at nothing. **An acquittal is the citation nobody re-checks**, which is why it survived
+> longer than any of the accusations around it: a wrong finding invites an argument, and a wrong
+> exoneration closes one.
+>
+> **Both coordinates were re-derived, and what they hold is not the point — which is the correction
+> this paragraph needed itself.** It used to rest its case on ~~`README.md:101`~~ being *"still a
+> blank line"*, and that sentence was true when written and false by the time it was next read: the
+> line gained content under an unrelated edit and now carries prose about the ROM's `LD-BYTES`
+> toggling the border. ~~`docs/ARCHITECTURE.md:362`~~ is a `regs: [u8; 26]` field declaration, a
+> third thing again. **The argument never needed either observation.** What convicts the citation is
+> that neither coordinate ever named the sentence it claimed to name, and nothing a later occupant
+> does can change that: the two exemplars are found today by their words — `ARCHITECTURE.md`'s
+> *"a gate that runs nowhere, which `STATUS.md` records three times already"* and `README.md`'s
+> *"records this project shipping three times already"* — and each sits hundreds of lines from the
+> address it was given. **That is why the two exemplars above are quoted and not addressed.** A
+> citation carrying a quoted fragment or a function name is re-found by `rg` after any amount of
+> drift; one carrying only a coordinate can only be believed, and repointing it at whatever occupies
+> the line today is how a wrong exoneration gets re-issued.
+>
+> **A specimen rots in the opposite direction from a citation, and nothing here had recorded that
+> shape.** A coordinate quoted *as an example of a broken pointer* carries a claim of its own —
+> *nothing lives here* — and it is falsified not by its target moving away but by something moving
+> **in**. The citation gate is structurally blind to it, because the gate's entire question is
+> whether a cited line has content: a specimen going wrong turns the gate **red → green**, by the
+> same non-event that turns a good citation bad, running backwards. Catching it would need a second
+> mark meaning *"I assert this coordinate is empty"*, and the gate's author declined to invent one
+> on a single observation, on the ground that **a mark nobody has the habit of writing is a mark
+> nobody writes**. That restraint is right, and it is why this paragraph is repaired in prose rather
+> than by a mechanism: an argument that does not depend on its specimen cannot be falsified by one.
+> What the gate does honour is **strikethrough** — a struck `` `path:NNN` `` — as the specimen mark,
+> and that mark is self-grading by construction: the mark *is* the text, so it travels when the file
+> grows, and the edit that stops something being a specimen removes the mark in the same keystroke
+> and puts the citation back under the gate. A registry kept beside the prose could never have that
+> property. The dead coordinates above are struck for that reason — it tells a reader at a glance
+> what they are, and stops the gate accusing them. The general form is at the end of this document,
+> under *A hazard named as future work is optional*.
 
 The boot gate — the thing `MACHINE.md` ranks **first** in its verification plan — is
 `crates/spectrum/examples/boot.rs`. **`cargo test` builds an example and never calls its `main`.**
@@ -1945,6 +2123,16 @@ commit that names them**:
 instance. Not "check the related documents" — grep, because the instinct for which documents are
 related is exactly what failed both times.
 
+**And grep the claim's *noun*, not the figure — the rule above says *grep for it*, and *it* was the
+wrong operand.** Measured on the `.z80` frame-position gate, whose count has now been corrected four
+times with every round reporting a clean sweep: each round searched for the number it was replacing,
+and a search for a figure returns only the copies that already agree with it. The survivors said
+*three* where the new figure was *six*, or *six* with no per-machine qualifier — invisible to a
+search for either number. Searching the half of the sentence a renumbering leaves alone —
+*"derived by hand"*, *"exhaustive sweep"*, *"by hand from the format"* — returned every copy in one
+pass. This is the anchoring rule below (*a hazard named as future work is optional*) applied to a
+search rather than to a citation: the noun is the shape, the number is the thing that moves.
+
 The deeper point is that *re-derive rather than cite* is a rule about **the document set**, not
 about one file. A correction applied file-by-file leaves the corpus internally inconsistent, and an
 inconsistent corpus is worse than a uniformly wrong one: a reader who checks two sources and finds
@@ -1991,6 +2179,19 @@ defect — and every one of them was cheaper to grep for than to argue about.
 > publishing it unchecked would have put a false claim in this table — **a sweep result is a
 > document too, and this document's own rule is to verify against the code and not against a
 > document.** The rule earned its keep on the one row where it was tested.
+
+> **This rule has a sibling, it lives in `README.md`, and this paragraph is a pointer rather than
+> a second copy.** The rule above is about a citation that *went* wrong; it says nothing about one
+> that was false the day it was written. A twelve-citation audit classified each at its
+> introducing commit — `git log -S`, not inference — and split **five wrong-when-written against
+> seven broken-by-drift**. Only the drift half is reachable by anchoring and grepping, because
+> only it has a checkable subject; each of the five named something that had never existed, so no
+> citation format would have caught them. The other rule — *a citation is not written until its
+> target has been read* — is therefore stated once, in `README.md`'s **Engineering rules**,
+> alongside its evidence: `docs/ARCHITECTURE.md` promoting
+> `crates/frontend/tests/portability.rs`'s `this_crate_still_forbids_unsafe` from one crate to
+> four, written **during** a pass that was correcting a different false citation. Two files, one
+> rule each, and a link between them. Writing it out in both is the defect this section is about.
 
 ### A verification that cannot ask its own question
 
@@ -2138,6 +2339,41 @@ The general rule, and it is not "distrust manuals": **when a primary source and 
 disagree, record both and say which one the code follows.** A model that silently matches the
 source is unfalsifiable against the hardware; a model that silently matches the hardware leaves the
 next reader to rediscover why the manual is wrong.
+
+### A hazard named as future work is optional; a shape that refuses the wrong version is not
+
+`M7.md` Decision 4 predicted the `.z80` T-state defect in writing — the file, the constant, the
+reason the assertion would stay green, the test that had to change, and `17727` printed in its own
+parenthesis — and it shipped anyway. The instance, its arithmetic and its measured cost live there,
+under *"Prose can name a defect; only a type or a gate can refuse it"*, and are not repeated here.
+What belongs in this register is the diagnosis, because it is not carelessness and it is not about
+snapshots.
+
+The instruction asked for a **task** — a test that *"must become exhaustive over both frame
+lengths"* — and a task is satisfied by a reader who agrees with it and then does something else,
+with **nothing going red in between**: the defect was invisible to every gate that existed, because
+our reader shared our writer's misreading, so `parse(write(s)) == s` stayed green while every file
+we wrote disagreed with every other emulator. There was no moment at which skipping it had a cost.
+The two instructions in the same document that needed no such paragraph asked for a **shape**
+instead — Decision 1's `paging_port_at_reset` is a field that must be assigned, Decision 2's
+`BankIndex::new` is a constructor that masks — and neither requires anyone to remember anything. So
+does the fix that finally landed: `quarter_t_states(model)` takes the model as an argument, so a
+caller cannot fail to supply one, and `MODELS` is an array the counter gates iterate rather than a
+reminder to add a second case. **Where a hazard is identified, spend the sentence on the shape that
+makes the wrong version unwriteable, not on the task of writing the right one.**
+
+It has a sibling above — *an unenforced instruction to re-measure is the same defect as an unrun
+gate*, under *Comments rot at milestone boundaries* — and the remedies differ in a way worth keeping
+apart: that one is closed by making compliance cheaper than re-deriving, this one by leaving nothing
+to comply with.
+
+**The same distinction decides how a citation is written, and there is a measurement for it.** A
+bare `file:line` asks a future reader to keep it true; an anchor — a function name, a constant, a
+quoted fragment — is a shape that survives the file moving, because `rg` re-finds it. A citation
+gate run this evening found **10** of this repository's 122 resolvable line citations carrying one,
+and `docs/M7.md` grew from 1984 to 2022 lines inside a single session, turning a citation into it
+red with nobody touching either the citing sentence or the cited one. No convention about *where* a
+citation lives can fix that; only removing the line number can.
 
 ## How this project is verified
 

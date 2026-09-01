@@ -32,6 +32,7 @@ so a new copy has to be argued for rather than swept in by a glob.
 | `index.html` | this directory. The canvas, the key guide, and the Amstrad acknowledgement as visible text |
 | `mq_js_bundle.js` | **vendored** from the pinned `macroquad` crate — provenance below |
 | `zx_page.js` | this directory. The only JavaScript this project wrote: the query string, the download, and focusing the canvas |
+| `zx_audio_worklet.js` | this directory. The audio worklet, fetched **by name** at run time by `audioWorklet.addModule` &mdash; so a build that omits it produces a page that starts, draws and is silent, with the explanation in a console nobody has open. `gate.sh`'s T2 asserts both that the file is here and that `build.sh` copies it, precisely to convert that into a build-time failure |
 | `zx.wasm` | `cargo build --release --target wasm32-unknown-unknown --bin zx` |
 | `testdata/roms/48.rom` | copied from the checkout, at the path `DEFAULT_ROM` names, so a bare URL boots |
 
@@ -51,7 +52,7 @@ agreement rather than parsing. Paths are relative to the page, are **not** perce
 value goes straight back into an HTTP request), and a `rom` key works for an extensionless path
 because it emits `--rom`.
 
-A file can also be **dragged onto the page** — `.tap`, `.z80` or `.sna`. Dropping a `.rom` is
+A file can also be **dragged onto the page** — `.tap`, `.tzx`, `.z80` or `.sna`. Dropping a `.rom` is
 refused with `a ROM cannot be loaded into a machine that is already running`, which is the
 right answer: a ROM is what the machine is made of, and swapping it means starting the emulator
 again, which in a browser is reloading the page.
@@ -152,7 +153,7 @@ sh web/gate.sh
 |---|---|---|
 | Every existing frontend gate, plus the query/`argv` agreement table and the download's refusal codes | **proven** | yes |
 | `crates/frontend` contains no `cfg(target`, and `crates/page` does | **proven** | yes |
-| The `unsafe` surface is three blocks, one extern block and one attribute, each with a `SAFETY:` comment | **proven** | yes |
+| The `unsafe` surface is five blocks, two extern blocks and one attribute, each with a `SAFETY:` comment — `EXPECTED_BLOCKS`, `EXPECTED_EXTERN_BLOCKS` and `EXPECTED_UNSAFE_ATTRIBUTES` in `crates/page/tests/unsafe_inventory.rs` | **proven** | yes |
 | `cargo clippy --target wasm32-unknown-unknown` — the only run that lints the `unsafe` blocks at all | **proven**, of the wasm build | **no** |
 | The crate builds and **links** for `wasm32-unknown-unknown` | **proven**, of the link | **no** |
 | The artefact exists, clears a size floor, and carries the imports `zx_page.js` provides and the exports `gl.js` calls | **proven**, of the artefact | **no** |
@@ -178,6 +179,17 @@ test.
 An unrecorded observation is indistinguishable from one nobody made. Each run is recorded with
 browser, version, operating system, what was done, what happened, and the date, exactly as M6's
 T4 requires.
+
+**Every entry below is fixed to its date and to the build it was taken on, and none of it is
+edited afterwards.** That is the whole of what a log is worth: a record quietly brought up to date
+has stopped being evidence of anything, and a reader who cannot tell the two apart has no way to
+know which he is holding. So this section is **history** — the sections above it are the current
+behaviour, and where the two disagree the machine has moved since the run rather than the record
+being wrong. It has moved twice already. The status bar photographed in step 6 has since been
+split into two rows and reports the sound queue and the arrow scheme as well; and the `.tzx`
+refused by name in step 10 now **loads** — `crates/frontend/src/media.rs` names five loadable
+extensions, `.rom`, `.tap`, `.z80`, `.sna` and `.tzx`, and the table of formats it knows but
+cannot yet read is empty.
 
 ### 2026-09-01 — Chrome (stable), macOS 15.6 / Darwin 25.6.0, aarch64
 

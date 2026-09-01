@@ -18,12 +18,12 @@ else will tell us.
 
 > **CORRECTION — the heading is now wrong for one of the four things it names, and only for a 48K.**
 > `crates/spectrum/tests/timing_oracle.rs` landed on 2026-09-01 and grades the 48K contention model
-> against 68 hardware-measured numbers this project did not write. *The Timing Oracle*, below,
+> against 70 hardware-measured numbers this project did not write. *The Timing Oracle*, below,
 > carries the full account. Two of the sentences above therefore need their scope narrowed rather
 > than deleted:
 >
 > - *"None of that exists for a machine"* — **it does now, for 48K contention.** A mutation either
->   dies or does not, and thirteen were run against it.
+>   dies or does not, and fourteen were run against it.
 > - *"Contention correctness … verified against known-demanding software … that is observation"* —
 >   **48K contention is no longer graded by observation.** Floating-bus values, screen timing and
 >   keyboard behaviour still are, and the sentence remains true of them.
@@ -175,7 +175,7 @@ Ranked by how much they actually prove:
    available, and it is a real one: a number to compare, not a picture to squint at.
 
    **Written, and it landed green on its first run.** `crates/spectrum/tests/timing_oracle.rs`
-   runs Richard Butler's 48K timing test suite on the machine and compares 68 hardware-measured
+   runs Richard Butler's 48K timing test suite on the machine and compares 70 hardware-measured
    numbers. The corpus, why it is not circular, what its green establishes and — the part that
    matters more — the three things it leaves ungraded are in *The timing oracle*, below. The
    headline: **`FIRST_CONTENDED_T_STATE = 14335` survived**, and it is the only value in
@@ -230,6 +230,17 @@ saved from one machine. So the sharper statement, which is the one `STATUS.md` r
 > **Only an expectation that owes nothing to the code under test sees a symmetric error**, and a
 > foreign file proves a field is *readable* rather than that our arithmetic on it is right.
 
+**The 69888 above is the range that run was taken on, not a description of the gate.** The `.z80`
+frame-position counter was a 48K-only function when those two mutations were measured — at M6,
+merged as `0d3e7ef` on 2026-09-01 — so the sweep covered that machine's frame and no other, and the
+hand-worked positions are that machine's. M7 made the quarter a function of the model, and each
+machine is now swept over its own frame, 69888 **and** 70908, with six hand-worked positions per
+machine and an assertion that the two encode position 0 differently. **Nothing records a mutation
+taken since**, so the verdict stands at the gate it was taken on; restating it against the wider one
+would claim a run nobody made, which is a worse defect than a stale number.
+`crates/spectrum/src/snapshot/z80.rs`'s `encode_t_states` states the same boundary from the code's
+side, and [`STATUS.md`](STATUS.md)'s copy of the mutation table carries the same framing paragraph.
+
 **A round trip is a consistency check between two functions this project wrote.** That is the
 keyboard-matrix tautology in different clothing — and the difference, which is real and is why the
 item keeps its rank, is that a round trip **does** have a reachable failing case: an asymmetric
@@ -270,12 +281,12 @@ tier that grades a loader nobody here wrote.
 
 ### Item 2 produced a kind of result this plan did not anticipate — a sourced negative
 
-The plan ranked item 2 by what it could *confirm*. It has done that: 68 hardware rows, 0
-disagreements, thirteen mutations, and `FIRST_CONTENDED_T_STATE = 14335` the unique survivor over
+The plan ranked item 2 by what it could *confirm*. It has done that: 70 hardware rows, 0
+disagreements, sixteen mutations, and `FIRST_CONTENDED_T_STATE = 14335` the unique survivor over
 ±2. The section below is the full account.
 
 **What the plan had no category for is that the same corpus produced a negative result about the
-limits of the model it grades.** Three of the 68 rows — groups 3, 7 and 34 — resist when the
+limits of the model it grades.** Three of the original 68 rows — groups 3, 7 and 34 — resist when the
 machine is made to classify as the *other* hardware table, and [`M7.md`](M7.md) Decision 11
 establishes that **their demands are mutually inconsistent**: each row implies an offset, the
 implied intervals do not intersect, and one of the three wants the opposite sign from the other
@@ -364,7 +375,7 @@ Ranked by what they could actually settle for a 48K, using this project's own vo
 
 | Candidate | What it is | Self-checking? | Tier |
 |---|---|---|---|
-| **[ZXSpectrum4.net 48K timing tests](https://www.zxspectrum4.net/op_timing.php)** (Richard Butler, 2010) | A `.z80` snapshot: 34 instruction groups run in a loop until the frame interrupt, each in contended and uncontended memory, against two tables of expected `R` / loop-count / `SP` carried inside the file | **Yes** — three numbers per group, compared against the file's own tables | **Measured.** The authors state *"In order to get the correct results we ran the tests on real Spectrums"*, and 28 genuine machines from 9 independent submitters are on record, 25 of which classify into the file's two tables |
+| **[ZXSpectrum4.net 48K timing tests](https://www.zxspectrum4.net/op_timing.php)** (Richard Butler, 2010) | A `.z80` snapshot: 37 machine-code groups — 34 over the documented instruction set, and three sharing one program — run in a loop until the frame interrupt, each in contended and uncontended memory, against two tables of expected `R` / loop-count / `SP` carried inside the file | **Yes** — three numbers per group, compared against the file's own tables | **Measured.** The authors state *"In order to get the correct results we ran the tests on real Spectrums"*, and 28 genuine machines from 9 independent submitters are on record, 25 of which classify into the file's two tables |
 | [MrKWatkins/EmulatorTestSuites](https://github.com/MrKWatkins/EmulatorTestSuites) | The same suite repackaged as a C# NuGet library with a harness interface, GPL-3.0 | Yes — it *is* the suite above | Same tier; it is a **redistribution**, not a second opinion. This is where the file is fetched from, because the original download link 404s |
 | [Chris Smith, *The ZX Spectrum ULA*](http://www.zxdesign.info) (2010) | Silicon-level reverse engineering of the ULA, with the contention mechanism derived from the actual gate structure | No — it is a **book** | Would be **proven**, and is unusable as a gate. `zxdesign.info` also refused connection on both HTTP and HTTPS throughout this work |
 | [Sinclair Wiki, *Contended memory*](https://sinclair.wiki.zxnet.co.uk/wiki/Contended_memory) | The community's reference page: *"14335 or 14336"*, pattern `6,5,4,3,2,1,0,0` | No | **Derived**, and it is *this project's own source*. Grading against it would be circular by construction |
@@ -480,12 +491,22 @@ This gate positions the machine by the **interrupt**, and then lets a program th
 runs count how much work fits in a frame. Nothing in it is expressed in terms of 14335, the
 pattern, or the four cases; every expected number is read out of the corpus.
 
-**Result, 2026-09-01: 3 tests, 68 graded rows, green on the first run.** The machine reproduces
-`TYPE1 (Early)` — the majority class, 17 of the 25 machines that classify — with **0 of 68**
-disagreements. Groups 35–37 are excluded and named: they read the floating bus, which this machine
-does not model.
+**Result, 2026-09-01: 3 tests, 68 graded rows, green on the first run — and 70 rows before the day
+was out.** The machine reproduces `TYPE1 (Early)` — the majority class, 17 of the 25 machines that
+classify — with **0 disagreements** at either range. Groups **36 and 37** are excluded and named:
+they read the floating bus, which this machine does not model.
 
-One of those 68 is worth naming. **Group 27 is `BIT (HL); RES (HL); SET (HL); INC (HL); DEC (HL)`,
+**Group 35 was excluded with them, and the verdict was right for the wrong reason, which is the
+more expensive kind of wrong.** The three are one program: `timing_oracle.rs` reads that out of the
+suite's dispatch table, whose entries for 35, 36 and 37 all hold the same address, and out of the
+BASIC, where the only difference between them is how many rows of text are printed before the run.
+**Sharing a program with two groups that need a floating bus is not the same property as needing
+one**, and the part of group 35 that matters here never touches the bus: its loop addresses
+`(C<<8)|C` with `C` a counter advancing once per iteration, which is a port and not a bus reading.
+Adding it costs two rows, and those two rows are the first check from outside this project on a
+term that had been graded only against this project's own transcription of the published rule.
+
+One of the rows is worth naming. **Group 27 is `BIT (HL); RES (HL); SET (HL); INC (HL); DEC (HL)`,
 and it is graded in contended memory over 143 iterations.** That is the read-modify-write family
 whose price two derivations disagreed about at M5 — 26 against 30 for `INC (HL)` at phase 0 — and
 it now agrees with hardware, integrated over a frame. It does not adjudicate 26 against 30 directly,
@@ -497,8 +518,9 @@ contending — are red here at 29 and 34 of 68.
 ### The green was then proven able to fail
 
 A green first run is exactly what this project distrusts, so thirteen mutations were run against
-the gate. **Every one had its landing verified before its verdict was trusted** — occurrence count
-asserted, file re-read after the write, and restored from held bytes with the SHA-256 compared.
+the gate, and group 35 brought three more — sixteen. **Every one had its landing verified before
+its verdict was trusted** — occurrence count asserted, file re-read after the write, and restored
+from held bytes with the SHA-256 compared.
 
 | Mutation | Oracle |
 |---|---|
@@ -512,9 +534,61 @@ asserted, file re-read after the write, and restored from held bytes with the SH
 | `Ula::fetch` charges a 3-T read instead of an M1 cycle | **RED**, 29 of 68 |
 | Standalone internal cycles never contend | **RED**, 34 of 68 |
 | I/O case `N:1, C:3` → no stall | **RED**, 4 of 68 |
-| I/O case `C:1,C:1,C:1,C:1` — fourth term dropped | **GREEN** |
+| I/O case `C:1,C:1,C:1,C:1` removed outright — `(true, false) => 0` | **RED**, 2 of 70 — both of them group 35's |
+| The same case kept, weakened to the two-stall shape of `(true, true)` | **RED**, 2 of 70 — both of them group 35's |
+| The same case kept, its fourth term alone dropped from the sum | **RED**, 1 of 70 — group 35 uncontended, and only that row |
 | `INTERRUPT_T_STATES` 32 → 24 | **GREEN** |
 | Interrupt asserted one T-state later **and** the window moved to 14336 | **GREEN** |
+
+**The denominator moves inside that table and the reason is the point rather than an untidiness.**
+Twelve of the rows were taken against 68 graded rows and the three `C:1,C:1,C:1,C:1` rows against
+70, because until group 35 was added there was no row that could see that case at all — the verdict
+on it was **GREEN** and the verdict was worthless. The twelve are left at the range they were
+measured against rather than re-run to match; a mutation verdict carries the gate it was taken on,
+and re-stating one against a range it never ran on is how a number acquires authority it did not
+earn. Under all three of the arm's mutations every row in groups 1–34 stayed green, which is the
+other half of what the extension had to demonstrate: the two new rows catch something and disturb
+nothing.
+
+**What the total counts, stated so it can be applied rather than re-argued: a mutation is an
+edit, not a verdict and not a constant.** This table already counts that way — `FIRST_CONTENDED_T_STATE`
+at 14333, 14334, 14336, 14337 and 14361 is five rows and not one, though four of them say only
+"RED"; and the two **GREEN** rows are counted no differently from the red ones, because a mutation
+that fails to move the gate bounds it just as a mutation that moves it does. The three
+`C:1,C:1,C:1,C:1` rows are three by the same standard: three different edits to one `match` arm,
+each independently landed and restored, and each with its own verdict. That they are three rather
+than two is what took the running total from fourteen to sixteen, and the two that had been
+recorded as one pair are not the pair anyone assumed — see below.
+
+**The three are not three readings of one mutation, and the difference is measured.** Deleting the
+arm and weakening it to `(true, true)`'s two-stall shape both change the port's cost at **every**
+group position, so both move group 35's contended *and* uncontended rows. Dropping the fourth term
+alone changes it at **one position in eight** — `tests/io_contention.rs` puts the failure at phase
+**+7** exactly, 17 T-states where the rule wants 23 — and only the uncontended row follows. Reading
+the three as "the case removed, and a weaker version of the same thing" is what produced two
+incompatible two-row tables in this repository, one holding rows 1 and 2 and one holding rows 1
+and 3, each correct and each looking like a contradiction of the other.
+
+**The two fourth-term rows are not redundant, and the difference between them is the finding.**
+Removing the case outright reddens **both** of group 35's rows, contended and uncontended. Dropping
+only the last term of its sum reddens **one** — the uncontended row — and leaves the contended row
+green. So across the two mutations the uncontended row caught everything the contended row caught
+and one thing more, and the pair is not two samples of a single property: the contended row can see
+that the case is *gone*, and only the uncontended row saw its *arithmetic* change. A gate that
+proved itself against the strong mutation alone would have been reported as covering the term,
+and the weak one would have walked through the half of it nothing was watching.
+
+**The candidate explanation is one this document already carries, and it is named rather than
+established.** *A missing stall cannot be added to a total, because every stall shifts the ones
+after it* — the property spelled out for `INC (HL)` at the end of this file, where dropping a stall
+of 5 cost one T-state because the cycle after it opened early where the pattern charged four
+straight back. Group 35's port cycles are contended in both runs, since the port address is what
+selects the case; what differs is what follows them. In the contended copy the next memory cycles
+are contended too and can absorb the shift, and in the uncontended copy they cannot. That has the
+right shape, which is precisely the property this project has been wrong about before — an argument
+that names real quantities, predicts the right verdict and identifies the wrong cause. What would
+settle it is sweeping the contended row against the fourth term's *value* rather than its presence;
+that has not been done.
 
 **14335 is a unique optimum over ±2.** That is the finding this project has been waiting two
 milestones for, and it is the first time any number in `timing.rs` has been compared against a
@@ -549,14 +623,32 @@ cleanly:
 
 ### What it does not grade
 
-Named rather than inferred, per the instruction at the top of the verification plan.
+Named rather than inferred, per the instruction at the top of the verification plan. **One entry
+below has gone from a gap to a caveat**, and it is flagged here rather than left for a reader to
+discover a closed item sitting in a list of open ones.
 
-- **The floating bus.** Groups 35–37 exist, need it, and are excluded by name. They are also the
-  suite's *port* I/O timing groups, which is why the next row is what it is.
-- **The four-case I/O rule's fourth term.** Dropping it entirely leaves the gate green: a contended
-  address that is *not* the ULA's port (`C:1,C:1,C:1,C:1`) is not reached by groups 1–34.
-  `io_contention.rs` remains the only gate on that case, and it is hand-derived from the published
-  rule. The `N:1, C:3` case *is* graded here, at 4 of 68.
+- **The floating bus.** Groups **36 and 37** exist, need it, and are excluded by name. Group 35 is
+  the third member of that same program and *is* graded — on a technicality that belongs beside its
+  green rather than behind it. It passes because `FLOATING_BUS_BYTE` is `0xFF`, and `0xFF` lies
+  outside the 48K's contended range `0x4000..=0x7FFF`, so the four bus-dependent `IN r,(C)` cycles
+  that close its loop address uncontended memory and cost nothing — **not** because a bus is
+  modelled. The row is live to that constant, and a real floating bus, implemented later, can
+  redden it for reasons that have nothing to do with contention. `timing_oracle.rs`'s own *Group
+  35* section carries the coupling and the exact shape of that failure; it should be read before
+  that row is either relied on or repaired.
+- **The four-case I/O rule's fourth term — graded since group 35 was added, and now by two
+  instruments rather than one.** A contended address that is *not* the ULA's port
+  (`C:1,C:1,C:1,C:1`) is not reached by groups 1–34, which is the measurement this entry was
+  written from and it still holds. What did not hold is the range it was stated over: group 35
+  reaches the case directly, sweeping `C` over both parities of A0 and every high byte, so every
+  odd `C` in `0x41..=0x7F` is exactly that case, and both readings of dropping the term are red
+  above. **`io_contention.rs` is no longer the only gate on it.** What remains is not a gap but a
+  division of labour, and it is the same one the entry below states for instructions: this gate is
+  external and integrated over a frame, so it can say the term is wrong and not which part of it,
+  while `io_contention.rs` is exhaustive over four ports × eight phases with every expectation
+  hand-derived from the published rule, so it can say which case is wrong and not whether the rule
+  is. Neither subsumes the other. The `N:1, C:3` case has been graded here since the first run, at
+  4 of 68.
 - **`DEC`, the `IY` forms, and every instruction-level figure.** This gate integrates a frame; it
   cannot attribute a discrepancy to an instruction. `contention_magnitude.rs` is still what does
   that, and the two are complementary rather than redundant — one is exact and unanchored, the

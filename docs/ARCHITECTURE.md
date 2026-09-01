@@ -6,27 +6,111 @@ Target: a correct ZX Spectrum **48K and 128** emulator, CPU-first, correctness-g
 
 1. **Latest stable libraries only.** Every dependency is pinned to the newest stable
    release, verified against crates.io. No legacy versions, no `*`.
-2. **`unsafe_code = "forbid"`** in every crate. If `unsafe` looks necessary for speed,
-   it is premature — this machine runs thousands of times faster than a 3.5 MHz Z80.
+2. **`unsafe_code = "forbid"`** in every crate **except one**. If `unsafe` looks necessary
+   for speed, it is premature — this machine runs thousands of times faster than a 3.5 MHz
+   Z80. The exception is not about speed and is not an exception to that: `crates/page` holds
+   the browser FFI, where `unsafe` is unavoidable in kind rather than optional for
+   performance. See *Crate boundaries*.
 3. **`overflow-checks = true` even in release.** The Z80 is meant to wrap; every wrap
    is written as an explicit `wrapping_*` call, so debug and release must agree.
    A silent wrap is a bug, not a feature.
 4. Correctness has an external oracle up to M4. After that it is observation. Do not
    mix the two modes.
 
+> **Rule 2 said "in every crate" for a milestone after it stopped being true, and that is the
+> worst line in this document to have carried a stale absolute.** A reader acting on it believes
+> there is no `unsafe` anywhere and does not go looking — which is precisely the confidence the
+> rule is supposed to earn rather than assert. The rule *survives*, and it survives in a stronger
+> form than it had: one crate, one file, five blocks, each with a `SAFETY:` comment, with the
+> counts asserted by a test and `crates/frontend`'s own `forbid` asserted as literal text by
+> another. Naming the exception is what makes the rule checkable; leaving it unnamed made it a
+> slogan.
+>
+> **Rule 4 is also narrower than it now needs to be, and the correction already exists further
+> down rather than here.** *"After M4 it is observation"* stopped being true for **contention**
+> at M5: `crates/spectrum/tests/timing_oracle.rs` grades this machine against T-state counts
+> measured on real Spectrums, which is a tier-1 oracle by the *Testing* section's own definition
+> — a number to compare, not a picture to squint at. The rest of the rule stands, and stands
+> exactly: the floating bus, progressive drawing and keyboard ghosting are not modelled, so they
+> are **not gradeable** rather than ungraded. The full statement of what that oracle does and
+> does not settle is in *Testing*, and only there.
+
 ## Crate boundaries
 
 ```
 crates/z80/         pure CPU core. No memory, no I/O, no allocation, no std needed.
-crates/spectrum/    the machine: paged memory, ULA, contention, keyboard, tape, AY.
-crates/frontend/    macroquad, native + WASM.
+crates/spectrum/    the machine: paged memory, ULA, contention, keyboard, joystick,
+                    tape, snapshots, screen, and the two things that make a noise.
+crates/frontend/    macroquad: the window, the device, the mix, the keymap, pacing.
+crates/page/        the browser's half of the frontend's host seam. FFI, and nothing else.
+crates/testsupport/ the corpus-absence policy every gate shares. Never published.
 ```
 
 The CPU does not own memory. That is the decision everything else hangs on.
 
+> **This block listed three crates for two milestones after there were five**, and the two it
+> omitted are the two whose existence is an argument rather than an arrangement. Both are small,
+> and being small is the point of both.
+>
+> **`crates/page` exists because `unsafe_code = "forbid"` cannot be relaxed from the inside.**
+> A browser build needs five imported JavaScript functions and one export, and every one of
+> those declarations is `unsafe` — including the export, which in edition 2024 is
+> `#[unsafe(no_mangle)] extern "C"`. `forbid` — unlike `deny` — refuses an `#[allow]` beneath
+> it, so the choice was never *"an attribute on one item"*; it was **relax a whole crate's
+> posture, or confine the FFI to a crate a reviewer can read in one sitting**. `docs/M8.md`
+> Decision 4 took the second. So `crates/page` is *the only crate in this workspace that is not
+> `unsafe_code = "forbid"`*, and the exception is confined to one file: five `unsafe` blocks,
+> two `extern` blocks, one export, each with a `SAFETY:` comment.
+>
+> Two different tests hold the two halves of that, and it is worth saying which does which.
+> `crates/page/tests/unsafe_inventory.rs` asserts the **counts**, because every block is behind
+> `#[cfg(target_arch = "wasm32")]` and a lint fires only on code the current target compiles —
+> so `cargo clippy` on this machine reports the crate clean whatever those blocks contain. And
+> `crates/frontend/tests/portability.rs`'s `this_crate_still_forbids_unsafe` holds
+> **`crates/frontend`'s** `forbid`, reading its own `Cargo.toml` through
+> `include_str!("../Cargo.toml")` and asserting the literal, on the grounds that the alternative
+> to `forbid` is not a compile error but a review nobody is scheduled to perform.
+>
+> **Its scope is one crate, and this document said four.** The test's name says *this crate*; the
+> sentence above it once promoted it to *"every other crate still forbids"*, which it has never
+> checked and cannot — `include_str!` resolves one path. `unsafe_code = "forbid"` is also declared
+> by `crates/z80`, `crates/spectrum` and `crates/testsupport`, and `rg unsafe_code` finds **nothing
+> asserting any of the three**: one manifest of four is guarded, and the gap is stated here rather
+> than closed, because writing the missing assertion is not this pass's to do.
+>
+> **This is worth pausing on, because of when it happened.** The promotion was introduced by the
+> pass that was correcting a *different* phantom-guardian citation, within the hour, in the same
+> paragraph, by an author who had the family's definition in front of them. The defect is not
+> carelessness about tests — it is that prose summarising a gate drifts *upward* by default. A
+> sentence naming what a test covers is easier to write one notch broader than the test, nothing
+> in a green run contradicts it, and the broader claim is the one a reader remembers. **The class
+> reproduces during its own repair**, which is the argument for mechanical anchors over careful
+> writing: careful writing is what produced this line.
+>
+> The seam pays a second dividend that was not the reason for it and is now the larger one.
+> Because both of `page`'s entry points **compile and behave on every target** — the query
+> string is empty off `wasm32`, the download answers `Handoff::NoPage` — `crates/frontend`
+> contains **no `#[cfg(target…)]` at all**, and `crates/frontend/tests/portability.rs` asserts
+> that absence. That absence is the whole reason a test run on this machine says anything about
+> a browser: the code `cargo test -p frontend` runs and the code a browser runs are the same
+> code. It is a property of every build rather than an observation about one, which is the
+> stronger of the two claims this project knows how to make.
+>
+> **`crates/testsupport` is a crate because a policy that lives in two places is two policies.**
+> Several gates read corpora — third-party snapshots, tapes, games — that this repository may
+> not carry, and each needs the same answer to *"the corpus is absent"*. Sharing it through a
+> dev-dependency rather than through a copied helper is what stops one gate quietly resolving
+> absence as success while its neighbour resolves it as failure.
+
 ## Decision 1 — the bus is a consumer-defined trait, ticked once per T-state, with the address
 
 ```rust
+/// The published Z80 machine-cycle lengths. Exported, because they are the decoding key
+/// for the call stream and not an implementation detail a machine happens to need.
+pub const OPCODE_FETCH_T_STATES: u8 = 4;
+pub const MEMORY_ACCESS_T_STATES: u8 = 3;
+pub const PORT_ACCESS_T_STATES: u8 = 4;
+
 pub trait Bus {
     fn read(&mut self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, val: u8);
@@ -35,6 +119,10 @@ pub trait Bus {
 
     /// The opcode byte of an M1 cycle. Defaulted, so implementing it is optional.
     fn fetch(&mut self, addr: u16) -> u8 { self.read(addr) }
+
+    /// One machine cycle, `t_states` long, `IR` on the bus, no transfer — the acknowledge
+    /// of an accepted interrupt. Defaulted, on the `fetch` precedent.
+    fn acknowledge(&mut self, addr: u16, t_states: u8) { let _ = (addr, t_states); }
 
     /// One T-state elapses with `addr` on the bus. Called once per T-state, never batched.
     fn tick(&mut self, addr: u16);
@@ -51,7 +139,25 @@ pub struct Cpu<B> { /* ... */ }
 > defaulted, generic rather than `Box<dyn Bus>` — is unaffected and is gated in
 > `crates/z80/tests/codegen.rs`.
 
-Six methods. **`fetch` is the newest and the only defaulted one**, and it exists because M1 is the
+> **And the arity in that sentence went stale the very next milestone, which is the more
+> interesting failure of the two.** The trait has **seven** methods and **two** defaulted:
+> M7 added `acknowledge`, and the block above now carries it. It also now carries the three
+> exported cycle lengths, which were omitted here as though they were an implementation
+> detail and are not — they are the **decoding key for the call stream**, and an implementor
+> cannot honour the contract without them.
+>
+> **The instructive part is the second half of the sentence: "is gated in
+> `crates/z80/tests/codegen.rs`."** It is not, and never was. That file asserts seven things
+> and the method *count* is none of them — what it gates is the other clause,
+> *generic rather than `Box<dyn Bus>`*, through `the_execute_path_makes_no_indirect_call` and
+> `no_bus_method_survives_as_an_out_of_line_call`. So the arity was a claim with a **named
+> guardian that did not guard it**, which is strictly worse than an ungated claim: an ungated
+> number invites a check, and one that cites a gate deflects it. This document has a name for
+> the shape — *an unenforced instruction to re-measure is the same defect as an unrun gate* —
+> and this is its sharper form, an instruction that was never issued while reading as though
+> it had been.
+
+Seven methods, **two of them defaulted**. `fetch` was the first default, and it exists because M1 is the
 one machine cycle whose *length* the call stream does not disclose: a write is three T-states and a
 port access is four, but a read is three for an operand and **four** for an opcode fetch. Routed
 through one method, `LD A,B` and the read-modify half of `INC (HL)` emit byte-identical streams
@@ -90,6 +196,44 @@ means, and it stays proven whether or not the implementor has since opted in. It
 > its derivation, where it can no longer be checked against the thing it was derived from. The
 > tell here is that the wrong reading is *plausible*: a module and a delta are both line
 > counts, both about the same change, and one of them is right.
+
+### `acknowledge`, the second default, and why it is not a `fetch`
+
+M7 added the trait's seventh method on exactly the precedent above, and it is worth separating
+the two arguments it rests on, because only one of them is about interrupts.
+
+**The structural one.** The Z80 asserts `/M1` together with `/IORQ` in place of `/MREQ` during an
+interrupt acknowledge: the interrupting device puts the byte on the data bus and **no memory is
+read**. Routing that through `fetch` would report a memory cycle that never happened, at an
+address the machine would be entitled to serve out of its own map. Without any callback it
+reached the bus as a bare run of `tick`s with no transfer to open a cycle — indistinguishable
+from that many *separate* internal cycles, each contending on its own account. The hardware
+performs **one** cycle there and owes one stall; the machine charged seven. That is not a
+magnitude anybody had to guess at. It is the structural question *one cycle or seven*, and
+[`Z80-REFERENCE.md`](Z80-REFERENCE.md) had already answered it.
+
+**The one about where a number lives.** The two acknowledge lengths — seven T-states after an
+`INT`, five after an `NMI` — stay **private** to `crates/z80`, and the reason they were private
+is preserved rather than overturned: exporting a length hands out a number a `Bus` cannot act
+on. A callback falsifies that premise, because now there *is* something to act on, so the figure
+arrives as the call's own argument. Which is the same rule the three exported cycle lengths obey
+from the other side: a machine that had to re-transcribe either would be keeping a second copy of
+this crate's knowledge, with nothing to notice when the copies disagreed.
+
+**And the non-breaking claim is no longer a story about one afternoon — it is a standing
+property that `cargo test` rebuilds.** The codegen gate's probe bus implements `read`, `write`,
+`in_port`, `out_port` and `tick`, and **neither defaulted method**. It compiles, it is driven
+through `step`, `interrupt` and `nmi` in all three interrupt modes, and it is rebuilt on every
+run. So *"a downstream implementor kept working untouched"* stopped being a fact about M5's
+`ula.rs` and became a fact about a subject that cannot quietly opt in behind the claim's back.
+
+**What the defaults buy is compilation, not accuracy, and the difference is the whole of
+`MACHINE.md`.** Both degrade to something plausible — `fetch` to a three-T-state read,
+`acknowledge` to nothing at all — so a `Bus` can be silently wrong about contention while
+compiling clean under `deny(warnings)`. That is the price of making the additions non-breaking,
+it was paid deliberately twice, and it is why *"implementing it is optional"* in the trait's own
+documentation must be read as optional for the compiler and mandatory for a machine that means
+to keep time.
 
 Two numbers that go with the opt-in, both **reported by the agent that did the work and not
 reproduced in this pass**: `INC (HL)` in contended memory was derived independently twice as **26
@@ -257,11 +401,63 @@ A large `match` on the opcode byte, with sub-matches per CB/ED/DD/FD prefix. The
 builds a jump table anyway, and exhaustiveness is checked at compile time. A pointer table
 costs an indirect call per instruction and defeats inlining.
 
+> **Two of those clauses are wrong about the shipped crate, and this document already knew
+> it — in a different section, about the same functions, without either sentence being
+> reconciled to the other.** *Why M2 broke it*, below, says plainly that `dispatch` *"matches
+> five values and lowers to comparisons"* and that the `CB` page *"decodes arithmetically
+> through `CbOp::from_opcode` and builds no table at all"*. Both statements are correct. Both
+> contradict *"sub-matches per CB/ED/DD/FD prefix"* and *"the compiler builds a jump table
+> anyway"* three hundred lines above them. A document that corrects itself in the section where
+> the measurement lives and leaves the design section standing has not corrected itself; it has
+> acquired a second opinion, and a reader arriving at the design section — which is where
+> somebody looking for the rationale arrives — gets the retired one.
+>
+> What is actually there, and it is a better argument than the one it replaces. **Two of the
+> four prefix pages are matches and two are arithmetic.** `execute` lowers to the 119- and
+> 64-entry tables M1 already had, and `execute_ed` to the 124-entry table M2 added — those are
+> the three the codegen gate counts. The `CB` page instead reads its own operand fields: two
+> bits select one of four groups, three bits select a shift or a bit number, and 256 encodings
+> come out of four table lookups with no arm per opcode. `dispatch` — the thing the old
+> sentence called *"sub-matches per prefix"* — is five values and lowers to comparisons.
+>
+> **The deeper correction is about which file.** There is no large match in `decode.rs` at all.
+> That module is *field extraction*: an un-prefixed opcode is `xx yyy zzz`, so `LD r,r'` is
+> `01 ddd sss` and `ALU A,r` is `10 ooo sss`, and those two blocks between them cover a quarter
+> of the map with two range arms. The exhaustive match on the opcode byte lives in
+> `instructions.rs`. The accurate form of this decision is therefore: **decoding is arithmetic
+> on bit fields, dispatch is one exhaustive match, and neither is a pointer table** — which
+> keeps the original's real claim (no indirect call per instruction, exhaustiveness checked at
+> compile time) and stops crediting the compiler for a table it does not always build.
+
 ## Decision 4 — flags as per-class helpers
 
 `add8`, `sub8`, `adc16`, `sbc16`, `rotate`, `bit`, `daa` — one implementation each,
 called from every opcode of that class. Never inline flag logic per opcode: that breeds
 200 copies of the same rule, each with its own bug.
+
+> **`rotate` is not one of them and never was.** Five of the seven names are real; `bit`,
+> `adc16` and `sbc16` live in a `prefixed` submodule and the other two at the top. The rotate
+> *class* is eight functions rather than one — four accumulator forms sharing one flag rule and
+> four `CB` forms sharing another — over four shared bit-movement primitives, and the split is
+> the design rather than an omission: `RLCA` and `RLC r` move the same bits and set **different
+> flags**, so one helper covering both would have to take a discriminator and would be the
+> per-opcode branch this decision exists to refuse.
+>
+> Three classes the list omits are the ones a reader most needs, because they are where the
+> undocumented bits actually get decided: **`block_transfer`, `block_compare` and `block_io`**,
+> the flag rules of `LDIR`/`CPIR`/`INIR` and their families. And the placement rule is worth
+> stating, since it is what keeps the module from becoming a directory of unrelated functions:
+> a helper sits beside the rules it **shares arithmetic with**, not beside its callers —
+> `sbc16` and `add16` have to agree about where the 16-bit half-carry lives, so they are
+> neighbours even though their opcodes are pages apart.
+>
+> **MEMPTR is the exception that proves the rule, and it is not in `flags.rs` at all.** The
+> undocumented bits of `BIT n,(HL)` come from an internal register the Zilog documentation
+> never mentions, so `flags` cannot hold its rules without becoming a second place that knows
+> about CPU state. Instead `Cpu` owns `wz`, exactly **one private writer** touches it, and its
+> value reaches the flag helper as an ordinary `u8` parameter. The single-writer rule is an
+> auditing device rather than an encapsulation habit: the rules are undocumented, they are
+> scattered across three dozen handlers, and `rg 'set_memptr'` **is** the enumeration of them.
 
 ## Known Z80 traps — these are the ones that actually break emulators
 
@@ -282,14 +478,90 @@ Model slots → banks from the start; then **48K is a special case of the 128**:
 locked, banks fixed. Cost: about thirty lines.
 
 ```rust
-struct Memory {
-    banks: [[u8; 0x4000]; 8],
-    roms: Vec<[u8; 0x4000]>,   // 48K: one. 128: two (editor + 48 BASIC).
-    slots: [Slot; 4],           // Rom(i) | Bank(i)
-    contended: [bool; 8],       // 48K: bank 5 only. 128: banks 1, 3, 5, 7.
-    paging_locked: bool,        // port 0x7FFD bit 5, until reset
+pub struct Memory {
+    ram: Box<[[u8; PAGE_SIZE]; BANK_COUNT]>,   // 8 banks, heap: 128 KB is not a struct field
+    rom: Box<[[u8; PAGE_SIZE]; ROM_COUNT]>,    // exactly 2. A 48K fills one and ignores the other
+    slots: [Slot; SLOT_COUNT],                 // Rom(i) | Bank(i) — derived, never assigned
+    contended: [bool; BANK_COUNT],             // 48K: bank 5. 128: banks 1, 3, 5, 7 — derived
+    model: Model,
+    paging_port: u8,                           // the SSOT: the map, the screen, and the lock
 }
 ```
+
+> **That block is the struct M7 built. It replaces a five-field sketch of what M5 planned, and
+> only one of the five survived unchanged.** The sketch read:
+>
+> ```rust
+> struct Memory {
+>     banks: [[u8; 0x4000]; 8],
+>     roms: Vec<[u8; 0x4000]>,   // 48K: one. 128: two (editor + 48 BASIC).
+>     slots: [Slot; 4],           // Rom(i) | Bank(i)
+>     contended: [bool; 8],       // 48K: bank 5 only. 128: banks 1, 3, 5, 7.
+>     paging_locked: bool,        // port 0x7FFD bit 5, until reset
+> }
+> ```
+>
+> **The deleted field is the interesting one.** There is **no `paging_locked: bool`**, and the
+> crate rejects it in as many words: keeping a `paging_locked` and a `screen_bank` beside the
+> port byte would be *three representations of one datum that can disagree*. The lock is bit 5
+> of `paging_port`, read where it is needed. A sketch in an architecture document is exactly
+> where that defect is cheapest to introduce and most expensive to notice, because nothing
+> compiles it — the field was fine as a plan and would have been a bug as a struct.
+>
+> The rest, briefly, because each difference carries an argument. `roms` is not a `Vec`: the
+> page count is **fixed at two**, sized in at M5 so that M7 added a writer and not a
+> reallocation. Both arrays are **boxed**, so 160 KB sits on the heap rather than inside every
+> value that holds a machine. `slots` and `contended` kept their shapes but changed status —
+> they are **caches of derived values**, `slots` from `paging_port` and `contended` from
+> `model`, never assigned from anywhere else, which is the same one-source discipline stated
+> three different ways.
+>
+> `model` is the field the sketch could not have predicted, and its existence is a finding
+> rather than an oversight. M7's central result is that **`Memory` needs no model check at
+> all**: a 48K *is* paging-port value `0x20`, its map derives from that byte, and its inability
+> to page is exactly the lock bit already being set — so `write_paging_port` returns early on
+> the lock and asks nothing about the machine. That equation is a **compile-time assertion**
+> against the transcribed 48K map, not a paragraph. But three things differ between the two
+> machines that are **not** functions of `0x7FFD`: which banks the ULA contends, the frame's
+> geometry, and which banks exist at all. The port byte is the wrong thing to ask about any of
+> them, and the alternative to one discriminator is three unrelated fields that can disagree.
+>
+> **The hot-path consequence is the point of the whole decision and it is checkable.**
+> `Memory::is_contended` is byte-for-byte what it was before the 128 existed. The 128 changes
+> the *contents* of the `contended` array and not one branch of the function that reads it —
+> which is what *"48K is a special case of the 128"* has to mean if it is to mean anything, and
+> is why the failure it prevents is worth naming: getting this wrong does not crash, it makes a
+> demo tear three years later.
+
+### The clock is parameterised the same way, and by value
+
+The memory map was never the only thing that differs. A 128's frame is 70908 T-states against a
+48K's 69888, its first contended T-state is 14361 against 14335, and its CPU runs at 3.5469 MHz
+rather than 3.5. So there is a `Timing` — seven fields, all private, **no constructor**, and
+exactly two associated constants that are its whole population. A `Clock` carries one **by
+value**.
+
+Two properties follow that a `Model`-branch inside the clock would not have. The consistency
+check (`lines × T-states per line == frame`, the contended span inside the frame, the interrupt
+window inside it) is a `const` assertion over a **closed** set, which is only total because
+nothing outside the file can build an eighth combination. And the 48K's published constants —
+`T_STATES_PER_FRAME`, `FIRST_CONTENDED_T_STATE` and the rest — are now **projections** of
+`Timing::SPECTRUM_48K` rather than transcriptions beside it, so the compiler holds the single
+source rather than a reviewer.
+
+The contention *pattern* is deliberately **not** a field. Both sources give both machines the
+identical `[6, 5, 4, 3, 2, 1, 0, 0]`, and a shared constant states that sameness once — where a
+per-model copy would state it twice and be a place for a transcription to drift. That is a
+judgement about which claim is easier to get wrong, and it is written down as one.
+
+**The evidence classes underneath those numbers are not equal, and quoting them alike is the
+mistake this section exists to prevent.** 14335 is **measured**, against hardware, by the timing
+oracle. 70908 is **derived**, and unusually well — three independent lineages, `228 × 311`
+closing it arithmetically. 14361 is **transcribed** from one reference with one descendant
+repeating it and citing nothing. And the 128's interrupt window is shipped as a **labelled
+hold**: 32 is kept, it predicts that the 128 timing suite goes red, and the prediction is
+asserted so that the day somebody runs that suite the disagreement is waiting for them rather
+than being discovered as a surprise.
 
 ### 48K vs 128 — what differs
 
@@ -299,7 +571,7 @@ struct Memory {
 | ROM | one, 16K | two: 128 editor + 48 BASIC |
 | Paging port | — | `0x7FFD`: bits 0–2 bank, bit 3 screen, bit 4 ROM, **bit 5 lock until reset** |
 | Screen | bank 5 | bank 5 or shadow bank 7 |
-| Sound | beeper | **AY-3-8912**, ports `0xFFFD` select / `0xBFFD` data |
+| Sound | beeper | the same beeper, **plus an AY-3-8912**: `0xFFFD` select and read, `0xBFFD` write |
 | Frame | 69888 T | **70908 T** |
 | Contention | address range `0x4000–0x7FFF` | **property of the bank** (1, 3, 5, 7) in *any* slot |
 
@@ -308,6 +580,366 @@ against whichever bank is currently paged in, not by address range.
 
 **Out of scope:** +2A/+3. They add port `0x1FFD`, all-RAM configurations and yet another
 contention pattern, for a sliver of extra software. 48K + 128 covers what matters.
+
+## Decision 6 — a port decode is a mask, and every device that matches answers
+
+The ULA answers every port with A0 clear. The paging port answers every address with A1 and
+A15 clear. The AY is selected by A15 set and A1 clear, with A14 choosing which of its two
+register ports. A Kempston answers with A5, A6 and A7 clear. **Not one of those is an
+equality against a canonical address**, and writing them as masks is what separates a correct
+decode from a lucky one: `0x7FFD` is one member of a large family, and `IN A,(0x00)` reads a
+real Kempston exactly as `IN A,(0x1F)` does, because `A0`–`A4` are not wired to anything on the
+board.
+
+The consequence is the part worth arguing, because it decides the shape of the code. **These
+families overlap, and on the hardware every device that matches drives the bus.** Any address
+with A0, A1 and A15 clear is claimed by the ULA *and* the paging port; any address with A0 and
+A1 clear and A15, A14 set is claimed by the ULA *and* the AY; every even port up to `0x1E` is
+claimed by the ULA *and* a fitted Kempston. So `out_port` is a run of **independent `if`s and
+never a `match` on the port** — a `match` would silently pick one device and stop the other
+answering, which is the defect that surfaces years later as *"this game works on one emulator
+and not another"* rather than as a failure.
+
+Reads cannot do that, because a read has to return one byte. There the overlap is resolved by
+**fixing a priority and calling it a ruling**: the narrower decode wins, so the AY is asked
+before the ULA's floating-bus fallback and the joystick before the keyboard. The rationale is
+that giving priority to the device consulting three address lines rather than one changes the
+fewest addresses — and the ordering is load-bearing in a way that is invisible if you get it
+wrong. `0xFFFD` has A0 set, so it falls into the *"not a ULA port, therefore floating bus"* arm;
+an AY arm placed after that arm never runs, and the machine reads as *"the sound chip is
+write-only"*. Nothing in reach exercises any of these collisions, because every published
+address has A0 the other way — which is exactly why they are written down and asserted at
+compile time rather than left to be rediscovered.
+
+**The three decodes do not have the same evidence behind them, and M7 changed two of the three
+verdicts.** The paging port's is **primary**: the Sinclair *Servicing Manual* §4.12.11 states it
+from the circuit — `BANK` decoded from `IORQ` and read-or-write with *"ZA1 and ZA15 low"*. The
+Kempston's is **primary** too, from the Issue 4 (1989) schematic: a `74LS138` with A5, A6, A7 on
+its select inputs, corroborated by an independent redraw of a compatible board. And the AY's,
+which this project spent a milestone calling its own least-supported claim, now has a primary
+witness as well — §5.6.3, which gives it as **two stages rather than one pattern**:
+
+```text
+  PSG  = IORQ · (RD + WR) · (ZA1 = 0) · (ZA15 = 1)     <- only A15 and A1 select the chip
+  BDIR = PSG · /RD ,   BC1 = PSG · A14                 <- A14 steers; it does not gate
+```
+
+Two things fall out of those equations that appear in no table in the manual: at A15 = 1 and
+A1 = 0 the chip is **always** engaged, so there is no no-match state, and **`A0` is not in the
+AY's decode at all**. The implemented masks were already right; what changed is that they can
+now say why.
+
+> **Two of those verdicts are stale in the source, in the direction that matters.**
+> `crates/spectrum/src/ula.rs`'s `AY_PORT_MASK` still calls itself *"the least-supported claim
+> in M7"* and quotes *"no source was found stating which lines decode `0xFFFD` and `0xBFFD`"*;
+> `crates/spectrum/src/lib.rs`'s coverage table still says the AY decode has **nothing** behind
+> it and that the Kempston mask *"matches the canonical address's low byte and deliberately
+> claims nothing about address lines"* — which is a description of a mask the crate no longer
+> carries. Both were true when written and stopped being true in the commit that found the
+> sources. They are recorded here rather than corrected there because this document does not
+> own those files; the corrections belong with whoever does.
+>
+> Note which way the error runs. Neither is a machine that behaves wrongly — the masks are
+> right. Both are claims that **understate their own evidence**, which is the rarer direction
+> and the harder one to catch: nothing goes red, and a sentence disclaiming a source it now has
+> reads as modesty rather than as an error.
+
+## Decision 7 — sound is generated late, and never on the hot path
+
+`Ula::tick` is the hottest function in the emulator and **nothing about sound is on it** — not a
+branch, not a load, not a field. That is possible because the chip's output at any instant is a
+pure function of its registers and the time since they were last written, so the generator can
+be run at only two kinds of moment: when the guest does something that would otherwise be lost
+— the speaker bit **changing**, or a write to an AY register — and when a consumer asks for the
+samples. Between those it does nothing at all.
+
+The trade is smaller than it looks in both directions, and that is why it is defensible rather
+than merely cheap. Total work is proportional to emulated time either way, so generating eagerly
+saves nothing and spends a per-T-state branch. And a border write — which is what nearly every
+write to `0xFE` is — costs **one comparison**, because the speaker setter takes the level and
+compares rather than trusting the caller to know whether anything moved. The comparison belongs
+where the state is.
+
+**The property that makes late generation legitimate rather than a shortcut is that when the
+generator runs cannot change what it produces.** Rendering a span in one call and rendering it
+in two hundred arbitrary pieces yield identical samples, and that is asserted rather than
+argued. Without it, every frame hash over the audio would silently be grading the *consumer's
+call pattern*.
+
+Two shape decisions in the sample carry real weight:
+
+**The sources stay apart.** A `Sample` is `{ channels: [u16; 3], beeper: u16 }`, and nothing in
+`crates/spectrum` ever adds them together. Two independent rulings converge on it. The AY's own
+gate must not be falsifiable by the beeper landing, or it goes red for a reason unrelated to
+what it grades and gets muted. And the mix belongs downstream, in `crates/frontend`, because the
+sum is **irreversible** — stereo panning, which is how a 128 is conventionally presented, needs
+the three channels a mixdown would have destroyed. Summing the AY's own channels would be a mix
+too, so this crate does not do that either.
+
+**Every sample is a mean, not a reading.** A sample is the T-state-weighted average of its
+source over the window it covers. That costs one multiply-add per state change and buys the one
+property a beeper needs: **a pulse shorter than a sample period arrives attenuated rather than
+missing**. Point-sampling drops it entirely and silently, and 48K beeper music is written as
+exactly those loops.
+
+The grid is the chip's own rather than an invented one: one sample every 32 T-states, which is
+exactly two of the AY's internal steps, so no generator ever needs a fractional accumulator. The
+rate is deliberately **not exposed as a number**, because on a 128 it is not an integer —
+110840.625 Hz — and a consumer resampling to a host rate wants the ratio, not a rounded
+frequency. The same arithmetic is why a 128's frame is not a whole number of sample periods and
+its per-frame count alternates, so a consumer must read the length it is handed. `take_samples`
+renders up to now, hands over a borrowed slice of a buffer allocated once at construction, and
+resets — so a frontend draining once a frame allocates nothing, and one that drains less often
+is **told how many samples it lost** rather than hearing an unexplained gap.
+
+## Decision 8 — the joystick is a port, and that is the whole reason it exists
+
+A Spectrum has no arrow keys. Nothing on the membrane means *move left*, so a game reaches a
+control one of three ways: the cursor keys, which are `CAPS SHIFT` chorded with `5`–`8`;
+arbitrary letters the author picked; or a Kempston, which is an interface **on the bus** rather
+than anything on the membrane. Only the third can be driven without colliding with something the
+game also reads on the keyboard — and a mapping cannot know which keys that is in general.
+
+The sharpest demonstration is not hypothetical. **Manic Miner reads `LD BC,0x7EFE` for its jump
+key**, and `B = 0x7E` holds A8 and A15 low *together*, merging two half-rows into one scan. So
+holding `CAPS SHIFT` to walk left makes Willy jump continuously — the machine behaving exactly
+correctly while a keyboard mapping is wrong. A port has no such failure mode available to it,
+because no keyboard scan can reach it.
+
+Two model decisions follow from the hardware and are worth stating because both are easy to get
+backwards. The five switches are **active high**, the exact inverse of the membrane's active-low
+— a model that used one convention for both reads `0x1F` idle, which is every direction and fire
+held down forever. And there is **no interlock**: left and right at once is a state a real
+switch box can be forced into and some games test for, so refusing it here would model a machine
+nobody built.
+
+**And the joystick's most interesting property is one it gets from Decision 1 rather than from
+its own decode.** A cheap Kempston clone that decodes A5 alone and ignores the read strobe drives
+the data bus during the Z80's interrupt-acknowledge cycle — `/IORQ` is asserted there with
+neither `/RD` nor `/WR` — and the CPU takes the joystick's byte as its IM 2 vector. That defect
+**cannot happen on this machine, and not because of anything the joystick does**: an acknowledge
+reaches the bus through `Bus::acknowledge` and never through `in_port`. The `/RD` and `/M1` terms
+of the schematic are satisfied by the *shape of the trait*. It is written down here because the
+implication runs the other way too: a future bus that routed an acknowledge through `in_port`
+would reintroduce a hardware defect this machine currently cannot have.
+
+## Decision 9 — a tape is a pulse train, and that was a bet on the next format
+
+The internal form of a tape is `Vec<u32>`: **half-period lengths in T-states**, in playback
+order. Not a block list, not a header, not a flag byte, not a timing table. Playing it is three
+pieces of state and one transition — during `pulses[i]` the signal holds a level, and at the end
+of it the level flips.
+
+The reason is a claim about the *next* format rather than about this one. **A `.tap` cannot
+represent a custom loader's tape at all**: it is block data with the ROM's timings implied, and
+nothing in it can say *"this loader uses 700-T-state bits"*. `.tzx` exists for exactly that and
+is what most commercial games ship as. A block-list internal form would have made `.tzx` a
+rewrite of the tape subsystem; a pulse train makes it a second converter with the machine side
+untouched.
+
+**That prediction was cashed in, and it held.** `tzx::parse` exports one function, takes bytes
+and a model, and returns a `Tape`. Loops are unrolled, calls are inlined and jumps are followed
+**at parse time**, so the `Tape` that reaches the ULA does not know `.tzx` exists and there is no
+runtime interpretation to get wrong. `Tape` gained no field, no method and no variant. The
+ULA's five tape-touching items — the field, `insert_tape`, `tape_mut`, `advance`, `ear_bit` —
+are unchanged.
+
+> **Two qualifications, because the claim as usually stated is slightly wider than the
+> evidence.** The module's *error* enum went from 2 variants to 12: `Tape` gained nothing, and
+> `tape::Error` gained ten. It is `#[non_exhaustive]`, so this was additive rather than
+> breaking, but *"no variant"* reads as covering the module's error type and does not.
+>
+> And *"`ula.rs` and `lib.rs` changed by zero lines"* cannot be checked at the granularity it is
+> usually quoted at: `.tzx` landed inside a commit that also carried sound, the AY, the joystick
+> and the browser build, and those two files show +288 and +135 in it. Filtering both diffs for
+> tape-related lines leaves only **doc comments**. So the claim is true of the code and
+> unverifiable from the commit — which is worth saying plainly, because a structural prediction
+> is exactly the kind of claim that deserves better evidence than a stat line that happens to
+> agree with it.
+
+The seam between the tape and the machine is **two calls** — the tape is told that time passed,
+and the tape is asked what level it is driving — and where the first one comes from is the
+decision that shapes everything. Contention means the clock does **not** advance one T-state at
+a time, so a tape driven from `Bus::tick` alone would run slow by exactly the contention a
+loader suffers, silently, because nothing else would move. The ULA therefore has one private
+`advance` that moves the clock **and** the tape together, and every call site in the file routes
+through it, so the two cannot drift. The other call is the read: bit 6 of a `0xFE` read is the
+tape's level, and **nothing supplies a byte to the CPU by any other route.**
+
+That last clause is the milestone's real content. The cheap alternative — watch for `PC`
+reaching the ROM's `LD-BYTES`, write the block straight into the buffer, set the flags and
+return — is fifty lines and works today. It is refused because **it would make the milestone's
+gate grade the trap**: a trap bypasses the ULA, the contention model, the frame clock, the
+interrupt window and the port decode, so *"a real game loads"* would mean *"the injection
+works"*. A debugging trap is not forbidden forever, and the two rules if one ever lands are
+written down: off by default, and the tape gates assert that it is off.
+
+## Decision 10 — a file becomes a value; the value meets the machine
+
+Every format this emulator reads — `.tap`, `.tzx`, `.z80`, `.sna` — is parsed by a function of
+its **bytes** and nothing else. No filesystem, no clock, no machine. A snapshot parser produces a
+`Snapshot`, which is a neutral description of a machine's state; applying that description is the
+*other* half and lives with the machine. Two things follow, and both are why the split is there.
+
+**The parsers are exhaustively testable, fuzzable, and unchanged under wasm**, because there is
+nothing to stand up in order to run one. And the canonical type is the **machine's state, not
+the richest file format**. `.z80` version 3 is the richest, and adopting it as the canonical form would leak
+every one of its quirks inward until the machine was storing a file — its page numbering, its
+hardware-mode byte, its sixteenth AY register that the chip does not have. The memory image is
+therefore keyed by **bank**, which is also the only key that survives paging: a 48K's page
+numbers are neither contiguous nor derivable from the 128's rule, and on a 128 five of eight
+banks have no address at any given moment while remaining part of the machine.
+
+**Applying a snapshot charges no machine cycle**, and that is an invariant rather than a
+nicety. A restore goes through the ULA's own setters and never through `Bus::out_port`, because
+a port cycle advances the clock by its contention stall — and the tape advances with the clock,
+so a restore performed through the bus would **move the tape head**. Restoring is not elapsed
+time. Three things deliberately survive a load for the same reason and each is labelled a
+convention rather than a measurement, since no format carries the field: the machine's uptime in
+frames, the ROM, and the tape, because loading a snapshot does not eject a cassette.
+
+### Guest bytes are the one hostile surface, and the gates are unusual
+
+The release profile is `panic = "abort"`, so a panic on a malformed file is not an exception a
+caller can catch — it is the process dying, and `catch_unwind` is not a backstop that exists.
+With `unsafe_code = "forbid"` the routes to one are few enough to enumerate: a slice index,
+arithmetic overflow, and an explicit `unwrap`/`expect`/`panic!`. Which makes the property look
+*checkable by reading*, and so the tape and snapshot modules **scan their own source text** and
+assert it — no indexing expression anywhere, none of the panicking calls, in either module's
+production half.
+
+Three details make that a gate rather than a gesture. The files are **listed, not globbed**,
+because a file that quietly stopped being scanned would be indistinguishable from a file with
+nothing to find. Each scanner has its own positive **and** negative cases, so it cannot be a
+scanner that finds nothing while asserting nothing is there. And there are deliberately **two
+scanners rather than one shared one**, because a single bug in a shared helper would turn both
+gates green at once.
+
+**And the enumeration was incomplete, which is the more useful thing to know about it than that
+it exists.** `split_at` panics, and it is neither an index expression nor an `unwrap` — so it is
+a *fourth* route, and neither scanner could see it. Three sites in the tape path went through it
+before anybody noticed. The lesson is not that the gate is bad; it is that a gate built by
+enumerating its targets is exactly as complete as the enumeration, and the enumeration is the
+part nothing checks.
+
+One more asymmetry worth carrying. `.tzx` termination is **not** structural the way every other
+loop here is: its jump block revisits a block without consuming input, so there is no
+decreasing quantity to argue from. The ceiling on it is therefore called a **budget** and not
+dressed up as a proof — and it is a second ceiling, separate from the one bounding memory,
+because a block can execute without emitting a pulse and the pulse ceiling would never fire.
+
+## Decision 11 — the border is drawn as the beam painted it; the bitmap is not
+
+A frame is rendered from the screen **as it stands when `render` is called**, so software that
+rewrites attributes or the bitmap partway down a frame — multicolour, Nirvana sprites — is drawn
+as though the last value had applied all frame. That boundary is unchanged and deliberate:
+progressive drawing needs the frame's write history keyed by T-state over 6912 bytes, which is a
+different data structure and a different verification story with no oracle behind it.
+
+**The border is now the exception, and it moved for one reason.** A tape load is the one place a
+mid-frame write is what a person is actually looking at, and a loading screen drawn in a single
+colour is *visibly* wrong rather than subtly so. So the ULA keeps a `BorderTrace`: the colour in
+effect at the moment each rendered row began.
+
+The asymmetry is the argument, and it is about cost rather than taste. The border's history is
+**one slot per rendered row**, and a guest cannot create rows — so there is no event list, no
+allocation sized by guest behaviour, no drop policy, and therefore no failing case for a policy
+to have. It is bounded by construction, which is stronger than a bound that is enforced. The
+bitmap's history has none of those properties. **The cheap half being done is not the expensive
+half being started.**
+
+Three further things a reader should not have to rediscover.
+
+**The record and the current colour are one field, not two.** The colour showing now and the log
+of where it changed are one datum at two resolutions, so `BorderTrace` owns both and there is no
+pair to disagree — the same rule the paging port obeys one module away.
+
+**The row mapping is derived from `Timing` and from nothing else**, because a second
+T-state-to-beam-position model would be a second thing that has to agree with contention's, and
+two mappings that must agree is the defect class this project keeps catching. Vertically the
+frame buffer maps to the hardware exactly; horizontally it does not, since the rendered border
+is a uniform 32 pixels a side where the real one is wider than it is tall. So a
+T-state-to-*column* mapping would be inventing precision the buffer cannot carry, and a
+T-state-to-*row* mapping is not. What that cannot show is stated rather than rounded away: a
+border change *within* a line — the eight-to-twenty-four-T-state rewrites of a
+border-multicolour demo — all land in the same row, and the last before the row begins is the
+one it gets.
+
+**And the record serves the frame just finished as well as the one running**, which is the
+difference between the feature working and not. A frontend's loop is `run_frame(); render();`,
+and `run_frame` returns the instant the frame *counter* advances — so at the moment it renders,
+the machine stands a few T-states into the next frame and the record describes the previous one.
+A rule of *"this frame only"* shows a frontend a uniform border **every time** while passing any
+test that renders mid-frame. That was not reasoned out in advance. It was a gate going red.
+
+## Decision 12 — the frontend keeps the window, and a lint level created a crate
+
+`crates/frontend` holds everything with a decision in it — which key, which colour, how many
+frames, which file — and the binary's own `main` is held to plumbing: poll, upload, draw, await.
+The split is drawn along *testability*: what is left in `main` is what needs a GPU and a window
+and cannot run headless. That is also why `zx-shot` exists as a **second binary** rather than a
+flag: `#[macroquad::main]` opens the window before the function body runs, so a screenshot mode
+reached from inside it would not be headless at all. `zx-shot` never calls `miniquad::start`, and
+it drives the *same* pipeline the window drives — keymap, `run_frame`, `render`, palette — so
+that a picture taken in CI is evidence about the window. A screenshot produced by code the window
+does not run would prove nothing about it.
+
+**Three things the frontend owns because `crates/spectrum` must not.** The *mix* of the AY
+against the beeper — the beeper weighted **2.65×**, which is not taste but the ratio of the two
+resistors the 128's own board sums them through, asserted against the resistances rather than
+against the implementation. The *resampling* to a host rate, because if the machine crate
+resampled, its output would become a function of the machine it ran on — 44,100 here, 48,000
+there — and a frame hash that moves with the hardware is not a gate at all. And the *pacing*:
+elapsed time converted into whole frames owed, at most four of them run per tick, and **the rest
+counted as lost rather than carried**. Both alternatives are wrong in
+ways worth naming — one emulated frame per displayed frame runs 20 % fast on a 60 Hz monitor and
+reports nothing; unbounded catch-up tries to run the whole backlog in one tick, which takes
+longer than a tick, which grows the backlog. The second is self-amplifying: one slow frame
+becomes a freeze. The count of dropped frames is the point, not a diagnostic.
+
+The keyboard is a flat table of bindings rather than a `match`, for a reason that is about the
+host rather than about style: the frame loop must **enumerate** the host keys it should ask
+about, because `is_key_down` answers one key at a time and there is no *"what is held"* query.
+It is rebuilt from scratch every frame — never edge-tracked — because a key left held when the
+host stops reporting it is indistinguishable from a broken emulator.
+
+**And the arrows are a choice rather than a mapping, which is a fact about the games.** Six
+titles were disassembled to settle it and **three of them read no fixed keys at all**; they
+redefine. So there is no single mapping to find, and the emulator's job is to be able to deliver
+any key so a game's own redefine menu works. `ARROW_SCHEMES` is that choice, one keystroke away,
+with the current one on screen. The default sends the bare digits **and** the Kempston port,
+because the port cannot collide with the membrane, so a scheme sending both reaches strictly more
+titles at no cost to either. What it does *not* send is the `CAPS SHIFT` chord — that is the
+editor's cursor keys, it is what the legend prints, it stays one keypress away, and it is the
+mapping that makes Willy jump.
+
+> **That default is where this decision was learned rather than designed.** The chord was
+> shipped as the default with the merged-half-row hazard already documented in the same file and
+> a test already asserting that the cursor scheme trips Manic Miner's jump read. The gate graded
+> the *scheme* and not the *choice of default*, and the reason recorded for the choice was
+> continuity with a previous build — which is not something anybody had asked for. A predicted
+> hazard placed behind a key the user has to know to press is an unshipped fix.
+
+**The browser half of all of this is `crates/page`**, and why that is a crate rather than an
+attribute is argued once under *Crate boundaries* and not repeated here. What belongs in this
+decision is the consequence for the frontend, which is the larger half and was not the reason.
+
+Because `page`'s entry points compile and behave on **every** target, `crates/frontend` contains
+no `#[cfg(target…)]` at all — and the absence is asserted, together with its counterweight: a
+second assertion that the target-conditional code **is** in `crates/page`, without which
+deleting that crate entirely would leave the first test greener than ever. The one thing the
+pair cannot see is stated in the test itself: a `#[cfg]`-free crate can still behave differently
+on two targets, through a dependency, through pointer width, through whatever a browser's WebGL
+does with a texture upload. It grades that this crate does not **branch** on the target, which
+is a real and narrow property, and not that the two targets agree.
+
+One convention runs through the whole seam and is worth stating once, because it is a property
+of the boundary rather than of any function. **Zero must never mean success.** miniquad replaces
+an import the page did not register with a stub that returns `undefined`, which crosses the wasm
+ABI as `0` — so a page served without its JavaScript half would call the download function, get
+success, and save nothing. Started is therefore `1`, every other code is a refusal, and the
+frontend's save path routes to the filesystem **only** on the answer that means *there is no
+browser* — a browser that refused is not retried against a filesystem that does not exist.
 
 ## Testing — three tiers, strictly in this order
 
@@ -325,10 +957,11 @@ multicolour effects). That is observation, not a green check.
 
 > **CORRECTION — the first sentence stopped being true for contention on 2026-09-01, and it is the
 > third copy of that claim to need this note.** `crates/spectrum/tests/timing_oracle.rs` runs
-> Richard Butler's 48K timing test suite — a `.z80` carrying 34 instruction groups and two tables of
-> results *measured on real Spectrums* — and reports **68 hardware rows, 0 disagreements**. It is a
-> tier-1 oracle by this section's own definition: a number to compare, not a picture to squint at.
-> Thirteen mutations bound it, each verified to have landed before its verdict was trusted;
+> Richard Butler's 48K timing test suite — a `.z80` carrying 37 machine-code groups, 34 over the
+> documented instruction set and three sharing one program, and two tables of results *measured on
+> real Spectrums* — and reports **70 hardware rows, 0 disagreements**. It is a tier-1 oracle by this
+> section's own definition: a number to compare, not a picture to squint at. Sixteen mutations
+> bound it, each verified to have landed before its verdict was trusted;
 > `FIRST_CONTENDED_T_STATE` at 14333, 14334, 14336 and 14337 all go red and **only 14335 is green**.
 > The full account is in [`MACHINE.md`](MACHINE.md)'s *The timing oracle*, and **only** there.
 >
@@ -341,9 +974,11 @@ multicolour effects). That is observation, not a green check.
 > rows in [`STATUS.md`](STATUS.md)'s register.
 >
 > **The rest of the sentence stands unchanged.** The floating bus is not modelled, so it is not
-> gradeable rather than ungraded — the suite's own groups 35–37 are excluded **by name** for exactly
-> that reason — and progressive drawing and keyboard ghosting are in the same position. For those,
-> *known-demanding software* is still the only instrument and it is still observation.
+> gradeable rather than ungraded: the suite's own groups 36 and 37 are excluded **by name** for
+> exactly that reason, and group 35 — the third of that block, and the one the oracle does grade —
+> reaches a verdict only because `FLOATING_BUS_BYTE` is `0xFF` and so never charges the
+> bus-dependent cycles. Progressive drawing and keyboard ghosting are in the same position. For
+> those, *known-demanding software* is still the only instrument and it is still observation.
 
 ## Milestones
 
@@ -355,8 +990,23 @@ multicolour effects). That is observation, not a green check.
 | M4 | Undocumented flags | **zexall passes** — CPU is done |
 | M5 | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | **the gates in `crates/spectrum/tests/`** — boot **and the frame it lands on**, the 50 Hz line, the keyboard matrix, ROM write protection, contention magnitude and phase, the four-case I/O rule, and the hardware timing oracle. **Count them, do not quote a number:** `ls -1 crates/spectrum/tests/*.rs \| wc -l` |
 | M6 | Snapshots (Z80/SNA) **and** TAP tape | **T1 + T2 + T3** — see below |
-| M7 | 128: paging, second ROM, AY, contention per bank | **T1 + T2 + T3** ([`M7.md`](M7.md) Decision 5). *"128-only software runs"* is **T4** |
+| M7 | 128: paging, second ROM, AY, contention per bank — **and the beeper both machines already had**, and the Kempston port | **T1 + T2 + T3** ([`M7.md`](M7.md) Decision 5). *"128-only software runs"* is **T4** |
 | M8 | WASM + macroquad | playable from a URL |
+
+> **Two things landed that this table has no row for, and in one case that is the finding rather
+> than the omission.** `.tzx` has no milestone of its own because it did not need one: Decision 9
+> chose a representation three milestones earlier precisely so that the next tape format would be
+> a converter, and a converter is not a milestone. A row for it would misrepresent the work as
+> larger than it was — which is the opposite of the usual failure and worth as much.
+>
+> The **beeper** is the other, and it has no row because it was deferred rather than scheduled.
+> It is bit 4 of a `0xFE` write — a ULA output on **both** machines, with nothing to do with the
+> 128 — and M5 dropped it on the stated grounds that a later milestone would want it. The
+> comment saying so then sat in `ula.rs` for a milestone describing itself as *an open finding,
+> not a deferral*. What settled it was a ruling that being **audible** does not make a ULA output
+> the frontend's business, which is the same boundary Decision 7 draws for the AY and draws in
+> the same direction. M7's goal cell is widened above rather than a row being invented, because
+> that is where the work landed whatever its natural home was.
 
 > **The M6 row said *"Snapshots (Z80/SNA) **or** TAP tape"* and *"a real game runs"*, and both
 > halves are corrected here rather than quietly widened.** The design is
@@ -448,7 +1098,28 @@ Host for every figure below: Apple M3 Max (16 cores), macOS 25.6.0, rustc 1.98.0
 
 ```
 $ cargo bench -p z80 --bench step          # divan; the counter column is T-states/s
+$ cargo bench -p spectrum                  # the real machine: a real Cpu<Ula>, a real frame
 ```
+
+> **The second command did not exist when this section was written, and its absence was
+> published as a correction elsewhere before it was fixed.** `docs/M7.md` named
+> `cargo bench -p z80 --bench step` as the way to measure a change to the *contention
+> constants*, then withdrew it in the open: that bench measures a CPU against a bus M7 does not
+> touch, and *"there is no benchmark in this workspace that exercises `spectrum::Ula`"* — so
+> naming a command that exists and measures something else is worse than naming none, because
+> it runs, it produces numbers, and every one of them is about a different bus. `benches/frame.rs`
+> is the bench that was named as the thing that would settle it. Every case runs **one real
+> frame** of a real `Spectrum` and the cases differ only in what the guest does, so a gap between
+> two rows is attributable to that and to nothing else.
+>
+> It exists because M7's sound half makes a claim about the hot path, and a performance claim
+> with no command behind it is the same defect one milestone later. **What it measured, on
+> 2026-09-01: `quiet_48k` is 148.0 µs before and after sound and the border record landed** —
+> 0.74 % of a 20,000 µs frame — which is the measured form of *"neither is on the hot path"*.
+> Drawing bands rather than one colour costs **3.5 µs**, taken as a difference of differences so
+> that the cost of rendering at all cancels. The three heaviest cases are upper bounds rather
+> than workloads and are labelled so: a music driver writes the AY about fourteen times a
+> *frame*, not two thousand.
 
 Divide the counter by the Z80's 3.5 MHz for the realtime multiple. Measured 2026-09-01 with the
 one-minute load average between **5.1 and 11.3 on 16 cores** — another agent was compiling in the
@@ -622,7 +1293,7 @@ $ grep -c panic_bounds_check target/release/deps/spectrum-*.s
 | `panic_bounds_check` in `crates/z80/src` | **7** — 3 at `registers.rs:143`, 3 at `:148`, 1 in `instructions.rs` | **15** — 6 at `registers.rs:143`, 7 at `:148`, 2 in `instructions.rs` |
 | `panic_bounds_check` in `crates/spectrum/src` | — | **0** |
 | Allocator call sites | *not counted — see below* | *not counted — see below* |
-| Indirect calls (`blr`) | **0** | **1**, at `instructions.rs:380` |
+| Indirect calls (`blr`) | **0** | **1**, at `instructions.rs:436` — `shuffle(self.regs.a(), memory)` |
 | Out-of-line `Bus` methods | **0** | **1** — `Ula::tick`, called 124 times |
 | Decode jump tables | 124 + 119 + 64 | 124 + 119 + 64, all in `Cpu::<Ula>::dispatch` |
 
@@ -638,7 +1309,7 @@ strictly stronger — `crates/z80` is `#![cfg_attr(not(test), no_std)]` with no 
 so in every non-test build **allocation does not compile**. That is a property of all builds rather
 than an observation about one, and it is what the gate asserts.
 
-**The indirect call is real.** `instructions.rs:380` is `shuffle(self.regs.a(), memory)` inside
+**The indirect call is real.** `instructions.rs:436` is `shuffle(self.regs.a(), memory)` inside
 `rotate_digit`, which takes `shuffle: fn(u8, u8) -> (u8, u8)`. There are exactly two such parameters
 in the crate — `rotate_digit` (`RRD`/`RLD`, so `ED`-prefixed, M2) and `rotate_a` (`RLCA`/`RRCA`/
 `RLA`/`RRA`, **present since M1**). Whether LLVM specialises them away is a property of the build
