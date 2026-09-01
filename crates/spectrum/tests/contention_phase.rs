@@ -1,14 +1,71 @@
 //! Gate: where in the frame contention begins — pinned to the frame's structure.
 //!
-//! # Read this before trusting anything below
+//! # Correction — this header's central claim was false, and this was its last live copy
 //!
-//! **The absolute phase remains unverified against any external oracle.** Nothing in this
-//! file, and nothing anywhere in this project, measures
-//! [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE] against a real
-//! machine or against a program that reports a T-state count. `docs/MACHINE.md` names such a
-//! program as verification item 2 and it is not written. An issue 2 Spectrum is one T-state
-//! earlier than an issue 3, and this crate models an issue 3 because the community reports
-//! that figure — which is a citation, not a measurement.
+//! Until `timing_oracle.rs` landed on 2026-09-01, this header read:
+//!
+//! > **The absolute phase remains unverified against any external oracle.** Nothing in this
+//! > file, and nothing anywhere in this project, measures `FIRST_CONTENDED_T_STATE` against a
+//! > real machine or against a program that reports a T-state count. `docs/MACHINE.md` names
+//! > such a program as verification item 2 **and it is not written**. An issue 2 Spectrum is
+//! > one T-state earlier than an issue 3, and this crate models an issue 3 because the
+//! > community reports that figure — which is a citation, not a measurement.
+//!
+//! **Both halves of that are now wrong, and they are wrong in different ways.** It is kept
+//! above rather than overwritten, because this project corrects loudly and because a reader
+//! who acted on either sentence needs to find out.
+//!
+//! 1. **The program is written and the phase is measured.**
+//!    `crates/spectrum/tests/timing_oracle.rs` *is* `docs/MACHINE.md`'s verification item 2:
+//!    Richard Butler's 48K timing suite, whose expected results were taken from real Spectrums
+//!    by nine independent submitters. This machine scores **0 disagreements against its 68
+//!    graded rows**. Thirteen mutations bound that green, and the five that move this file's
+//!    constant all go red — 14333 by 13 rows, 14334 by 8, 14336 by 7, 14337 by 7, and 14361
+//!    (the 128's figure) by 23. **14335 is a unique optimum over ±2.**
+//!
+//! 2. **"An issue 2 Spectrum is one T-state earlier than an issue 3" is the wrong axis** —
+//!    not a smaller error than the first, a different one. The suite's own hardware results
+//!    have board issues **3B, 4B and 6A appearing in both** timing classes, and record a
+//!    *cold* machine reporting Late and the *same* machine reporting Early once warm. A board
+//!    revision does not change with temperature. `timing_oracle.rs` since identified the
+//!    mechanism: the class turns on whether the CPU's `/INT` sample and the ULA's release edge
+//!    — which the suite's own handler arranges to be simultaneous to the T-state — resolve one
+//!    way or the other. **The early/late split is a property of the interrupt, not of the
+//!    contention window and not of the board.**
+//!
+//! # What the oracle establishes, stated narrowly
+//!
+//! The obvious reading of "the phase is verified" is too strong. What is established is that
+//! **the first contended T-state falls exactly 14335 T-states after `/INT` is asserted** —
+//! given that this machine asserts `/INT` at frame T-state 0.
+//!
+//! That qualification is not a hedge; it is measured. Moving the interrupt one T-state later
+//! **and** the window to 14336 leaves the oracle **green**, which is the last of its thirteen
+//! mutations and deliberately so. The oracle grades the *interval*, never the constant
+//! standing alone.
+//!
+//! # What is still open
+//!
+//! - **The frame's origin is a convention.** We assert `/INT` at frame T-state 0 and measure
+//!   everything from there. Closing this needs hardware that reports where `/INT` falls
+//!   relative to something the emulator does not also define.
+//! - **The 64-line pre-display count's factors.** Its *product* is now measured; any
+//!   compensating pair that still lands on 14335 would pass identically. See
+//!   [`LINES_BEFORE_DISPLAY`].
+//!
+//! **The interrupt window's *length* is no longer on this list.** It was, on the strength of a
+//! single 32 → 24 mutation leaving the oracle green — one sample from inside a band, mistaken
+//! for the band. Sweeping 1–65 pins it to **`17..=32`**: below 17 contended rows disagree, at
+//! 33 the whole classification flips to `TYPE2`, and from 44 the suite stops terminating.
+//!
+//! # What this file is still for
+//!
+//! Its job is unchanged and is worth exactly what it was: **it pins the constant against
+//! drift, as an equation over the crate's own structural constants.** The oracle needs
+//! `testdata/timing/` and skips without it; this needs nothing and runs in microseconds. So on
+//! a fresh clone with no corpus fetched, **this file is the only thing standing between
+//! `FIRST_CONTENDED_T_STATE` and a silent edit** — which is exactly the situation the mutation
+//! below describes. The two grade different things and neither replaces the other.
 //!
 //! That mattered concretely: moving the constant from 14335 to 14334 produced **byte-identical
 //! output** from the boot gate, and left every existing test green, because every one of them
@@ -16,11 +73,12 @@
 //!
 //! # What is graded here, and what kind of evidence it is
 //!
-//! A **derivation from documented structure**, which is stronger than nothing and weaker than
-//! an oracle. The 48K frame is 312 lines of 224 T-states. The display begins after 64 lines
-//! of vertical blanking and top border, so the first display byte is fetched at
-//! `64 x 224 = 14336`, and contention begins one T-state before it. That derivation is
-//! asserted **as an equation over the crate's own structural constants**, so:
+//! A **derivation from documented structure** — no longer the only evidence for the phase, but
+//! still the only thing that ties it to the frame layout. The 48K frame is 312 lines of 224
+//! T-states. The display begins after 64 lines of vertical blanking and top border, so the
+//! first display byte is fetched at `64 x 224 = 14336`, and contention begins one T-state
+//! before it. That derivation is asserted **as an equation over the crate's own structural
+//! constants**, so:
 //!
 //! - changing [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE] alone
 //!   breaks this file;
@@ -28,8 +86,12 @@
 //!   — changes what the equation expects, coherently, which is what a 128 at 70908 T-states
 //!   will need.
 //!
-//! It does **not** establish that 14335 is the hardware's figure. It establishes that 14335
-//! is the figure this frame layout implies, and that the two cannot drift apart silently.
+//! **This file does not establish that 14335 is the hardware's figure — `timing_oracle.rs`
+//! does.** What this one establishes is that 14335 is the figure this frame layout implies,
+//! and that the two cannot drift apart silently. The distinction is the reason both exist: if
+//! a future change to the frame structure moved the implied figure away from the measured one,
+//! this file is what would say so, and it would say so in the failure of an equation rather
+//! than in 7 unexplained rows of somebody else's table.
 //!
 //! # What is not graded here
 //!
@@ -37,6 +99,9 @@
 //! - The 64-line pre-display count, which is itself a documented figure this file writes
 //!   down rather than derives. It is the one input the derivation takes on trust, and it is a
 //!   single named constant so that a future measurement has one place to correct.
+//! - Anything about the *interval from `/INT`*, which is what the oracle actually measures.
+//!   This file knows only about the frame's structure and would be equally green with the
+//!   whole frame shifted.
 
 mod common;
 
@@ -48,9 +113,14 @@ use spectrum::timing::{
 
 /// Lines of vertical blanking and top border before the first display line, on a 48K.
 ///
-/// The one figure the derivation takes on trust. Named rather than inlined so that the
-/// timing-test program `docs/MACHINE.md` asks for has a single place to correct if it ever
-/// measures something else.
+/// The one figure the derivation takes on trust. Named rather than inlined so that a
+/// measurement has a single place to correct if it ever reports something else.
+///
+/// `timing_oracle.rs` has since measured the **product** `64 x 224 − 1`, so this is no longer
+/// the last word on the phase. Its **factors** are still unmeasured: any compensating pair
+/// that still lands on 14335 — 56 lines of 256, say — would pass both this file and the
+/// oracle identically. That is why the figure stays named rather than being folded into the
+/// arithmetic now that the total is known.
 const LINES_BEFORE_DISPLAY: u32 = 64;
 
 /// The stall the pattern opens with — the ULA's worst case.

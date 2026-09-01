@@ -1,10 +1,24 @@
 # `testdata/` — external test corpora
 
-Nothing in this directory is committed **except this file and `testdata/roms/48.rom`**. The
+Nothing in this directory is committed **except this file and the Sinclair ROMs** —
+`testdata/roms/48.rom`, and since M7 `testdata/roms/128-0.rom` and `testdata/roms/128-1.rom`. The
 corpora are third-party data with their own provenance and licensing, they are large, and they
-are reproducible from an authoritative source — so they are fetched on demand instead. The ROM
-is the one exception, because Amstrad has explicitly permitted redistributing the Sinclair ROMs
-with emulators; it has its own section below, and `.gitignore` names it.
+are reproducible from an authoritative source — so they are fetched on demand instead. The ROMs
+are the one exception, on the strength of a permission whose text, author, date, conditions and
+scope are quoted in full under [*The permission this rests on*](#the-permission-this-rests-on-quoted--and-the-acknowledgement-it-asks-for);
+`.gitignore` names every one of them, individually.
+
+> **This sentence said *"except this file and `testdata/roms/48.rom`"* until M7 committed the
+> 128's pair.** It is corrected rather than left to be inferred from the section below, because
+> the sentence is a *licensing* claim about what this repository redistributes and it is the
+> first one a reader meets. A file list that has gone stale reads exactly like a file list that
+> is complete.
+
+> **This sentence used to end *"because Amstrad has explicitly permitted redistributing the
+> Sinclair ROMs with emulators"* and stop there** — one of five unsourced copies of a licensing
+> claim. It now points at the one place that carries the quotation, which is the same *one register,
+> one owner* rule `docs/ARCHITECTURE.md` applies to the open register. The copies are named, and
+> what was wrong with them, in the section linked above.
 
 **A fresh clone does not test green, and that is the design.** Absence of a corpus makes its
 gate **fail**, naming the fetch — see *Making absence a failure*. A gate that skips silently is
@@ -111,9 +125,28 @@ report parser reads — rather than pinning a checksum.
 cargo test --release -p z80 --test zex_oracle -- --ignored --nocapture
 ```
 
-The sixteen tests around it — the CP/M shell, the report parser, and one failing case per
-gate rule — are **not** ignored and run on every `cargo test -p z80` without needing the
-corpus at all.
+The tests around it — the CP/M shell, the report parser, and one failing case per gate rule — are
+**not** ignored and run on every `cargo test -p z80` without needing the corpus at all. **Count
+them rather than quoting a number:**
+
+```sh
+grep -c '#\[test\]' crates/z80/tests/zex_oracle.rs     # 21 on 2026-09-01
+grep -c '#\[ignore' crates/z80/tests/zex_oracle.rs     #  2 — the two conformance runs
+```
+
+> **This paragraph said *"the sixteen tests around it"*, and it was **nineteen***: 21 `#[test]`s of
+> which `zexdoc_conformance` and `zexall_conformance` carry `#[ignore]`, counted by the two commands
+> above on 2026-09-01. The argument the sentence makes is untouched — the command still exits 0
+> without ever looking for the exerciser, which is the whole point. Only the integer was stale.
+>
+> **It was stale in two files at once, and the pass that found it fixed neither.**
+> `docs/STATUS.md` records exactly that — *"the same stale sixteen sits in `testdata/README.md`,
+> which is another agent's file and is routed separately"* — and it is the cleanest example in this
+> repository of the propagation defect that document catalogues at length: one derived figure, two
+> files, and the correction landing only in the one being read. The routing finally arrived on
+> 2026-09-01. **The remedy is not a better number; it is publishing the command instead of the
+> answer**, which is what the block above does, because this integer changes on somebody else's
+> commit and will go stale again the moment a test is added.
 
 ~~`zexall` is deliberately **not** wired up as a gate at M3.~~ **Superseded at M4**, and struck
 rather than deleted because the *"at M3"* scoping made it read as still current for two
@@ -343,6 +376,20 @@ Verified 2026-09-01: all three downloaded, all three hashes reproduced, all thre
 graded too. These three are here because they are freely distributable — a real game may not be
 redistributed and none is expected to be.
 
+### One of them is also executed, and that is a different gate
+
+`z80memptr.tap` is used **twice**, and the two uses grade unrelated things. The sweep below reads
+it as a *file*; `crates/spectrum/tests/memptr_oracle.rs` **runs it as a program** — loaded by the
+real ROM's `LD-BYTES` off the `EAR` bit, executed on the whole machine, and its report read back
+out of the display file. It is the first use of M6's tape loader as a general capability rather
+than as its own milestone gate, and it reports `Result: 045 of 160 tests failed.` on this core.
+
+The distinction is worth keeping straight: **the sweep passing says nothing about the CPU**, and
+until that oracle existed this file's presence in `testdata/` was recorded by `docs/STATUS.md` as
+an instrument that was documented and never run. `z80doc.tap` and `z80tests.tap` are still swept
+only — running them is a second oracle nobody has written, and `z80doc` in particular would
+overlap `zex_oracle.rs` rather than add to it.
+
 ### What the gate does with them
 
 `crates/spectrum/tests/tape_corpus.rs` is a **directory sweep**:
@@ -389,9 +436,10 @@ notice is not the guard. The guard is that an *undeclared* absence moves the pas
 ## `testdata/roms/` — the Sinclair ROMs
 
 **This is the one directory here that is committed.** The rule at the top of this file —
-nothing in `testdata/` is in the repository — has one exception, and `.gitignore` names it:
-Amstrad has explicitly permitted redistributing the Sinclair ROMs with emulators, so
-`48.rom` may live here. Game images may not; the user supplies their own.
+nothing in `testdata/` is in the repository — has one exception, and `.gitignore` names each
+file by name rather than by glob: `48.rom`, `128-0.rom` and `128-1.rom` may live here on the
+strength of the permission quoted immediately below. Game images may not; the user supplies
+their own.
 
 `48.rom` is the 48K's single 16 KB ROM: Sinclair BASIC, the editor, the character set at
 `0x3D00`, and the interrupt handler the 50 Hz frame interrupt vectors into. It is the **M5**
@@ -403,6 +451,157 @@ and a working screen.
 | Size | 16384 bytes |
 | SHA-1 | `5ea7c2b824672e914525d1d5c419d71b84a426a2` |
 | CRC-32 | `ddee531f` |
+
+### `128-0.rom` and `128-1.rom` — the 128's ROM pair, added at M7
+
+A 128 has **two** 16 KB ROMs and pages between them with bit 4 of `0x7FFD`. `128-0.rom` is the
+128 editor — the menu, the tokeniser, `RAMTOP`-relative allocation, the AY driver — and
+`128-1.rom` is 48 BASIC as the 128 ships it, which is what a machine executes after *48 BASIC*
+is selected from that menu. They are the **M7** gate's corpus, and they are committed under the
+same permission as `48.rom`, which names *"Spectrum 48/128"* affirmatively rather than reaching
+them by inference.
+
+| | `128-0.rom` | `128-1.rom` |
+|---|---|---|
+| Size | 16384 bytes | 16384 bytes |
+| SHA-1 | `4f4b11ec22326280bdb96e3baf9db4b4cb1d02c5` | `80080644289ed93d71a1103992a154cc9802b2fa` |
+| CRC-32 | `e76799d2` | `b96a36be` |
+| SHA-256 | `3ba308f23b9471d13d9ba30c23030059a9ce5d4b317b85b86274b132651d1425` | `8d93c3342321e9d1e51d60afcd7d15f6a7afd978c231b43435a7c0757c60b9a3` |
+
+**Every figure in that table was taken from the committed bytes on 2026-09-01, not transcribed
+from the source they were fetched from**, because this file's whole argument is that the
+provenance of the bytes is checked rather than asserted:
+
+```sh
+for f in testdata/roms/128-0.rom testdata/roms/128-1.rom; do
+  stat -f %z "$f"; shasum -a 1 "$f"; shasum -a 256 "$f"; crc32 "$f"
+done
+```
+
+#### Provenance, and two properties that make these the right ROMs rather than merely two ROMs
+
+Fetched from the **Fuse project's `roms/` directory** on 2026-09-01, byte-identical from three
+further mirrors, and independently corroborated against Debian's `spectrum-roms` — which is the
+same second-party licensing review already cited below for `48.rom`, and which ships *these two
+filenames* under this permission.
+
+Two checks were then run **against the committed bytes here**, because a hash proves two files
+are the same and says nothing about which machine they came off:
+
+- **`128-1.rom` is 48 BASIC with the 128's hooks in it, and the difference is legible.** It
+  differs from the trusted `48.rom` in **1177 bytes**. **1157** of those are in `0x386E–0x3CFF`,
+  which is `0xFF` filler in the 48K image — verified here: `set(48.rom[0x386E..=0x3CFF]) == {0xFF}`.
+  The remaining **20** are at `0x4B–0x4C`, `0xB52–0xB55`, `0x1349–0x134C`, `0x1B7D–0x1B80`,
+  `0x1BF4–0x1BF6` and `0x2646–0x2648` — six `JP`/`CALL` hooks redirecting into that reclaimed
+  space. **The character set at `0x3D00–0x3FFF` is byte-identical.** So the machine that boots
+  this ROM is running 48 BASIC, not a lookalike.
+- **It is the Sinclair toastrack, not the Amstrad +2.** `128-0.rom` carries
+  `© 1986 Sinclair Research Ltd` — the string *"1986 Sinclair"* is at `0x563`, and the byte at
+  `0x561` is `0x7F`, the Spectrum's own `©` glyph — and **neither ROM contains the string
+  `Amstrad` anywhere.** `128-1.rom` carries *"1982 Sinclair"* at `0x153B`, which is the message
+  the 48 BASIC path reaches.
+  > **One relayed figure is *not* verified here and is marked rather than repeated as fact:**
+  > that `128-0.rom` differs from `plus2-0.rom` in 14773 of 16384 bytes. **`plus2-0.rom` is not
+  > on this machine**, so nothing here can check it. What *is* checked is the pair above — a
+  > 1986 Sinclair string present and no Amstrad string at all — which settles the same question
+  > without needing the +2 image. Whoever has `plus2-0.rom` can close the note; nobody here can.
+
+**Why this distinction is worth the paragraph rather than a footnote.** The permission is
+affirmative for the 48 and the 128 *by name* and reaches the `+` machines only through
+*"produced the + machines ourselves"*. A `plus2-0.rom` committed under the belief that it was a
+128 ROM would be a redistribution resting on the weaker half of a hedged 1999 usenet answer —
+which is precisely the failure `.gitignore`'s by-name list exists to prevent, arriving through a
+filename rather than through a glob.
+
+### The permission this rests on, quoted — and the acknowledgement it asks for
+
+**This section is the single source for the licensing claim, and everywhere else in the
+repository points here rather than restating it.** `.gitignore`, `docs/ARCHITECTURE.md`,
+`README.md`, `docs/M6.md` and this file's own opening paragraph each used to assert
+*"Amstrad has explicitly permitted redistributing the Sinclair ROMs with emulators"* — five
+copies of one claim, with **no quotation, no author, no date and no URL** between them. Compare
+what this same file demands of the ROM's *bytes* — the table directly above and *Provenance* below:
+size, SHA-1, CRC-32, two independent mirrors fetched and compared, and a stated reason for taking
+that trouble. The provenance of the **bytes** was
+documented to this project's usual standard and the provenance of the **right to ship them** was a
+sentence — which is worse than the usual version of that defect, because a wrong technical claim
+produces a bug and a wrong licensing claim produces a redistribution nobody was entitled to make.
+
+**The acknowledgement, made here in the terms the permission requests:**
+
+> **Amstrad have kindly given their permission for the redistribution of their copyrighted
+> material but retain that copyright.**
+
+That sentence is not decoration and it is not a summary of the permission — it is a thing the
+permission asks for, in those words, and until now this repository made it nowhere. It is repeated
+in [`../README.md`](../README.md)'s licensing section because the permission asks that *"the
+program/manual"* carry it, and the manual is the front door rather than a corpus note. **A required
+notice is the one kind of text that is meant to exist in more than one place**; the *sourcing*
+below is not, and lives only here.
+
+#### The statement
+
+**Cliff Lawson of Amstrad plc**, `<clawson@amstrad.com>`, posted to **`comp.sys.sinclair`** on
+**31 August 1999**, under the subject *"Amstrad ROM permissions"*, as answers to eight numbered
+questions. The sentence relied on is his answer to question 1:
+
+> *"Amstrad are happy for emulator writers to include images of our copyrighted code as long as
+> the (c)opyright messages are not altered and we appreciate it if the program/manual includes a
+> note to the effect that 'Amstrad have kindly given their permission for the redistribution of
+> their copyrighted material but retain that copyright'."*
+
+**The conditions that travel with it:**
+
+| Condition | State here |
+|---|---|
+| The copyright messages must not be altered | `48.rom` is committed byte-identical to both mirrors; `128-0.rom` and `128-1.rom` byte-identical to four. Every SHA-1 and CRC-32 above was taken from the committed bytes, and both 128 copyright strings were located in them by offset |
+| The acknowledgement note is requested (*"we appreciate it if"*) | **made above**, and in `README.md` |
+| Distribution is for emulator use | this is an emulator |
+| The ROM code is **not to be sold** — a shareware fee for the emulator author's own work is explicitly fine | nothing here is sold |
+| Modification is permitted (*"If they choose to modify the behaviour in any way then that's entirely up to them"*), and modified ROMs may be redistributed under the same copyright proviso | not exercised |
+
+#### Scope — stated as the source states it, not tidied
+
+**The machine list is in the *question*, not in the answer, and the answer is hedged.** Question 5
+asks about Interface 1/2, the ZX80, the ZX81 and the Spectrum 48, 128, +2, +2A and +3. What Lawson
+replies is:
+
+> *"I think Amstrad only bought the rights to Spectrum 48/128 from Sinclair and then produced the
+> + machines ourselves. I do not believe the (c) for ZXs or IF1/2 has anything to do with
+> Amstrad."*
+
+On clones (question 7), in full: *"Ask Timex."*
+
+So: **Spectrum 48 and 128 are affirmative**; the `+` machines are covered by *"produced… ourselves"*
+rather than by being named as licensed; and the **ZX80, the ZX81 and the Interface 1 and Interface 2
+ROMs are disclaimed as not Amstrad's copyright at all.** That last is a *stronger* reason not to
+ship them than an exclusion from the permission would be — if Amstrad does not hold the rights, no
+Amstrad permission can reach those ROMs **however** it is worded. It is why `.gitignore` lists every
+committed ROM **by name** rather than un-ignoring `*.rom`: an `if1.rom` is exactly the sort of file
+an emulator project acquires in the normal course of its work, it matches the glob, and no wording
+of this permission covers it.
+
+#### How it was read, and the gap that is left
+
+- The wording above is transcribed from
+  [`z00m128/zxs-rom/LICENSE.md`](https://github.com/z00m128/zxs-rom/blob/master/LICENSE.md),
+  which reproduces the **whole thread** — all eight questions with their answers — and was read end
+  to end on 2026-09-01.
+- Corroborated by **Debian/Ubuntu's [`spectrum-roms` copyright file](https://launchpad.net/ubuntu/noble/+source/spectrum-roms/+copyright)**,
+  which ships `48.rom`, `128-0.rom` and `128-1.rom` under this permission after a distribution's
+  own licensing review. That is a second party acting on the same text, not a second fan page.
+- **The gap, stated rather than left implicit: no archived copy of the original usenet article has
+  been read.** Both of the above are *reproductions*. For a technical claim two agreeing
+  reproductions would be plenty; for a licensing claim the quotation **is** the thing relied on, so
+  the distinction survives into this file rather than being smoothed away. What would close it: the
+  article itself from a usenet archive, quoted here with its Message-ID.
+- **The [World of Spectrum permits page](https://worldofspectrum.net/permits/) is not a source for
+  this text and must not be cited as one.** Re-fetched 2026-09-01 with a browser user-agent: **HTTP
+  200**, 52454 bytes, and it does **not** carry the permission's wording. It says only that Amstrad
+  *"allow free distribution of the ZX Spectrum ROMs (see the message from Amstrad as posted in
+  comp.sys.sinclair for the details)"* — it points at the posting rather than reproducing it. An
+  earlier reading recorded that page as returning 403; the 403 was not what hid the primary text,
+  because the page never had it.
 
 ### Provenance
 

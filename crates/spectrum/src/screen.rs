@@ -18,6 +18,23 @@
 //! character row's next pixel line, and only every eighth line is adjacent. The 768-byte
 //! attribute file at `0x5800` is plain 32 × 24 raster order, one byte per character cell.
 //!
+//! # The ULA reads a **bank**, not an address
+//!
+//! Every address in this module — [`DISPLAY_FILE`], [`ATTRIBUTE_FILE`], everything
+//! [`pixel_address`] returns — is a true address at which the screen bank appears, and they
+//! are unchanged by M7. But the byte the ULA actually latches does **not** come through the
+//! slot map: the chip is wired to bank 5 or bank 7 directly, chosen by bit 3 of `0x7FFD`.
+//!
+//! On a 48K the distinction is invisible, because bank 5 is nailed to `0x4000` and there is no
+//! bit 3. On a 128 it is the difference between a working shadow screen and none: bank 7 is
+//! usually paged into no slot at all, so a renderer that read `Memory::read(0x4000)` would draw
+//! whatever happens to be at `0x4000` — which is bank 5, the screen the program just switched
+//! *away* from. Double-buffering would show the buffer being drawn into, every frame.
+//!
+//! So [`render`] resolves the bank once, through [`Memory::screen_bank`], and indexes it.
+//! **The public signature does not move and no public constant does**, because they are still
+//! the addresses at which bank 5 appears; what changed is one indirection inside the function.
+//!
 //! # What this module does not model
 //!
 //! [`render`] takes the screen as it stands **at the moment it is called**. A real ULA
@@ -29,8 +46,13 @@
 //! frame's write history keyed by T-state, which is a different data structure and a
 //! different verification story. `docs/MACHINE.md` puts exactly this software in the
 //! "observation" tier, and there is no oracle for it here.
+//!
+//! **The shadow screen does not change that and slightly reduces the pressure for it.** A 128
+//! that can double-buffer has less reason to reach for a mid-frame trick, so M7 leaves the
+//! boundary where M5 put it — but a *mid-frame* switch of bit 3 is drawn here as if the last
+//! value had applied all frame, exactly as a mid-frame attribute write is.
 
-use crate::memory::Memory;
+use crate::memory::{Memory, PAGE_SIZE};
 
 /// Pixels across the display, excluding the border.
 pub const DISPLAY_WIDTH: usize = 256;
@@ -238,6 +260,27 @@ pub const fn attribute_address(column: u8, row: u8) -> u16 {
 /// no glyphs below code 32. Fixed here rather than read from `CHARS`, so that reading the
 /// screen back does not depend on a system variable having been initialised — and so that it
 /// reports what the ROM's own font draws even for a program that has repointed `CHARS`.
+///
+/// # On a 128 this address is a 48K assumption, and [`read_text`] inherits it
+///
+/// The font is read *through the slot map*, so it comes from whichever ROM page is selected.
+/// That is unambiguous on a 48K, which has one. **The 128's editor ROM does not hold a
+/// character set here** — measured rather than assumed: its bytes at `0x3D00` are
+/// `3F C1 38 79 2A 7F FD 7C` where a space would be eight zeros. The set lives in the 48 BASIC
+/// ROM, page 1.
+///
+/// The consequence is not subtle and is worth stating where somebody will meet it: the 128's
+/// menu loop pages ROM 1 in and out **every frame**, so [`read_text`] on a booted 128 returns
+/// the screen or a wall of `?` depending on which frame it is called in. Neither answer is a
+/// defect — the function does exactly what it documents — but it is a 48K instrument pointed at
+/// a two-ROM machine, and a gate that asserted on its output would be flaky for a reason that
+/// has nothing to do with the screen.
+///
+/// `crates/spectrum/tests/m7_common/mod.rs` therefore reads the screen against a font taken from
+/// an explicit ROM image, which removes the dependency and makes the expectation independent of
+/// the machine under test. **This is left as a documented limitation rather than fixed**: making
+/// `read_text` search both ROM pages would give it a rule no hardware has, and reading `CHARS`
+/// would reintroduce the dependency this constant exists to remove.
 const FONT: u16 = 0x3D00;
 
 /// Bytes in one glyph.
@@ -264,15 +307,20 @@ const LAST_CHARACTER: u8 = 127;
 pub fn read_text(memory: &Memory) -> Vec<String> {
     // The font is read once rather than per cell: the same 96 glyphs were previously
     // re-fetched for every one of the 768 cells, which is 590,000 memory reads per call.
+    //
+    // It comes through `Memory::read` and not through the screen bank, and that is not an
+    // inconsistency with the cells below: the font is ROM, so it is whichever ROM the slot map
+    // currently shows — which on a 128 running 48 BASIC is the second page.
     let font: Vec<(char, [u8; GLYPH_BYTES as usize])> = (FIRST_CHARACTER..=LAST_CHARACTER)
         .map(|code| (decode(code), glyph(memory, code)))
         .collect();
 
+    let screen = screen_page(memory);
     (0..DISPLAY_ROWS)
         .map(|row| {
             (0..DISPLAY_COLUMNS)
                 .map(|column| {
-                    let cell = read_cell(memory, column, row);
+                    let cell = read_cell(screen, column, row);
                     if cell == [0; GLYPH_BYTES as usize] {
                         return ' ';
                     }
@@ -285,12 +333,32 @@ pub fn read_text(memory: &Memory) -> Vec<String> {
         .collect()
 }
 
-/// The eight bitmap bytes of one character cell.
-fn read_cell(memory: &Memory, column: usize, row: usize) -> [u8; GLYPH_BYTES as usize] {
+/// The page the ULA is currently drawing from.
+///
+/// The one place this module turns "which bank" into "which bytes", so [`render`] and
+/// [`read_text`] cannot come to disagree about what is on screen.
+fn screen_page(memory: &Memory) -> &[u8; PAGE_SIZE] {
+    memory.bank(memory.screen_bank())
+}
+
+/// Where in the screen bank the byte at `address` lives.
+///
+/// The screen bank appears at `0x4000` when it is paged there at all, so the offset is the
+/// address's low fourteen bits. Masked rather than subtracted: the mask makes the result
+/// provably in range for a `[u8; PAGE_SIZE]`, so the index cannot panic and its bounds check
+/// is elided — and unlike a subtraction it has no wrong answer to give for an address outside
+/// the display file.
+#[inline]
+const fn screen_offset(address: u16) -> usize {
+    (address as usize) & (PAGE_SIZE - 1)
+}
+
+/// The eight bitmap bytes of one character cell, out of the page the ULA is drawing.
+fn read_cell(screen: &[u8; PAGE_SIZE], column: usize, row: usize) -> [u8; GLYPH_BYTES as usize] {
     let mut cell = [0; GLYPH_BYTES as usize];
     for (line, byte) in cell.iter_mut().enumerate() {
         let pixel_line = (row * CELL + line) as u8;
-        *byte = memory.read(pixel_address(column as u8, pixel_line));
+        *byte = screen[screen_offset(pixel_address(column as u8, pixel_line))];
     }
     cell
 }
@@ -381,10 +449,15 @@ impl Frame {
 ///
 /// `flash_phase` is the half of the 32-frame `FLASH` cycle the machine is in; see
 /// [`flash_phase`].
+/// The signature is unchanged and deliberately so: `Memory` already knows which bank the ULA
+/// is drawing, so no caller has to learn about the shadow screen to keep working.
 pub fn render(memory: &Memory, border: Colour, flash_phase: bool, frame: &mut Frame) {
     frame.fill(border);
     let renderer = Renderer {
-        memory,
+        // Resolved once for the whole frame rather than per cell. That is the same reason
+        // `read_text` hoists the font, and it is also the only place the shadow-screen
+        // indirection can cost anything: 6144 cells is 6144 slot-map lookups avoided.
+        screen: screen_page(memory),
         flash_phase,
     };
     for line in 0..DISPLAY_HEIGHT {
@@ -400,7 +473,9 @@ pub const fn flash_phase(frames: u64) -> bool {
 
 /// The screen and the `FLASH` phase, bundled so the drawing methods stay short.
 struct Renderer<'a> {
-    memory: &'a Memory,
+    /// The bank the ULA is drawing, resolved once — bank 5, or bank 7 on a 128 whose
+    /// `0x7FFD` bit 3 is set.
+    screen: &'a [u8; PAGE_SIZE],
     flash_phase: bool,
 }
 
@@ -413,10 +488,9 @@ impl Renderer<'_> {
 
     fn cell(&self, frame: &mut Frame, line: usize, column: usize) {
         let column_byte = column as u8;
-        let bits = self.memory.read(pixel_address(column_byte, line as u8));
+        let bits = self.screen[screen_offset(pixel_address(column_byte, line as u8))];
         let attribute = Attribute::new(
-            self.memory
-                .read(attribute_address(column_byte, (line / CELL) as u8)),
+            self.screen[screen_offset(attribute_address(column_byte, (line / CELL) as u8))],
         );
         let (ink, paper) = attribute.resolve(self.flash_phase);
 
@@ -594,6 +668,95 @@ mod tests {
             frame.pixel(BORDER + 1, BORDER),
             Some(Colour::new(6)),
             "paper"
+        );
+    }
+
+    #[test]
+    fn the_screen_offset_is_the_display_files_own_offset_within_its_bank() {
+        // The bank appears at 0x4000, so the offset is the address's low fourteen bits — and
+        // that has to agree with the plain subtraction over the whole display and attribute
+        // file, or `render` would draw from the wrong place while every address test passed.
+        for address in DISPLAY_FILE..=(ATTRIBUTE_FILE + ATTRIBUTE_FILE_LEN as u16 - 1) {
+            assert_eq!(
+                screen_offset(address),
+                usize::from(address - DISPLAY_FILE),
+                "{address:#06X}"
+            );
+        }
+        assert_eq!(screen_offset(DISPLAY_FILE), 0);
+        assert_eq!(screen_offset(ATTRIBUTE_FILE), 0x1800);
+    }
+
+    #[test]
+    fn the_screen_offset_is_in_range_for_every_address() {
+        // Masked rather than subtracted, so the index cannot panic whatever it is handed.
+        // Exhaustive because the input is 65536 wide and this costs microseconds.
+        for address in 0..=u16::MAX {
+            assert!(screen_offset(address) < PAGE_SIZE);
+        }
+    }
+
+    #[test]
+    fn a_128_draws_the_bank_bit_three_selects() {
+        // `M7.md` Decision 3's third gated property, at the level this module owns it: the
+        // ULA reads a bank directly, so a shadow screen is visible even though bank 7 is
+        // paged into no slot at all and `Memory::read(0x4000)` still returns bank 5.
+        use crate::memory::BankIndex;
+
+        let mut memory = Memory::spectrum_128(&[0; PAGE_SIZE], &[0; PAGE_SIZE]).expect("two ROMs");
+        // Bank 5: one pixel set at the top left. Bank 7: the pixel next to it.
+        for (bank, column) in [(5_u8, 0_u8), (7, 1)] {
+            let page = memory.bank_mut(BankIndex::new(bank));
+            page[screen_offset(pixel_address(column, 0))] = 0x80;
+            page[screen_offset(attribute_address(column, 0))] = 0x07; // white ink
+        }
+
+        let mut frame = Frame::new();
+        render(&memory, Colour::BLACK, false, &mut frame);
+        assert_eq!(frame.pixel(BORDER, BORDER), Some(Colour::new(7)), "bank 5");
+        assert_eq!(frame.pixel(BORDER + CELL, BORDER), Some(Colour::BLACK));
+
+        // Bit 3 alone, with the slot map left exactly as it was.
+        let slots_before = memory.slots();
+        memory.write_paging_port(0x08);
+        assert_eq!(memory.slots(), slots_before, "only the screen select moved");
+        assert_eq!(memory.read(0x4000), 0x80, "0x4000 is still bank 5");
+
+        render(&memory, Colour::BLACK, false, &mut frame);
+        assert_eq!(
+            frame.pixel(BORDER, BORDER),
+            Some(Colour::BLACK),
+            "bank 5's pixel must be gone"
+        );
+        assert_eq!(
+            frame.pixel(BORDER + CELL, BORDER),
+            Some(Colour::new(7)),
+            "bank 7's pixel must be drawn"
+        );
+    }
+
+    #[test]
+    fn reading_the_screen_as_text_follows_the_same_bank_as_render() {
+        // The two views must not disagree about which screen is on screen. `read_text` is
+        // what the boot gates assert against, so a `render` that followed bit 3 and a
+        // `read_text` that did not would leave the 128's shadow screen half-modelled and
+        // green.
+        use crate::memory::BankIndex;
+
+        let mut memory = Memory::spectrum_128(&[0; PAGE_SIZE], &[0; PAGE_SIZE]).expect("two ROMs");
+        // A glyph the ROM font would resolve, written into bank 7 only. With a blank ROM the
+        // font is all zeros, so any non-blank cell reads as '?' — which is enough to tell
+        // "something is here" from "nothing is here", and is what a wrong bank would change.
+        memory.bank_mut(BankIndex::new(7))[screen_offset(pixel_address(0, 0))] = 0xFF;
+
+        assert!(
+            read_text(&memory)[0].starts_with(' '),
+            "bank 5 is blank and bit 3 is clear"
+        );
+        memory.write_paging_port(0x08);
+        assert!(
+            read_text(&memory)[0].starts_with('?'),
+            "bank 7 is selected and its cell must appear"
         );
     }
 

@@ -189,7 +189,9 @@ fn r1_a_snapshot_survives_a_trip_through_the_machine() {
     // `restore` forgetting a field.
     let snapshot = fixture();
     let mut machine = machine();
-    machine.restore(&snapshot);
+    machine
+        .restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert_eq!(machine.snapshot(), snapshot);
 }
 
@@ -206,7 +208,9 @@ fn r1_holds_from_a_machine_that_was_already_running() {
     machine.ula_mut().out_port(0x00FE, 2);
 
     let snapshot = fixture();
-    machine.restore(&snapshot);
+    machine
+        .restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert_eq!(machine.snapshot(), snapshot);
 }
 
@@ -216,10 +220,15 @@ fn restoring_twice_is_the_same_as_restoring_once() {
     // nothing and charges no contention would be false if a second application moved anything.
     let snapshot = fixture();
     let mut once = machine();
-    once.restore(&snapshot);
+    once.restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
     let mut twice = machine();
-    twice.restore(&snapshot);
-    twice.restore(&snapshot);
+    twice
+        .restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
+    twice
+        .restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert_eq!(once.snapshot(), twice.snapshot());
 }
 
@@ -237,7 +246,9 @@ fn r3_a_canonical_file_survives_a_trip_through_the_machine() {
     let file = z80::write(&fixture());
     let parsed = z80::parse(&file).expect("our own writer produces a readable file");
     let mut machine = machine();
-    machine.restore(&parsed);
+    machine
+        .restore(&parsed)
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert_eq!(z80::write(&machine.snapshot()), file);
 }
 
@@ -253,7 +264,9 @@ fn a_restored_bank_lands_where_the_48k_memory_map_says() {
     // map, written in `snapshot_common` beside the page numbers they came from, and they owe
     // nothing to `crates/spectrum/src/lib.rs`.
     let mut machine = machine();
-    machine.restore(&fixture());
+    machine
+        .restore(&fixture())
+        .expect("both machines are 48K, so a restore cannot be refused");
     for (base, bank, fill) in snapshot_common::FILL {
         assert_eq!(
             machine.memory().read(base),
@@ -277,7 +290,9 @@ fn a_restore_does_not_rewind_the_machines_uptime() {
     let mut machine = machine();
     machine.run_frames(7);
     assert_eq!(machine.frames(), 7);
-    machine.restore(&fixture());
+    machine
+        .restore(&fixture())
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert_eq!(machine.frames(), 7, "a load is not a reset");
     assert_eq!(
         machine.frame_t_state(),
@@ -300,7 +315,9 @@ fn a_restore_leaves_no_machine_cycle_half_open() {
     let mut snapshot = fixture();
     snapshot.frame_t_state = FIRST_CONTENDED_T_STATE;
     let mut machine = machine();
-    machine.restore(&snapshot);
+    machine
+        .restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
 
     machine.ula_mut().tick(0x4000);
     assert_eq!(
@@ -328,12 +345,16 @@ fn a_restore_does_not_move_the_tape() {
     let mut snapshot = fixture();
     snapshot.frame_t_state = FIRST_CONTENDED_T_STATE;
     let mut machine = machine();
-    machine.restore(&snapshot);
+    machine
+        .restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert_eq!(machine.frame_t_state(), FIRST_CONTENDED_T_STATE);
 
     machine.insert_tape(Tape::new(vec![1; 8]));
     machine.tape_mut().play();
-    machine.restore(&snapshot);
+    machine
+        .restore(&snapshot)
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert!(
         !machine.tape_mut().level(),
         "the head moved during a restore, so something charged elapsed time"
@@ -346,7 +367,9 @@ fn a_restore_does_not_eject_the_tape() {
     // `Ula::reset` does not rewind it.
     let mut machine = machine();
     machine.insert_tape(Tape::new(vec![4, 4]));
-    machine.restore(&fixture());
+    machine
+        .restore(&fixture())
+        .expect("both machines are 48K, so a restore cannot be refused");
     assert_eq!(machine.tape_mut().pulses(), &[4, 4]);
 }
 
@@ -367,7 +390,9 @@ fn a_frame_position_at_or_past_the_frame_length_rolls_over() {
     ] {
         snapshot.frame_t_state = given;
         let mut machine = machine();
-        machine.restore(&snapshot);
+        machine
+            .restore(&snapshot)
+            .expect("both machines are 48K, so a restore cannot be refused");
         assert_eq!(machine.frame_t_state(), expected, "given {given}");
         assert_eq!(machine.frames(), 0, "rolling over is not advancing");
     }

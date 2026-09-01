@@ -125,6 +125,58 @@ only if all seven internal cycles are addressed by `IR`. Taken by the cold revie
 `2157331`; **not independently reproduced in this pass**, and the person to reproduce it is whoever
 next has a `Cpu<Ula>` positioned at a chosen frame phase.
 
+> **Reproduced, 2026-09-01 — and reproducing it falsifies the sentence three lines above it.**
+> A second `Cpu<Ula>`, positioned with `advance_to(FIRST_CONTENDED_T_STATE + phase)` and stepped
+> once over `ADD HL,BC` at `0x4000`, returns **17 at phase 0 and 11 at phase 7**. Twice measured,
+> by two people, on two occasions. The paragraph above may drop its caveat.
+>
+> The reproduction was run as a **sweep over where `I` points**, which is what makes it say more
+> than the original did. Same instruction, same phases, only `I` varying:
+>
+> | code at | `I` | refresh address | phase 0 | phase 7 |
+> |---|---|---|---|---|
+> | `0x4000` contended | `0x00` | `0x0001` ROM, uncontended | **17** | **11** |
+> | `0x4000` contended | `0x3F` | `0x3F01` ROM, uncontended | **17** | **11** |
+> | `0x4000` contended | `0x40` | `0x4001` screen, **contended** | **39** | **32** |
+> | `0x8000` uncontended | `0x3F` | `0x3F01` ROM, uncontended | **11** | **11** |
+> | `0x8000` uncontended | `0x40` | `0x4001` screen, **contended** | **31** | **32** |
+>
+> **So `17` and `11` are the figures for an *uncontended* `IR`, and the sentence that says otherwise
+> is wrong.** *"On a 48K, program code normally lives in contended RAM `0x4000–0x7FFF`, so `IR`
+> points into contended memory for most of a game's runtime"* conflates two different registers.
+> `PC` follows the program; `IR` follows **`I`**, which the program sets and which has nothing to do
+> with where the code sits. Measured against the real 48K ROM over 400,000 sampled instructions:
+> **`I` = `0x3F` in 399,992 of them** (`0x00` in the first eight, before the ROM's own `LD I,A`), so
+> the refresh address is `0x3Fxx` — in ROM, uncontended, throughout. An `IM 2` table is
+> conventionally placed high, which is uncontended too. `IR` in contended memory is the *unusual*
+> configuration, not the normal one; it is what produces "snow" on real hardware, and the row that
+> costs 39 is that case, not the common one.
+>
+> **The paragraph's conclusion survives its premise being backwards, and is strengthened by the
+> correction.** The address still has to travel with the tick — but the reason is the fourth row
+> above, not the third: with `I` = `0x40` an instruction in *uncontended* memory costs **31** rather
+> than 11, so a bus that assumed the internal cycles rode `PC` would get that case wrong in a bank
+> where it had no other reason to expect contention at all. The property is real and large; only
+> the story about which way round it fires was wrong.
+>
+> **What this does *not* cover: the first clause, about the second half of M1.** *"the refresh
+> address the Z80 drives during the second half of M1"* is a claim about T3–T4 of the fetch itself,
+> and it is a **different claim** from the one about the internal cycles that follow the fetch. The
+> corpus proves the second and is silent on the first — 1335 vectors, an `MC` at T=0 of every fetch
+> and none at T=1, T=2 or T=3.
+>
+> The first clause is nonetheless **true and now proven**, from Zilog's own *Z80 CPU User Manual*
+> (UM008011-0816, Figure 5): the address bus carries `PC` for T1–T2 and the refresh address for
+> T3–T4, and **this core does not do that** — `Cpu::fetch_opcode` drives `PC` for all four. The
+> divergence costs nothing, and not only because our contention model cannot see it: the same manual
+> says `/WAIT` is sampled *"during T2 and every subsequent automatic WAIT state"* and nowhere else,
+> so a Spectrum — which charges contention by holding `/WAIT` — **cannot** stall an M1 on whatever
+> its second half is driving. Measured as well as derived: driving `PC, PC, IR, IR` leaves 290/290,
+> 1045/1045 and all 68 rows of the hardware timing oracle unmoved. The per-T-state table with its
+> evidence classes is in [`Z80-REFERENCE.md`](Z80-REFERENCE.md), where hardware rules live; the
+> disposition, the mutation table and the two files that pin the M1 interior are on
+> `compare_contention` in `crates/z80/tests/common/report.rs`.
+
 Generic over `B`, never `Box<dyn Bus>` — monomorphised, no indirect call on the hot path.
 `read`/`write` carry `#[inline]`; cross-crate inlining does not happen otherwise. Both
 properties are verified in emitted assembly, not assumed — see *Measured*, below.
@@ -268,6 +320,28 @@ Machine-level timing has no such oracle. Contention and floating bus are verifie
 known-demanding software (Nirvana-engine demos, Aquaplane for floating bus,
 multicolour effects). That is observation, not a green check.
 
+> **CORRECTION — the first sentence stopped being true for contention on 2026-09-01, and it is the
+> third copy of that claim to need this note.** `crates/spectrum/tests/timing_oracle.rs` runs
+> Richard Butler's 48K timing test suite — a `.z80` carrying 34 instruction groups and two tables of
+> results *measured on real Spectrums* — and reports **68 hardware rows, 0 disagreements**. It is a
+> tier-1 oracle by this section's own definition: a number to compare, not a picture to squint at.
+> Thirteen mutations bound it, each verified to have landed before its verdict was trusted;
+> `FIRST_CONTENDED_T_STATE` at 14333, 14334, 14336 and 14337 all go red and **only 14335 is green**.
+> The full account is in [`MACHINE.md`](MACHINE.md)'s *The timing oracle*, and **only** there.
+>
+> **What that establishes is narrower than "the contention model is right", and the difference is
+> the point.** Precisely: **the first contended T-state falls exactly 14335 T-states after `/INT`**,
+> given that this machine asserts `/INT` at frame T-state 0. Three mutations came back *green* and
+> each marks something the oracle cannot settle — the frame's **origin** is a convention (moving
+> `/INT` and the window together passes), the interrupt window's **length** is unmeasured (32 → 24
+> passes), and the `64 × 224` **factorisation** is not measured, only its product. All three are
+> rows in [`STATUS.md`](STATUS.md)'s register.
+>
+> **The rest of the sentence stands unchanged.** The floating bus is not modelled, so it is not
+> gradeable rather than ungraded — the suite's own groups 35–37 are excluded **by name** for exactly
+> that reason — and progressive drawing and keyboard ghosting are in the same position. For those,
+> *known-demanding software* is still the only instrument and it is still observation.
+
 ## Milestones
 
 | | Goal | Gate |
@@ -276,9 +350,9 @@ multicolour effects). That is observation, not a green check.
 | M2 | CB/ED/DD/FD prefixes | fuse green in full |
 | M3 | Documented behaviour | **zexdoc passes** |
 | M4 | Undocumented flags | **zexall passes** — CPU is done |
-| M5 | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` |
+| M5 | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | **the gates in `crates/spectrum/tests/`** — boot **and the frame it lands on**, the 50 Hz line, the keyboard matrix, ROM write protection, contention magnitude and phase, the four-case I/O rule, and the hardware timing oracle. **Count them, do not quote a number:** `ls -1 crates/spectrum/tests/*.rs \| wc -l` |
 | M6 | Snapshots (Z80/SNA) **and** TAP tape | **T1 + T2 + T3** — see below |
-| M7 | 128: paging, second ROM, AY, contention per bank | 128-only software runs |
+| M7 | 128: paging, second ROM, AY, contention per bank | **T1 + T2 + T3** ([`M7.md`](M7.md) Decision 5). *"128-only software runs"* is **T4** |
 | M8 | WASM + macroquad | playable from a URL |
 
 > **The M6 row said *"Snapshots (Z80/SNA) **or** TAP tape"* and *"a real game runs"*, and both
@@ -303,6 +377,25 @@ multicolour effects). That is observation, not a green check.
 > both built, and a row offering a choice between them would have let either alone count.
 > `MACHINE.md` carries the same row and is not this document's to edit; it is flagged for
 > whoever owns it.
+>
+> > **Discharged, and the flag is now stale in the other direction.** `MACHINE.md`'s M6 **and** M7
+> > rows were corrected in the M6 merge (`0d3e7ef`), and its own correction block there says
+> > *"`ARCHITECTURE.md`'s copy of the table is owned elsewhere and still carries the old wording for
+> > **all three rows**"* — which was true of M5 and M7 and had already stopped being true of M6.
+> > **Both files were partly corrected in the same session and each recorded the other as
+> > untouched.** That is the propagation defect in its symmetrical form: not one document lagging,
+> > but two documents each describing the other's *previous* state. The remaining two rows are
+> > corrected above; `MACHINE.md`'s sentence about this file is corrected there.
+>
+> **M6 has since merged.** T3 shipped as a program written here, stored as a `.tap`, loaded by the
+> real ROM's own `LD-BYTES` through the `EAR` bit, and executed — computing a value asserted to
+> appear **nowhere in its own bytes**, so *"the data arrived"* and *"it ran"* are graded as separate
+> claims. What that gate leaves ungraded is a list rather than a caveat, and it lives in
+> [`STATUS.md`](STATUS.md)'s M6 section.
+>
+> **The M7 row is corrected at the same time so the next milestone does not inherit the mismatch**,
+> which is the mistake this block records M6 making. [`M7.md`](M7.md) Decision 5 puts the 128 on the
+> same four-tier scheme; *"128-only software runs"* is T4 there for the same reason it is here.
 
 Performance is a non-goal. 3.5 MHz × 50 Hz ≈ 70,000 T-states per frame; a modern machine
 does that thousands of times faster than real time. Optimise nothing until measured.
@@ -737,6 +830,22 @@ survive unchallenged. One register, one owner.
 
 ## Licensing note
 
-Amstrad has explicitly permitted redistribution of the Sinclair ROMs with emulators, so
-the Spectrum ROMs may live in this repository. Game images may not — the user supplies
-their own.
+The Spectrum ROMs may live in this repository; game images may not, and the user supplies their
+own. **The permission that makes the first half true is quoted in full — text, author, forum, date,
+the four conditions it carries, its hedged scope, and the one gap still open in its sourcing — in
+[`../testdata/README.md`](../testdata/README.md), and only there.**
+
+> **This note used to be one of five unsourced copies of a licensing claim.** It read *"Amstrad has
+> explicitly permitted redistribution of the Sinclair ROMs with emulators"*, and so did
+> `.gitignore`, `README.md`, `M6.md` and `testdata/README.md` — five assertions, no quotation, no
+> author, no date, no URL between them. That is the same shape as the defects
+> [`STATUS.md`](STATUS.md) catalogues — a claimed protection with nothing behind it a reader can
+> check — and worse in one specific way: **a wrong technical claim produces a bug; a wrong
+> licensing claim produces a redistribution nobody was entitled to make.**
+>
+> It is not a summary problem, so it is not fixed by summarising better. For a licensing claim the
+> **quotation is the thing relied on**, which makes it exactly the kind of fact that gets one home
+> and links from everywhere else — the rule this document already applies to the open register.
+> Read the scope there before adding a ROM: it is a hedged 1999 usenet answer, not a licence grant
+> with a schedule, and the ZX80, ZX81 and Interface 1/2 ROMs are **disclaimed** rather than merely
+> omitted.

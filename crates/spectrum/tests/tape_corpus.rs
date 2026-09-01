@@ -17,6 +17,18 @@
 //! train **fail somebody else's checksum**. That is the same class of instrument as the
 //! third-party snapshots in `snapshot_corpus.rs`, and it is the reason both exist.
 //!
+//! # What this sweep does **not** grade, and where one of these tapes is graded further
+//!
+//! Nothing here executes a single instruction of these files. That is the correct scope for a
+//! format gate, and it was worth saying out loud because `docs/STATUS.md` recorded the gap: it
+//! catalogued `z80memptr.tap` as an instrument that was *"documented and neither committed nor
+//! run"* precisely because this sweep's green looked like coverage of the tape's contents.
+//!
+//! `crates/spectrum/tests/memptr_oracle.rs` now closes that: it loads the same file through the
+//! real ROM's `LD-BYTES` and runs it. **A tape passing this sweep says nothing about the CPU**,
+//! and the two gates are deliberately separate — this one must keep passing for tapes nobody
+//! can execute, which is most of them.
+//!
 //! # It is a `#[test]`, and a directory sweep
 //!
 //! Not an example, not a `main` that prints a verdict — `docs/STATUS.md` records three gates

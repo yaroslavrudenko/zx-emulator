@@ -6,15 +6,49 @@ rust-version.workspace = true
 license.workspace = true
 description = "macroquad frontend, native and WASM."
 
+# NOTE — deliberately NOT a detached workspace.
+#
+# The brief asked for an empty `[workspace]` table here so this crate would build in
+# isolation while another agent held the root manifest. That table cannot be added: the root
+# `Cargo.toml` already lists `crates/frontend` in `members`, and a member that declares its
+# own workspace makes the *root* unresolvable. Measured rather than assumed, in a scratch
+# tree so nothing here was risked:
+#
+#     error: multiple workspace roots found in the same workspace
+#     EXIT=101
+#
+# That failure is not local to this crate — it is `cargo metadata` at the root refusing, so
+# every one of the 445 workspace tests would stop building. The premise the instruction
+# rested on had already been discharged: `crates/frontend` is a member and `macroquad` is
+# pinned in `[workspace.dependencies]`, both since M1. So there is no root line to add, and
+# `--manifest-path crates/frontend/Cargo.toml` works on a member exactly as it would on a
+# detached crate.
+
 [dependencies]
+# `spectrum` is the whole machine; this crate is a consumer of it and adds no emulation.
 spectrum.workspace = true
-z80.workspace = true
 macroquad.workspace = true
-anyhow.workspace = true
+# The same small typed-error crate `spectrum` already uses, so this crate's errors match its
+# siblings' shape. It replaces the `anyhow` the skeleton declared: `anyhow` erases the type,
+# and the two failures here — a malformed file and an unwritable path — are both worth
+# matching on. `z80` was declared and never used; both are dropped rather than left to rot.
+thiserror.workspace = true
 
 [[bin]]
 name = "zx"
 path = "src/main.rs"
 
+# Headless. `#[macroquad::main]` opens the window *before* the function body runs, so a
+# screenshot mode reached from inside `zx` could not be headless — it would open a window,
+# take a picture and close it, which is unusable over SSH or on a machine with no display.
+# This binary never calls `miniquad::start`.
+[[bin]]
+name = "zx-shot"
+path = "src/bin/zx-shot.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

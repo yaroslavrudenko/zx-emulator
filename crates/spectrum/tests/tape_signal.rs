@@ -346,7 +346,9 @@ fn the_tape_advances_by_contention_as_well_as_by_ticks() {
         };
         snapshot.frame_t_state = FIRST_CONTENDED_T_STATE;
         snapshot.border = Colour::BLACK;
-        machine.restore(&snapshot);
+        machine
+            .restore(&snapshot)
+            .expect("both machines are 48K, so a restore cannot be refused");
 
         machine.insert_tape(Tape::new(vec![HALF_PERIOD; 4]));
         machine.tape_mut().play();

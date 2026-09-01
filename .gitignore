@@ -4,9 +4,50 @@ testdata/**
 !testdata/.gitkeep
 .DS_Store
 !testdata/README.md
-# The Sinclair ROMs are the one corpus that may be redistributed — Amstrad has explicitly
-# permitted shipping them with emulators. Game images may not, and are covered by the
-# blanket rule above. The directory has to be un-ignored before a file inside it can be.
+# The Sinclair ROMs are the one corpus that may be redistributed. The permission is QUOTED IN
+# FULL — text, author, forum, date, its four conditions and its scope — in testdata/README.md,
+# under "The permission this rests on"; that is the single source and this comment does not
+# restate it. Game images may not be redistributed, and are covered by the blanket rule above.
+# The directory has to be un-ignored before a file inside it can be.
 !testdata/roms/
-!testdata/roms/*.rom
+#
+# EVERY COMMITTED ROM IS LISTED BY NAME, ON PURPOSE. This list used to be the glob
+# `!testdata/roms/*.rom`, which committed by default: any file ending in `.rom` dropped into
+# this directory went in with nobody deciding that it could. That is not hypothetical.
+#
+# The permission (Cliff Lawson of Amstrad plc, comp.sys.sinclair, 1999-08-31) is AFFIRMATIVE for
+# the Spectrum 48 and 128, and reaches the + machines only through "produced the + machines
+# ourselves" rather than by naming them as licensed. Read it before assuming any wider reach: the
+# machine list people quote is in the QUESTION, and the answer is hedged — "I think Amstrad only
+# bought the rights to Spectrum 48/128". On clones, in full: "Ask Timex."
+#
+# And it DISCLAIMS the ZX80, the ZX81 and the Interface 1 and Interface 2 ROMs — "I do not believe
+# the (c) for ZXs or IF1/2 has anything to do with Amstrad". Read that as a disclaimer of
+# OWNERSHIP, not as an exclusion from a licence: if Amstrad does not hold those rights, no Amstrad
+# permission can reach them however it is worded, and no re-reading of the grant will widen it.
+# That is a stronger reason to list ROMs by name than "excluded from the permission" would be. An
+# `if1.rom` or an `if2.rom` matches `*.rom`, is exactly the sort of file an emulator project
+# acquires in the normal course of its work, and is a file this permission cannot cover. A game
+# cartridge or a Multiface image is not covered at all.
+#
+# So adding a ROM costs one line HERE, which is where a reviewer will see it and where the
+# licence question has to be answered rather than assumed. Before adding a line: read the
+# permission itself in testdata/README.md and satisfy yourself that it reaches this machine — it
+# is a 1999 usenet answer, hedged in places, not a licence grant with a schedule, and no archived
+# copy of the original article has been read here — and record the file's size, SHA-1 and CRC-32
+# in testdata/README.md the way 48.rom's are.
+#
+# DO NOT restore a glob. A glob would silently reopen this, and silently is the whole problem:
+# a wrong technical claim produces a bug, a wrong licensing claim produces a redistribution
+# nobody was entitled to make.
+!testdata/roms/48.rom
+# The 128's ROM pair, added at M7 on the same reading of the same permission: the answer is
+# affirmative for "Spectrum 48/128" by name, which is exactly these two files and nothing
+# wider. Sizes, SHA-1s and CRC-32s are in testdata/README.md, taken from the committed bytes
+# rather than transcribed. 128-0.rom is the 128 editor ROM; 128-1.rom is 48 BASIC as the 128
+# ships it — and it is the Sinclair toastrack, not the Amstrad +2, which matters here because
+# the +2 reaches this permission only through "produced the + machines ourselves" while these
+# two are named outright.
+!testdata/roms/128-0.rom
+!testdata/roms/128-1.rom
 /.agent-workspace/

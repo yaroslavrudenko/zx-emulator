@@ -36,7 +36,29 @@
 //! | Speaker and `MIC` | **no** — bits 3 and 4 of a `0xFE` write are discarded |
 //! | `EAR` input | **yes** — bit 6 of a `0xFE` read follows [`crate::tape::Tape::level`] |
 //! | Issue 2 / issue 3 `EAR` readback | **no** — writing bit 3 or 4 does not change what bit 6 reads |
-//! | Interrupt-acknowledge contention | **charged seven times, not once** — see below |
+//! | Paging port `0x7FFD` writes | **yes**, on the partial decode — A15 and A1 both reset |
+//! | Paging port `0x7FFD` **reads** | **no** — and on real hardware they are destructive; see below |
+//! | Interrupt-acknowledge contention | **yes, charged once** — M7 fixed it; see below |
+//!
+//! ## Reading `0x7FFD` is destructive on the hardware, and this machine does not model it
+//!
+//! The World of Spectrum reference says *"Reading from 0x7ffd produces no special results:
+//! floating bus values will be returned as would be returned from any other port not attached to
+//! any hardware."* **Three sources say otherwise, one of them primary.** The Sinclair *Servicing
+//! Manual* §4.12.11 has the latch firing on an *"I/O read **or** write cycle"*; MAME's address
+//! map comments *"reading from this port does write to it by value from data bus"*; and the
+//! Sinclair Wiki is blunt about the consequence:
+//!
+//! > *"Reads from port 0x7ffd cause a crash, as the 128's HAL10H8 chip does not distinguish
+//! > between reads and writes to this port, resulting in a floating data bus being used to set
+//! > the paging registers."*
+//!
+//! So an `IN` from any address matching the write decode latches whatever the data bus is
+//! floating at into the paging register. **[`Ula::in_port`] does not do this**, and the reason is
+//! not oversight: the value latched *is the floating bus*, which this machine does not model —
+//! [`FLOATING_BUS_BYTE`] is a constant. Implementing it would page to a byte we invented, on
+//! every read, which is a louder wrong answer than not implementing it at all. It is named here
+//! so that it is the first thing suspected if 128 software ever misbehaves after an `IN`.
 //!
 //! ## The `EAR` bit, and where the tape gets its time
 //!
@@ -68,35 +90,60 @@
 //! so four T-states is far inside its tolerance; a turbo loader with tighter margins is where
 //! it could matter, and a turbo loader failing is what would decide it.
 //!
-//! ## The acknowledge cycle is the one machine cycle this model prices per T-state
+//! ## The acknowledge cycle — M7 made it one machine cycle, and the argument that deferred it was wrong about *why*
 //!
 //! Every other cycle reaches this bus as a transfer callback followed by its own T-states,
-//! so its stall is charged **once**. An interrupt acknowledge has no callback — it
-//! reads no memory, asserting `/IORQ` in place of `/MREQ` — so `crates/z80` delivers it as
-//! seven bare [`Bus::tick`] calls at the refresh address. Recorded off a real `Cpu`:
+//! so its stall is charged **once**. An interrupt acknowledge reads no memory — the Z80
+//! asserts `/IORQ` in place of `/MREQ` and the device answers on the data bus — so until M7
+//! it had no callback at all, and `crates/z80` delivered it as seven bare [`Bus::tick`] calls
+//! at the refresh address. Recorded off a real `Cpu`:
 //!
 //! ```text
 //!   IM 1   IC@IR:1 x7   MW@sp-1:3   MW@sp-2:3
 //!   IM 2   IC@IR:1 x7   MW@sp-1:3   MW@sp-2:3   MR@vector:3   MR@vector+1:3
 //! ```
 //!
-//! Each of those seven arrives with no cycle outstanding, so [`Ula::tick`] treats it as a
-//! standalone internal cycle and contends it on its own account. The hardware performs
-//! **one** machine cycle there — M1 stretched by two wait states — so a contended `IR`
-//! would be charged seven stalls where it owes one.
+//! Each of those seven arrived with no cycle outstanding, so [`Ula::tick`] treated it as a
+//! standalone internal cycle and contended it on its own account. The hardware performs
+//! **one** machine cycle there — M1 stretched by two wait states — so a contended `IR` was
+//! charged seven stalls where it owes one.
 //!
-//! **It is unobservable on a 48K, and that is why it is written down rather than fixed.**
-//! The ULA holds `/INT` low for the first [`timing::INTERRUPT_T_STATES`] of the frame, and
-//! contention does not begin until [`timing::FIRST_CONTENDED_T_STATE`] — 14335 — so an
-//! accepted interrupt and its acknowledge always land in the top border, where every stall
-//! is zero whatever the address. No test can currently tell the two models apart, which
-//! means a "fix" would be an unverifiable guess and a gate for it would assert a number
-//! nothing produces. The mode 2 vector reads are ordinary memory reads and *are* shaped
-//! correctly, so they would contend properly if they ever landed in the window.
+//! [`Bus::acknowledge`] closes it, on the [`Bus::fetch`] precedent: a defaulted method, so
+//! adding it broke nothing, and [`Ula`] implements it as the contention charge plus arming
+//! `covered_t_states`, which is what every other cycle already does.
 //!
-//! What makes this worth recording now: the 128 has a different frame geometry, and
-//! `docs/STATUS.md` already lists interrupt acceptance as having **no oracle in this project
-//! at all**. This is the shape that gap has.
+//! ### What the old paragraph got right, what it got wrong, and what is still true
+//!
+//! It said the defect was unobservable and that *"a fix would be an unverifiable guess"*. The
+//! first clause was **true of software running on the machine and false of a test driving the
+//! bus**, which has existed since M5 — `Cpu::new`, `Cpu::interrupt` and `Ula::new` are all
+//! public, and a test that puts the clock inside the contended window and points `IR` at a
+//! contended bank separates the two models by a measurable number of T-states. The second
+//! clause was wrong in kind: no *magnitude* was being invented. One cycle or seven is a
+//! **structural** question, and `docs/Z80-REFERENCE.md` already answered it in this
+//! repository's own words — one machine cycle, therefore one contention point.
+//!
+//! **The 48K unobservability argument is real, and it is stronger than "not currently
+//! covered".** `/INT` is asserted for the frame's first [`crate::timing::INTERRUPT_T_STATES`] and
+//! acceptance cannot be deferred past the window's end, so an accepted interrupt *cannot*
+//! reach [`crate::timing::FIRST_CONTENDED_T_STATE`] — 14335 — at any address, for any program.
+//!
+//! **It survives the 128 unchanged, and that was re-derived on the 128's own numbers rather
+//! than inherited.** Its window opens at frame T-state 0 exactly as the 48K's does and its
+//! contention begins at 14361, so the gap is ≈14300 T-states on both machines. The conclusion
+//! does not depend on the disputed constant: the offset would have to be **under about forty**
+//! for an acknowledge to reach it, and no candidate value for any machine in this family is
+//! near that.
+//!
+//! **`NMI` is the exception, and it is why this is now gated rather than merely pinned.** An
+//! `NMI` has no window — nothing stops one being raised at any frame position — so a
+//! `Cpu::nmi` with `IR` in a contended bank inside the fetch window is reachable and is
+//! measurable on the clock. A Spectrum has no `NMI` source, so no *guest* can get there; a
+//! test can, and does.
+//!
+//! So the register keeps both halves: **the fix closes a model defect and closes no
+//! verification gap.** Nothing grades this against hardware, and — the part worth carrying —
+//! nothing can, because no software on either machine reaches the case.
 //!
 //! The floating bus is the interesting omission. Everything needed to model it is already
 //! here — the clock knows where in the fetch window it is — but the byte-to-phase mapping
@@ -111,7 +158,7 @@ use crate::keyboard::Keyboard;
 use crate::memory::Memory;
 use crate::screen::Colour;
 use crate::tape::Tape;
-use crate::timing::{self, Clock};
+use crate::timing::Clock;
 
 /// What the data bus reads as when nothing drives it.
 ///
@@ -124,6 +171,52 @@ pub const FLOATING_BUS_BYTE: u8 = 0xFF;
 /// This is why the port is written `0xFE` but responds at `0x7FFE`, `0xBFFE` and every
 /// other even address — the high half is free for the keyboard to use as a row selector.
 const ULA_PORT_SELECT: u16 = 0x0001;
+
+/// The paging port answers every address with **A15 and A1 both reset**, and decodes nothing
+/// else.
+///
+/// From the World of Spectrum *128K Technical Information* reference, verbatim: *"the hardware
+/// will respond to any port address with bits 1 and 15 reset."* So `0x7FFD` is one member of a
+/// large family and not the decode — writing the mask rather than an equality is what separates
+/// a correct decode from a lucky one, exactly as [`ULA_PORT_SELECT`] does for `0xFE`.
+///
+/// **This is the best-sourced figure in M7, and it has a primary witness.** The Sinclair
+/// *Servicing Manual for Spectrum 128* §4.12.11 states it from the circuit rather than from
+/// behaviour: *"BANK is decoded (set high) from IORQ and W/WR active low (I/O read or write
+/// cycle) and **ZA1 and ZA15 low** (address 7FFDH)."* Fuse's decode table carries the identical
+/// mask (`{ 0x8002, 0x0000, … }`), and MAME's is the same rule spelled as an address map. Three
+/// lineages, one of them the manufacturer's own schematic description.
+const PAGING_PORT_SELECT: u16 = 0x8002;
+
+// The two decodes select on **disjoint** address lines — A0 against A15 and A1 — so neither
+// constrains the other and the two families genuinely overlap: any address with A0, A1 and A15
+// all reset is claimed by both, and on the hardware both respond. That is why `out_port` is two
+// independent `if`s and never a `match` on the port.
+const _: () = assert!(ULA_PORT_SELECT & PAGING_PORT_SELECT == 0);
+const _: () = assert!(0x7FFD & PAGING_PORT_SELECT == 0, "the paging port decodes");
+const _: () = assert!(0x00FE & ULA_PORT_SELECT == 0, "the ULA port decodes");
+const _: () = assert!(
+    0x00FC & (ULA_PORT_SELECT | PAGING_PORT_SELECT) == 0,
+    "and they overlap"
+);
+
+// **The two *canonical* addresses do not overlap, and this assertion pair is what established
+// it.** The comment above originally claimed `0x00FE` was claimed by both devices; the compiler
+// refused it. `0x00FE` has **A1 set**, so it reaches the ULA and not the paging port, and
+// `0x7FFD` has **A0 set**, so it reaches the paging port and not the ULA. The families overlap
+// and their published members do not — a sharper statement than "the two collide" and a more
+// useful one, because it means the `if`/`if` shape is invisible to ordinary software and
+// matters only for a program addressing either port some other way. That is exactly the case a
+// mask gets right and an equality gets wrong, so the shape is kept; nothing here grades it,
+// because nothing in reach exercises it.
+const _: () = assert!(
+    0x00FE & PAGING_PORT_SELECT != 0,
+    "0xFE is not a paging write"
+);
+const _: () = assert!(
+    0x7FFD & ULA_PORT_SELECT != 0,
+    "0x7FFD is not a border write"
+);
 
 /// Bits of a `0xFE` write that set the border colour.
 const BORDER_MASK: u8 = 0x07;
@@ -164,27 +257,45 @@ pub struct Ula {
 
 impl Ula {
     /// A ULA at the start of frame zero, fronting `memory`, with no tape in the drive.
+    ///
+    /// **The frame geometry comes from `memory`**, not from a second argument and not from a
+    /// default. A 128's frame is 1020 T-states longer than a 48K's, and a machine that got its
+    /// memory map from one model and its clock from the other would raise its interrupt early
+    /// every frame and drift by a whole frame every 69 seconds — silently, because nothing
+    /// else would move. Taking both from one value makes that unrepresentable rather than
+    /// merely unlikely.
     #[must_use]
     pub fn new(memory: Memory) -> Self {
+        let clock = Clock::with_timing(memory.model().timing());
         Self {
             memory,
             keyboard: Keyboard::new(),
-            clock: Clock::new(),
+            clock,
             covered_t_states: 0,
             border: Colour::BLACK,
             tape: Tape::default(),
         }
     }
 
-    /// Put the clock back to the start of frame zero and clear the border.
+    /// Put the clock back to the start of frame zero, clear the border, and restore the
+    /// power-on memory map.
     ///
-    /// Memory, the keyboard and **the tape** are left alone: a reset button does not clear
-    /// RAM, does not lift the keys, and does not rewind a cassette. The ROM's own start-up
-    /// clears what it relies on.
+    /// RAM, the keyboard and **the tape** are left alone: a reset button does not clear RAM,
+    /// does not lift the keys, and does not rewind a cassette. The ROM's own start-up clears
+    /// what it relies on.
+    ///
+    /// **The map is the M7 addition, and the old sentence was right about RAM and incomplete
+    /// about the rest.** Reset is the only thing that clears the paging lock, so it is the only
+    /// way a locked 128 ever pages again — which makes `Memory::reset` part of what the reset
+    /// button does rather than an extra. It is a no-op on a 48K by construction, because that
+    /// machine's reset value is the value it already holds.
+    ///
+    /// The clock keeps its machine's geometry: a reset is not a change of model.
     pub fn reset(&mut self) {
-        self.clock = Clock::new();
+        self.clock = Clock::with_timing(self.clock.timing());
         self.covered_t_states = 0;
         self.border = Colour::BLACK;
+        self.memory.reset();
     }
 
     /// The memory this ULA fronts.
@@ -304,10 +415,17 @@ impl Ula {
     }
 
     /// Charge the stall a contended access starting *now* at `address` would suffer.
+    ///
+    /// **The hottest line in the emulator, and M7 does not add a branch to it.** Whether an
+    /// address is contended has been a question about the slot map rather than the address
+    /// range since M5, so the 128's four contended banks are a different array literal and not
+    /// a different test. What did change is that the delay's inputs are fields of the
+    /// machine's [`Clock`] rather than compile-time constants — same branches, a load instead
+    /// of an immediate.
     #[inline]
     fn contend(&mut self, address: u16) {
         if self.memory.is_contended(address) {
-            self.advance(timing::delay(self.clock.frame_t_state()));
+            self.advance(self.clock.delay_now());
         }
     }
 
@@ -351,7 +469,7 @@ impl Ula {
     /// The ULA delay at the frame position `offset` T-states from now.
     #[inline]
     fn delay_after(&self, offset: u32) -> u32 {
-        timing::delay(self.clock.ahead(offset))
+        self.clock.delay_after(offset)
     }
 
     /// Open a memory machine cycle of `t_states`, charging its contention.
@@ -397,6 +515,12 @@ impl Bus for Ula {
         self.keyboard.read(port) | UNDRIVEN_INPUT_BITS | self.ear_bit()
     }
 
+    /// Two independent `if`s, **never a `match` on the port**.
+    ///
+    /// The ULA decodes A0 alone and the paging port decodes A15 and A1, so the two families
+    /// overlap — `0x00FE` is claimed by both, and on the hardware both respond. A `match`
+    /// would silently pick one and stop the other answering, which is the kind of defect that
+    /// shows up as "this game works on one emulator and not another" rather than as a failure.
     #[inline]
     fn out_port(&mut self, port: u16, value: u8) {
         self.begin_port_cycle(port);
@@ -404,6 +528,24 @@ impl Bus for Ula {
             // Bits 3 and 4 are `MIC` and the speaker. Discarded until M6 and M8 want them.
             self.border = Colour::new(value & BORDER_MASK);
         }
+        if port & PAGING_PORT_SELECT == 0 {
+            // A 48K absorbs this: it powers on with the lock bit set, and `Memory` needs no
+            // model check to know that. `M7.md` Decision 1.
+            self.memory.write_paging_port(value);
+        }
+    }
+
+    /// One machine cycle, `t_states` long, with the refresh address on the bus and no
+    /// transfer — the acknowledge of an accepted interrupt.
+    ///
+    /// Charged exactly like every other cycle: contention once at the position the cycle
+    /// opens, then `t_states` ticks that are already paid for. Before this existed the seven
+    /// ticks arrived bare and each contended on its own account, so a contended `IR` was
+    /// charged seven stalls where it owes one. See the module documentation for why that was
+    /// left standing until M7 and why the reason given for leaving it was wrong.
+    #[inline]
+    fn acknowledge(&mut self, address: u16, t_states: u8) {
+        self.begin_memory_cycle(address, t_states);
     }
 
     #[inline]

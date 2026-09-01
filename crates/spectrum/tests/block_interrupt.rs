@@ -106,15 +106,29 @@
 //!   all eight forms for timing; only the transfers are interrupted.
 //! - **`NMI` mid-loop.** It is always accepted and takes a different path.
 //! - **A handler that does not return**, or one that itself runs a block instruction.
-//! - **Whether 32 T-states is the right window**, or 14335 the right phase. No oracle;
-//!   `docs/STATUS.md` lists both. `frame_boundary.rs` grades the window's *edge* against
-//!   itself — 31 accepted, 32 missed — which pins it against drift and does not establish it.
+//! - **Whether 32 T-states is the right window.** No oracle — and the oracle this project
+//!   now has is *demonstrably* blind to it: cutting `INTERRUPT_T_STATES` from 32 to 24 leaves
+//!   `tests/timing_oracle.rs` green, because the suite only needs the interrupt accepted near
+//!   the top of the frame. `frame_boundary.rs` grades the window's *edge* against itself —
+//!   31 accepted, 32 missed — which pins it against drift and does not establish it.
+//!   `docs/STATUS.md` carries the row.
+//!
+//! **14335 has left that list, and the scope of its settlement is narrower than it sounds.**
+//! This bullet read *"whether 32 T-states is the right window, **or 14335 the right phase**.
+//! No oracle"* until this pass, and the second half of that had stopped being true.
+//! `tests/timing_oracle.rs` grades the machine against Richard Butler's 48K timing suite,
+//! whose two expected-result tables were measured on real Spectrums. What is established is
+//! this and no more: **the first contended T-state falls exactly 14335 after `/INT`**, given
+//! that this machine asserts `/INT` at frame T-state 0. Three things stay open, each its own
+//! row in `docs/STATUS.md` — the frame's **origin** is a convention (moving `/INT` and the
+//! window together leaves the oracle green), the window's **length** is the bullet above, and
+//! the `64 × 224` **factorisation** is unmeasured because only its *product* is.
 
 mod common;
 
 use common::{
-    PROLOGUE, advance_to, elapsed, enable_interrupts, machine, set_pc, with_cpu_state,
-    write_program,
+    AcceptedInterrupt, InterruptedRun, PROLOGUE, advance_to, elapsed, enable_interrupts, machine,
+    run_recording_interrupts, set_pc, with_cpu_state, write_program,
 };
 use spectrum::Spectrum;
 use spectrum::timing::T_STATES_PER_FRAME;
@@ -404,55 +418,30 @@ fn guards() -> [u16; 4] {
     ]
 }
 
-/// What one run produced.
-struct Run {
-    acceptances: Vec<Acceptance>,
-    return_addresses: Vec<u16>,
-    accepted_t_states: Vec<u32>,
-    cost: u64,
-    end: (u64, u32),
-}
-
 /// Step until the instruction finishes, recording every interrupt it takes on the way.
 ///
-/// An acceptance is a step after which `PC` is the handler: [`z80::Cpu::interrupt`] executes
-/// no instruction, so the register file is exactly as the last completed iteration left it —
-/// which is precisely the state this file is about.
-fn run(machine: &mut Spectrum) -> Run {
-    let before = elapsed(machine);
-    let mut acceptances = Vec::new();
-    let mut return_addresses = Vec::new();
-    let mut accepted_t_states = Vec::new();
+/// The stepping loop itself is [`run_recording_interrupts`], shared with the gates on the
+/// other three block families and on a contended loop, which all need exactly this and would
+/// otherwise each carry a copy. What stays here is the part that is this file's own: the
+/// predicate for "the transfer has left" — the pass that exhausts `BC` is the only one that
+/// steps `PC` past the instruction.
+fn run(machine: &mut Spectrum) -> InterruptedRun {
+    run_recording_interrupts(machine, HANDLER, STEP_BUDGET, |state| {
+        state.pc == CODE + 2 && state.bc == 0
+    })
+}
 
-    for _ in 0..STEP_BUDGET {
-        // Where the offer is made, taken before the step rather than reconstructed from where
-        // the acknowledge left the clock.
-        let offered_at = (machine.frames(), machine.frame_t_state());
-        let charged = machine.step();
-        let state = machine.cpu_state();
-        if state.pc == HANDLER {
-            acceptances.push(Acceptance {
-                frame: offered_at.0,
-                offset: offered_at.1,
-                remaining: state.bc,
-            });
-            return_addresses.push(u16::from_le_bytes([
-                machine.memory().read(state.sp),
-                machine.memory().read(state.sp + 1),
-            ]));
-            accepted_t_states.push(charged);
-        }
-        if state.pc == CODE + 2 && state.bc == 0 {
-            return Run {
-                acceptances,
-                return_addresses,
-                accepted_t_states,
-                cost: elapsed(machine) - before,
-                end: (machine.frames(), machine.frame_t_state()),
-            };
-        }
+/// The three fields of an acceptance this file makes claims about.
+///
+/// The recorder returns more than that — the pushed address and the T-states charged, both
+/// asserted separately below — and comparing the whole record against the table would mean
+/// writing those two into every row, where they are the same value twice.
+fn observed(accepted: &AcceptedInterrupt) -> Acceptance {
+    Acceptance {
+        frame: accepted.frame,
+        offset: accepted.offset,
+        remaining: accepted.bc,
     }
-    panic!("the block instruction did not finish within {STEP_BUDGET} steps");
 }
 
 /// The first address at which the destination differs from what was asked for.
@@ -478,18 +467,18 @@ fn the_interrupt_is_accepted_between_iterations_with_the_loop_intact() {
         let outcome = run(&mut machine);
 
         assert_eq!(
-            outcome.acceptances.len(),
+            outcome.accepted.len(),
             EXPECTED_ACCEPTANCES.len(),
             "{}: a run spanning two frame boundaries must take two interrupts, one per \
              boundary. It took {}",
             direction.name,
-            outcome.acceptances.len()
+            outcome.accepted.len()
         );
 
         for (index, expected) in EXPECTED_ACCEPTANCES.iter().enumerate() {
-            let got = &outcome.acceptances[index];
+            let got = observed(&outcome.accepted[index]);
             assert_eq!(
-                got,
+                &got,
                 expected,
                 "{}: acceptance #{index} must land in frame {} at offset {} with BC still \
                  holding {} — {} of the {BC_START} iterations complete, and the rest still to \
@@ -502,7 +491,7 @@ fn the_interrupt_is_accepted_between_iterations_with_the_loop_intact() {
                 BC_START - expected.remaining
             );
             assert_eq!(
-                outcome.return_addresses[index],
+                outcome.accepted[index].return_address,
                 CODE,
                 "{}: acceptance #{index} must push the instruction's **own** address. \
                  {:#06X} is where the interrupt would return to if the loop had exited",
@@ -510,7 +499,7 @@ fn the_interrupt_is_accepted_between_iterations_with_the_loop_intact() {
                 CODE + 2
             );
             assert_eq!(
-                u64::from(outcome.accepted_t_states[index]),
+                u64::from(outcome.accepted[index].charged),
                 ACKNOWLEDGE,
                 "{}: a mode 2 acknowledge is {ACKNOWLEDGE} T-states",
                 direction.name
@@ -592,7 +581,7 @@ fn the_copy_is_exact_and_the_interrupts_cost_only_their_own_time() {
         let without = run(&mut quiet);
 
         assert!(
-            without.acceptances.is_empty(),
+            without.accepted.is_empty(),
             "{}: the control must take no interrupts at all",
             direction.name
         );

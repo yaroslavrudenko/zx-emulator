@@ -85,6 +85,238 @@
 //! report early once warm. The one T-state is not a stable identity of a board, so "which is
 //! correct" may not be a question with a single hardware answer — see `docs/MACHINE.md`.
 //!
+//! # What the detection group measures, and where the 120 comes from
+//!
+//! The paragraph above leaves the mechanism open and `docs/M7.md` said in as many words that it
+//! *"is not established here and should not be guessed at"*. **It is established now**, by
+//! disassembling the group and its setup out of the snapshot and then measuring the result. The
+//! summary first, because it is short: **`R` counts four-T-state loop iterations, and the two
+//! classes differ by exactly eight of them — 32 T-states — because on a `TYPE2` machine the
+//! program takes one *extra, nested* interrupt during its own synchronisation, and on a `TYPE1`
+//! machine it does not.** The gap is not 120 of anything; 120 is −8 wrapped into seven bits.
+//!
+//! ## The loop, and what `R` is a count of
+//!
+//! Group 0's code is four instructions at `0xC13C`, which the suite copies to `0xDDDD` and enters:
+//! `LD BC,0` / `LD (0xEF01),BC` / **`LD HL,0xC146`** / `JP (HL)`. The address is *absolute*, so
+//! both the uncontended copy at `0xDDDD` and the contended copy at `0x5B00` jump to the same
+//! `0xC146`, where the byte is `E9` — `JP (HL)` with `HL` = `0xC146`, jumping to itself, four
+//! T-states and one `R` increment per iteration, in uncontended RAM. That is why group 0 has an
+//! uncontended row only, and it is why contention cannot reach it. The suite's BASIC confirms the
+//! reading it wants: line 805 is `IF x=2 AND y=0 AND z=49478`, and `49478` is `0xC146` — **both
+//! classes are interrupted inside this loop**, so the only thing that differs is how many
+//! iterations fitted.
+//!
+//! `R` is reset by `LD R,A` at `0xC11D` with `A` = 0, and read by `LD A,R` as the first
+//! instruction of the measuring handler at `0xBBBB`. Counting the M1 cycles between them gives a
+//! closed form, and every term is checkable in the disassembly:
+//!
+//! ```text
+//! recorded R = (11 + N) mod 128
+//!   N  iterations of JP (HL)
+//!   7  M1 cycles from LD R,A to the first JP (HL)   (LD A,n; JP (HL); then the group's four)
+//!   1  the interrupt acknowledge cycle
+//!   1  the JP 0xBBBB patched over the IM2 vector at 0xF4F4
+//!   2  the LD A,R itself — it reads R after its own two fetches
+//! ```
+//!
+//! `N` follows from one number: the frame T-state at which the loop is entered. The loop's period
+//! divides the frame, so `N = (69888 − entry) / 4`, and:
+//!
+//! | entry | `N` | recorded `R` | |
+//! |---|---|---|---|
+//! | **292** | 17399 | **2** | `TYPE1 (Early)` — the table's row, and this machine's |
+//! | **324** | 17391 | **122** | `TYPE2 (Late)` — the table's row |
+//!
+//! 292 is not fitted: it is 19 (the IM2 response) + 35 (the handler at `0xF5F5`) + 194 (the setup
+//! block at `0xC0F3`) + 44 (group 0's own four instructions), each summed from the disassembly.
+//! An instruction-level trace of this machine puts the first `JP (HL)` at frame T-state **292**
+//! with `R` = 7, counts **17399** iterations, and takes the interrupt at T-state 0 of the next
+//! frame — every number above, measured rather than argued.
+//!
+//! ## The suite synchronises itself, which is why a phase difference cannot explain 120
+//!
+//! Before measuring, the program locks its own phase, and the locking is what makes the 32
+//! T-states the *only* thing left that can differ. `EI` / `HALT` at `0xC0AC`; a 252-iteration
+//! delay loop at `0xC0B1` of 277 T-states each (69804 T, just under a frame); then a deliberate
+//! race — `XOR A` / `INC A` / `DI` sit at the loop's tail, and the frame interrupt lands on one
+//! of those boundaries. Landing on `XOR A` leaves `Z` set, the handler's `JP NZ` is not taken, and
+//! the delay loop **restarts one T-state later relative to `/INT`**; landing on `INC A` leaves
+//! `NZ` and the program proceeds. So the loop creeps by one T-state per frame until it lands, and
+//! from there `HALT` puts the next acceptance exactly on the interrupt. This machine's trace shows
+//! the whole sequence: interrupt 1 at T-state 0 on the `HALT`, interrupt 2 at T-state **3** on
+//! `INC A`, interrupt 3 at T-state **0** on the second `HALT`. **The measurement therefore starts
+//! at the same phase on any machine**, and a one-T-state shift of the whole interrupt — window and
+//! all — moves nothing, which is exactly what the mutation run reported and what made the 120 look
+//! unexplainable.
+//!
+//! ## The amplifier: a nested interrupt worth exactly 32 T-states
+//!
+//! The handler the program installs at `0xF5F5` is nine bytes copied from `0xC130`, and three of
+//! them are dead weight until you time them:
+//!
+//! ```text
+//! INC C   4      19 T-states of IM2 response, then
+//! EI      4      4 + 4 + 5 = 13, so the first moment the CPU can see /INT again
+//! RET C   5      is exactly 19 + 13 = 32 T-states after it accepted the last one
+//! NOP NOP NOP
+//! JP 0xC0F3
+//! ```
+//!
+//! **`EI` does not re-enable interrupts until after the following instruction**, so the first
+//! `/INT` sample after the handler re-enables them falls on the end of `RET C` — at **exactly
+//! T-state 32**, exactly the far edge of the 48K's 32-T-state `/INT` window. That is not a
+//! coincidence anyone should have to accept on faith: `INC C` and `RET C` are otherwise pointless
+//! (the carry flag is clear, so `RET C` never returns), and they are the two instructions that
+//! make 13 out of the 32.
+//!
+//! If `/INT` has already been released, nothing happens and the program reaches `0xC0F3` at
+//! T-state 54. If it is still asserted, a **second interrupt is accepted right there**: 19
+//! T-states of response, then `INC C` + `EI` + `RET C` again before the same fall-through — 19 +
+//! 13 = **32 T-states**, and `0xC0F3` is reached at 86 instead of 54. The nested push is invisible
+//! afterwards because `0xC0F4` is `LD SP,(0xC13A)`, which is why the tables' `sp` column reads
+//! `49478` in **both** classes rather than differing.
+//!
+//! **32 T-states is eight iterations of a four-T-state loop, and `2 + 8 × (−1) ≡ 122 (mod 128)`.**
+//!
+//! ## Measured, not just derived
+//!
+//! Making the window one T-state longer is how this integer-T-state model expresses "the CPU still
+//! sees `/INT` at exactly +32". Mutating [`INTERRUPT_T_STATES`][spectrum::timing::INTERRUPT_T_STATES]
+//! in a scratch clone, with [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE]
+//! left alone:
+//!
+//! | window | detection reading | class | rows disagreeing with `TYPE1` | with `TYPE2` |
+//! |---|---|---|---|---|
+//! | **32** (this machine) | `R=2 loop=0 sp=49478` | `TYPE1` | **0 of 68** | 64 of 68 |
+//! | **33** | `R=122 loop=0 sp=49478` | `TYPE2` | 64 of 68 | **3 of 68** |
+//! | **34** | `R=122 loop=0 sp=49478` | `TYPE2` | 64 of 68 | **3 of 68** |
+//! | 33, with contention at 14336 | `R=122 loop=0 sp=49478` | `TYPE2` | 64 of 68 | 4 of 68 |
+//! | 32, with contention at 14336 | `R=2 loop=0 sp=49478` | `TYPE1` | 7 of 68 | 64 of 68 |
+//!
+//! Three things follow, and the third is a limitation rather than a result.
+//!
+//! 1. **One constant carries the whole class.** The detection row goes from bit-exact `TYPE1` to
+//!    bit-exact `TYPE2`, and **65 of the 68 graded rows follow it**, with the contention constant
+//!    untouched. The early/late split this suite detects is a property of the **interrupt**, not
+//!    of the contention window — which is why moving 14335 never moved the detection row.
+//! 2. **[`INTERRUPT_T_STATES`][spectrum::timing::INTERRUPT_T_STATES] is no longer ungraded, and
+//!    it is pinned from *both* sides.** Sweeping the window from 1 to 65 with the contention
+//!    constant fixed:
+//!
+//!    | window | detection | the 68 rows |
+//!    |---|---|---|
+//!    | 1 | the suite never terminates | — |
+//!    | 2–3 | `R` = 15 — **neither table** | the sweep hangs |
+//!    | 4–13 | `TYPE1` | the sweep hangs |
+//!    | 14–16 | `TYPE1` | 5, then 2, rows disagree with `TYPE1` |
+//!    | **17–32** | `TYPE1` | **0 of 68 — the green band** |
+//!    | **33–43** | `TYPE2` | 3 of 68 disagree with `TYPE2`, flat across the band |
+//!    | 44–65 | the suite never terminates | — |
+//!
+//!    So the oracle pins this constant to **`17..=32`**, and the two edges are different failures
+//!    with different causes. The upper edge at 33 is the amplifier above. The edge at **44** is
+//!    the *same* amplifier one level out: the other handler, at `0xF4F4`, reaches its own first
+//!    `/INT` sample 43 T-states after acceptance, so at 44 the program's synchronisation nests
+//!    there too and its delay loop never converges — the derivation predicted 43/44 before the
+//!    sweep was run, and 43 is measured to be the last value that produces any reading at all.
+//!    The floor at 4 is predicted the same way: the program's second interrupt is accepted 3
+//!    T-states into the frame, so a window shorter than 4 loses it. The band from 14 to 16 is
+//!    **not** explained here — detection still reads `TYPE1` while contended rows disagree, so
+//!    something in the contended groups is sensitive to a short window and this gate does not say
+//!    what. It is recorded because a boundary nobody predicted is worth more than one that was.
+//!
+//!    `timing.rs` documents this constant as *"Ungraded on both machines"*. For the 48K that is
+//!    now out of date — this row grades it — and correcting it is that file's owner's call, not
+//!    this one's.
+//! 3. **Three rows resist, and they are named rather than absorbed.** With the window at 33 the
+//!    disagreements with `TYPE2` are `group 3 contended` (`R` 42 against 41), `group 7
+//!    uncontended` (`R` 95 against 98) and `group 34 uncontended` (`R` 42 against 44). Group 7
+//!    locates the residue exactly: its body ends `DI` / `EI` / `JR`, so its acceptance points are
+//!    quantised, and the arithmetic puts an instruction boundary **exactly on** the frame's
+//!    interrupt T-state — this machine takes the interrupt there and the hardware `TYPE2` machine
+//!    did not. So a `TYPE2` machine is *not* exactly this machine with a 33-T-state window; some
+//!    second-order difference remains at that edge. **What would settle it** is a `TYPE2`
+//!    hardware submission's full 73-row result set, or a Z80 interrupt-sampling model finer than
+//!    one T-state. Neither is in hand, and neither is needed for the detection row, which is
+//!    bit-exact.
+//!
+//!    > **Both of those routes have since been taken, and both are closed. The sentence above is
+//!    > left standing because it named the right two questions; it was wrong only about their
+//!    > being open.** Recorded 2026-09-01, measured rather than argued — see `docs/M7.md`
+//!    > Decision 11 for the full apparatus.
+//!    >
+//!    > - **There is no `TYPE2` row set to fetch, and there never was.** The results database
+//!    >   (`spectrum48k_timing_results.htm`, HTTP 200) is a **39-row, 8-column** table whose
+//!    >   columns are Model, Z80, Board Issue, ULA, Serial, **TYPE**, Notes, Submitter. It
+//!    >   publishes the *verdict* and the machine's provenance — never the 73 rows. The 2010
+//!    >   Internet Archive copy has the identical shape, so the rows were not published and later
+//!    >   removed. The submission form carries a **600-character free-text box**, which could not
+//!    >   have held them. This is a structural absence, not a fetch failure, and it means the
+//!    >   suite's own embedded `TYPE2` table — which this file already reads — is the strongest
+//!    >   artefact that exists.
+//!    > - **A finer-than-one-T-state sampling model has no more expressive power here, and that
+//!    >   is measured.** Whatever the sub-T-state rule, its only observable consequence is the set
+//!    >   of instruction-boundary positions at which `/INT` is accepted, and for an interval
+//!    >   `/INT` that set is an interval `[lo, hi]`. Sweeping `lo` over `0..=4` and `hi` over
+//!    >   `31..=40` — the acceptance set imposed directly, contention untouched — gives: `hi`
+//!    >   matters **only** through the width (`width >= 33` is `TYPE2`, and nothing above 33
+//!    >   changes a single row, because the amplifier needs exactly one boundary at `+32`); `lo`
+//!    >   is the only coordinate that moves the 68 rows, and **`lo = 0` is the unique minimum
+//!    >   against both tables** (`lo` 0/1/2/3/4 scores 0/8/13/15/13 against `TYPE1` and
+//!    >   3/6/8/12/14 against `TYPE2`). **No window of any position or width reaches zero against
+//!    >   `TYPE2`. The floor is three, and it is these three.**
+//!    >
+//!    > **The sample point is a gauge, not a defect — and it is paired with
+//!    > [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE].** Sampling `/INT`
+//!    > at the instruction *boundary* with contention at **14335** and sampling it at the
+//!    > instruction's **last T-state** with contention at **14336** are the same machine: run
+//!    > against each other they agree on all 68 rows **and** the detection row, at width 32
+//!    > (`TYPE1`, 0 of 68) and at width 33 (`TYPE2`, the same 3 of 68 with the same values).
+//!    > Only the *difference* between the acceptance window and the contention window is
+//!    > observable, never either alone. So "this machine samples `/INT` at the wrong point" is
+//!    > not a well-posed defect against this corpus; if the Z80's real rule is the last T-state,
+//!    > the constant that should read 14336 is the contention one, and **nothing else moves**.
+//!    >
+//!    > **What the three rows actually are: our per-instruction timing is right, and the
+//!    > disagreement is entirely about which boundary takes the interrupt.** Each hardware
+//!    > `TYPE2` triple is an instruction boundary that **exists in this machine's own trace**,
+//!    > with exactly the right `R`, calibrated on rows we match bit-exactly (`R` recorded is `R`
+//!    > at acceptance `+ 4`; the third field is the interrupted `PC` wherever it varies):
+//!    >
+//!    > | row | hardware wants | the boundary in our trace | our acceptance |
+//!    > |---|---|---|---|
+//!    > | 3 contended | `R` 41, `0x5B0B` | `r` 37 at `pc 0x5B0B`, frame T-state **69887** | 69888+3 |
+//!    > | 7 uncontended | `R` 98, `0xDDDD` | `r` 94 at `pc 0xDDDD`, frame T-state **+20** | +0 |
+//!    > | 34 uncontended | `R` 44 | `r` 40 at `pc 0x0082`, frame T-state **+16** | +4 |
+//!    >
+//!    > **And their demands are mutually inconsistent.** Writing `φ` for a uniform shift of the
+//!    > group's boundaries against the window, group 3 needs `φ` in `+1..=+4`, group 7 needs
+//!    > `−20..=−1`, group 34 needs `−16..=−10`. Seven and 34 intersect; **3 is disjoint from
+//!    > both, and wants the opposite sign** — which is the "opposite tie-breaks" an earlier pass
+//!    > reported from the row values, re-derived here from the instruction stream. Meanwhile the
+//!    > detection row pins the `TYPE1`→`TYPE2` entry shift to **exactly 32** (`R` = 122 requires
+//!    > entry 324 and no other value), which is `φ = 0`. **Four constraints, no common solution**
+//!    > — so no single change to when this machine takes an interrupt can close all three, and
+//!    > moving a constant to close one would open others.
+//!    >
+//!    > **The remaining possibility — that these three cells are wrong — is weaker than it looks,
+//!    > and it was tested rather than assumed.** The `TYPE2` column's three most suspicious cells
+//!    > are reproduced by this machine *bit-exactly*: group 29 contended's `sp` = **0** (which
+//!    > reads like missing data and is not), group 11 contended's `sp` = **53256** (a far outlier
+//!    > against every other contended `sp` of ~23300), and group 15's loop count roughly
+//!    > **doubling** between the classes (553→1100, 462→919). A table whose oddest entries an
+//!    > independent implementation lands on is not a carelessly transcribed table.
+//!
+//! ## Why this makes the authors' strangest observation ordinary
+//!
+//! The class turns on a **tie** — whether the CPU's `/INT` sample and the ULA's release edge, which
+//! this program has arranged to be simultaneous to the T-state, resolve one way or the other. A tie
+//! decided by sub-T-state skew is exactly the kind of thing that moves with temperature and with
+//! nothing else, which is why the same board reports late when cold and early when warm, and why
+//! issues 3B, 4B and 6A appear in **both** classes. Read as "one T-state of contention", that
+//! observation is a puzzle; read as an edge race in the interrupt, it is what you would predict.
+//!
 //! # What is not graded here
 //!
 //! - **Test groups 35–37.** They need a 48K floating bus, which this machine does not model:
@@ -92,7 +324,74 @@
 //!   named as skipped rather than dropped.
 //! - **The interrupt window's *length*.** The program only needs the interrupt to be accepted
 //!   at the top of the frame; 32 T-states versus 24 would not move a number here.
-//! - **Anything about a 128.** The suite has a 128 edition; this is the 48K one.
+//! - **Anything about a 128.** The suite has a 128 edition; this is the 48K one. The 128 edition
+//!   has since been fetched — read the next section before extending this file to it, because the
+//!   obvious extension is wrong.
+//!
+//! # The 128 edition, and the one thing that will bite whoever extends this file
+//!
+//! `timing_tests-128k_v1.0.z80` sits beside the 48K file under `testdata/timing/`, fetched on
+//! 2026-09-01 (12960 bytes, SHA-256
+//! `fedc228ddef76cefb7b81dd6e18600cca2fd826fc18b4bc3f773cfdf2e7fffc4`). **Nothing here reads it**;
+//! it is documented in `docs/M7.md` Decision 8 with its provenance and its evidence tier, and it
+//! becomes runnable only when a 128 exists to run it on.
+//!
+//! **It carries ONE expected-result table, at `0xE200`.** [`EARLY_TABLE`] and
+//! [`LATE_TABLE_OFFSET`] are 48K constants and **must not be pointed at the 128 file**: the bytes
+//! at `0xE400` in the 128 file are the **48K's `TYPE2 (Late)` table, identical over all 512 bytes
+//! and all 73 populated rows**, left behind because the 128 edition was produced by editing the
+//! 48K program in place. Reading them would compare a 128 against 48K hardware — red for a reason
+//! that has nothing to do with the 128, and near enough to look like a small modelling error
+//! rather than a category error.
+//!
+//! The evidence that it is one table and not two is in the file's own BASIC rather than in its
+//! data: the 48K's classification lines 805/807/850 are **deleted** from the 128 program, so the
+//! selector both files still carry — `IF (PEEK 40004)=1 THEN LET k=k+512`, where `k` starts at
+//! `57856` = `0xE200` — can never fire, and the byte at 40004 is zero.
+//!
+//! **One prediction, so that a first run is read correctly.** The 128 file's detection row is
+//! `R` = 121, which is the 48K `TYPE2 (Late)` row's 122 carried across a 70908-T-state frame
+//! (`(70908 − 69888) / 4 = 255 ≡ −1 (mod 128)`, and `R` is seven bits). The `TYPE1 (Early)` row's
+//! 2 gives 1, not 121. This machine reproduces `TYPE1` — asserted below — so a 128 model
+//! inheriting that interrupt phase will disagree with the whole file, on the early/late axis
+//! rather than on contention. **Take the detection row first and say which axis the disagreement
+//! is on before touching a constant.**
+//!
+//! **And the prediction is now a one-constant prediction rather than an axis.** The section above
+//! establishes what the detection group measures: `R` = (11 + `N`) mod 128 over `N` four-T-state
+//! iterations, and the class turns on a nested interrupt worth exactly 32 T-states. Applied to the
+//! 128's frame, with the loop entered at 292 or at 292 + 32:
+//!
+//! | frame | entry 292 (no nesting) | entry 324 (nested) |
+//! |---|---|---|
+//! | 69888 | `R` = **2** — the 48K `TYPE1` row | `R` = **122** — the 48K `TYPE2` row |
+//! | 70908 | `R` = **1** | `R` = **121** — *the 128 file's row* |
+//!
+//! Both 48K rows and the 128 row fall out of the same closed form, so the 128 file's own detection
+//! byte is a measurement of the **128's interrupt window**, not of its contention: it says the
+//! window is long enough that the CPU still sees `/INT` 32 T-states after accepting the previous
+//! one. Nothing about 14361 is involved. Two consequences for whoever runs it first:
+//!
+//! - **A 128 carrying this machine's 32-T-state window will read 1, and the file will be red on
+//!   every row.** That is not a contention defect and no contention constant should be touched.
+//! - The relevant checks are cheap and worth doing in order: the nine bytes of the handler copied
+//!   from `0xC130` are **identical** in the 128 file, and so is the whole setup block at `0xC0F3`
+//!   — verified by byte diff — so the amplifier is unchanged. What the 128 file *does* change is
+//!   the delay loop: `0xC0E2` and `0xC0EA` ship pre-patched to `BIT 0,(HL)` and
+//!   `BIT 0,(HL)` / `CPD`, which the 48K program only writes at runtime when the ROM signature at
+//!   `0x004B` is not the 48K's `0x02BF`. Those patches lengthen the loop from 277 to 281 T-states
+//!   an iteration — **re-calibrating the same self-synchronising race for the 70908-T-state
+//!   frame**, and landing it on the identical phase. The 128 edition is not a differently-timed
+//!   program; it is the same program re-tuned to the same lock.
+//!
+//! **So the 128's `interrupt_t_states` is the one field that decides this file's first 128 run**,
+//! and `Timing::SPECTRUM_128` currently inherits the 48K's 32 with the note that it *"measures
+//! nothing"*. That note is now falsifiable rather than idle: **32 predicts a detection reading of
+//! 1 and a red row everywhere; any value in `33..=43` predicts 121, which is what the file
+//! carries.** The band is derived, not measured — the two edges come from instruction sequences
+//! byte-identical between the two files, and there is no 128 here to run — so it is a prediction
+//! to test, not a constant to adopt. **Do not change it on the strength of this paragraph**: run
+//! the detection row, and let the 128 file say which value it wants.
 //!
 //! # Absence
 //!
@@ -494,6 +793,11 @@ const fn label(contended: bool) -> &'static str {
 /// It is not one of the 34 instruction groups: it is `JP (HL)` jumping to itself out of
 /// uncontended memory, so it measures **only** where the interrupt falls, at four T-states and
 /// one `R` increment per iteration.
+///
+/// The loop is at the absolute address `0xC146` — group 0's own code ends `LD HL,0xC146` /
+/// `JP (HL)`, so both the uncontended and the contended copy converge on it. The recorded byte is
+/// `(11 + N) mod 128` over `N` iterations, and the two classes differ by eight iterations for the
+/// reason the module doc derives.
 const DETECTION_GROUP: u8 = 0;
 
 /// The instruction groups, `1..=GROUPS`.
@@ -565,6 +869,11 @@ fn the_machine_reproduces_one_of_the_two_measured_hardware_timings() {
     // against an identical loop count and stack pointer, so a machine whose interrupt lands
     // anywhere else matches neither. What it does *not* do is grade the contention phase; that is
     // the sixty-eight rows in the test below.
+    //
+    // What it *does* grade, and nothing else in this workspace does, is
+    // `timing::INTERRUPT_T_STATES` — the module doc derives why, and measures it: at 32 this row
+    // reads 2, at 33 it reads 122. `timing.rs` still calls that constant's length ungraded; this
+    // assertion is what makes that sentence out of date.
     let Some((snapshot, rom)) = corpora() else {
         return;
     };

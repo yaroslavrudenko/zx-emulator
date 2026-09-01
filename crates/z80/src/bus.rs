@@ -26,6 +26,7 @@
 //! | Opcode fetch (M1) | [`OPCODE_FETCH_T_STATES`] | `PC` | [`Bus::fetch`] |
 //! | Memory read or write | [`MEMORY_ACCESS_T_STATES`] | the address transferred | [`Bus::read`] / [`Bus::write`] |
 //! | I/O port read or write | [`PORT_ACCESS_T_STATES`] | the port | [`Bus::in_port`] / [`Bus::out_port`] |
+//! | Interrupt acknowledge | carried by the call | `IR` | [`Bus::acknowledge`] |
 //! | Internal operation | instruction-specific | `IR`, or the last address used | none |
 //!
 //! That last column is what makes a cycle's *length* knowable from the call stream. Without
@@ -114,6 +115,45 @@ pub trait Bus {
     #[inline]
     fn fetch(&mut self, addr: u16) -> u8 {
         self.read(addr)
+    }
+
+    /// Open the acknowledge cycle of an accepted interrupt: **one** machine cycle,
+    /// `t_states` long, with the refresh address on the bus and no transfer.
+    ///
+    /// Defaults to doing nothing, so implementing it is optional and every existing
+    /// implementation keeps working unchanged — the [`Bus::fetch`] precedent exactly.
+    ///
+    /// # Why it is a separate method, and why it is not `fetch`
+    ///
+    /// The Z80 asserts `/M1` together with `/IORQ` in place of `/MREQ` here: the interrupting
+    /// device supplies the byte, so **no memory is read** and there is no address to fetch
+    /// from. Calling [`Bus::fetch`] would report a memory cycle that never happened, at an
+    /// address the machine would be entitled to serve from its own memory map.
+    ///
+    /// Without a callback, this cycle reached an implementation as a bare run of
+    /// [`Bus::tick`]s with no transfer to open a cycle — indistinguishable from `t_states`
+    /// separate internal cycles. A contention model then charges a stall for each, where the
+    /// hardware performs one cycle and owes one. That is not a difference of *magnitude* that
+    /// has to be guessed; it is the structural question *one cycle or seven*, which the
+    /// hardware rule already answers.
+    ///
+    /// # Why the length travels with the call
+    ///
+    /// The two acknowledge lengths stay private, and the reason they were private is preserved
+    /// rather than overturned: *"exporting its length would hand out a number a `Bus` cannot
+    /// act on"*. A callback falsifies the premise — there is now something to act on — so the
+    /// figure arrives as an argument instead of as a constant, and there is still nothing for a
+    /// machine to re-transcribe and get out of step.
+    ///
+    /// # When it is called
+    ///
+    /// Once per accepted [`crate::Cpu::interrupt`] and once per [`crate::Cpu::nmi`], before
+    /// that cycle's ticks. It is **not** an M1 fetch for the purposes of the fetch-per-refresh
+    /// correspondence: `R` is incremented here with no [`Bus::fetch`] call, which is the one
+    /// place that correspondence does not hold.
+    #[inline]
+    fn acknowledge(&mut self, addr: u16, t_states: u8) {
+        let _ = (addr, t_states);
     }
 
     /// Write one byte to the address space.

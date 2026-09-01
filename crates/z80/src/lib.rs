@@ -638,9 +638,19 @@ impl<B: Bus> Cpu<B> {
     /// [`Cpu::step`], which is where a machine's frame loop spends its time; `interrupt` and
     /// `nmi` each add one refresh and no fetch. Modes 1 and 2 read no instruction byte at
     /// all, and mode 2's two vector-table lookups are ordinary memory reads.
+    ///
+    /// # It still calls a `Bus` method, and that is what [`Bus::acknowledge`] is for
+    ///
+    /// Reading no memory is a reason not to call `fetch`. It is **not** a reason to say
+    /// nothing: this is one machine cycle, and a machine that only saw `t_states` bare
+    /// [`Bus::tick`]s could not tell it from `t_states` separate internal cycles — so a
+    /// contention model charged a stall for each, where the hardware owes one. The callback
+    /// carries no data in either direction; it says *a cycle of this length is opening here*,
+    /// which is exactly what the tick stream cannot otherwise express.
     fn acknowledge(&mut self, t_states: u8) {
         self.regs.increment_r();
         let refresh = self.regs.refresh_address();
+        self.bus.acknowledge(refresh, t_states);
         self.internal_cycles(refresh, t_states);
     }
 

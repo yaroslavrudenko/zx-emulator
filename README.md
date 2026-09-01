@@ -42,9 +42,27 @@ arithmetic — with an external oracle instead of self-assessment.
 | M3 | Documented behaviour | `zexdoc` passes | **67/67 first run** — merged |
 | M4 | Undocumented flags | **`zexall` passes** — CPU complete | **67/67**, made a gate with its limits stated — merged |
 | **M5** | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | the machine boots, **on frame 87**, and **the gate work landed**: `crates/spectrum/tests/boot.rs` is a real `#[test]` that runs the ROM under `cargo test` and asserts the frame, alongside the other integration gates in that directory. Of the five mutations, **four were already red and one survived**. See [`docs/STATUS.md`](docs/STATUS.md) for what M5's green does and does not mean |
-| M6 | Snapshots (`.z80` / `.sna`) and tape (`.tap`) | a real game runs | design landed in [`docs/M6.md`](docs/M6.md); implementation under way, unmerged |
-| M7 | 128: paging, second ROM, AY-3-8912, per-bank contention | 128-only software runs | — |
-| M8 | WASM build | playable from a URL | — |
+| **M6** | Snapshots (`.z80` / `.sna`) and tape (`.tap`) | **T1 + T2 + T3** — *not* "a real game runs" | **merged.** A program written here, stored as a `.tap`, loaded by the real ROM's own `LD-BYTES` through the `EAR` bit, and executed — computing a value asserted to appear **nowhere in its own bytes**, so that *"the data arrived"* and *"it ran"* are separate claims. Design in [`docs/M6.md`](docs/M6.md); what it opened and closed is in [`docs/STATUS.md`](docs/STATUS.md) |
+| M7 | 128: paging, second ROM, AY-3-8912, **the beeper**, per-bank contention | **T1 + T2 + T3** — *not* "128-only software runs" | design in [`docs/M7.md`](docs/M7.md), in flight. **The memory half boots:** the 128 reaches its own `© 1986` copyright, draws all five menu entries, the highlight moves under `CAPS SHIFT`+`6`, and selecting *48 BASIC* reaches the `© 1982` message through ROM page 1 — the year changing is what makes that a claim about which ROM is executing |
+| M8 | WASM build | playable from a URL — the browser, **not** the sound | design in [`docs/M8.md`](docs/M8.md) |
+
+> **Two corrections to the rows above, both made 2026-09-01 rather than left to be inferred from
+> the design documents.**
+>
+> **The beeper joined M7 and left M8.** `docs/M6.md` had assigned *Sound — the speaker bit of a
+> `0xFE` write* to M8, and `docs/M7.md` said in three places that M8 owned the audio device and
+> the beeper with it. **The AY is a 128 device and the beeper is a ULA feature, so both are the
+> machine's** — decoded by the same `Ula::out_port` that already takes the border out of the same
+> byte — and `crates/spectrum` is where the machine is modelled. **What M8 owns is routing audio
+> the machine already produces to a browser's audio device**: the mix, the resampling, the device.
+> Four rows were corrected with the originals struck; `docs/M8.md` Decision 9 carries the ruling.
+>
+> **M8's gate is a build gate and the row's *"playable from a URL"* cannot be one.** *Playable* is
+> not a property of an artefact — it is a property of a browser rendering a canvas, a GPU
+> compositing it, a keyboard delivering keys and a person forming an opinion — so no corpus and no
+> licence makes it automatable. This is the **third** milestone row corrected this way, and the
+> reason differs from M6's and M7's: theirs were unautomatable because a corpus could not be
+> committed, which another repository could fix, and M8's is unautomatable structurally.
 
 > **Correction — the M5 row said *"the gate work is unfinished: five mutations leave it green and
 > nothing yet runs it"*, and the repository falsifies both halves.** It is corrected loudly rather
@@ -82,6 +100,31 @@ arithmetic — with an external oracle instead of self-assessment.
 > have been stale before the paragraph containing it was, which is this exact defect for the third
 > time. **Count the directory — the command is in this sentence.** `docs/MACHINE.md`'s milestone
 > table says *"seven gates"*, which was true when written and is the number to check first.
+>
+> > **`MACHINE.md`'s M5 row no longer says seven.** It now carries the command
+> > (`ls -1 crates/spectrum/tests/*.rs | wc -l`) instead of an answer, and records that the integer
+> > moved 13 → 14 → 16 → 19 on 2026-09-01 while the correction was being written. The sentence
+> > above is left standing because it is what a reader should still do; only its example moved.
+
+> **Correction — the M6 and M7 rows said *"a real game runs"* and *"128-only software runs"*, and
+> both name tier T4.** M6 has since merged; the row is corrected rather than quietly widened.
+>
+> [`docs/M6.md`](docs/M6.md) Decision 8 splits the milestone's evidence into four tiers: **T1**
+> proven and corpus-free (the round trips, the truncation sweep, the codec property tests, the
+> hand-transcribed vectors), **T2** measured (the real ROM's `LD-BYTES` loading a synthetic tape
+> through the `EAR` bit), **T3** measured (a program *we wrote*, loaded from tape by the ROM and
+> executed), and **T4** *observed* — a real game, a file of ours opening in somebody else's
+> emulator. **The gate is T1 + T2 + T3.** T4 cannot be automated in a repository that may not carry
+> games, and a milestone gated on it would be a gate that runs nowhere — which
+> [`docs/STATUS.md`](docs/STATUS.md) records this project shipping three times already.
+>
+> **The residue is not absorbed:** T4 is the only tier that grades a turbo loader or a program
+> written by somebody who did not know how this emulator works, and it runs nowhere. That is a row
+> in the register, not a footnote here.
+>
+> `docs/MACHINE.md` and `docs/ARCHITECTURE.md` carry the same table; both are corrected. This file
+> was the copy that was missed the last time a milestone row was corrected, which is why it is
+> checked first now.
 
 ---
 
@@ -89,13 +132,13 @@ arithmetic — with an external oracle instead of self-assessment.
 
 ```
 crates/z80/         Z80 CPU core. No memory, no I/O, no allocation.
-crates/spectrum/    The machine: paged memory, ULA, contention, keyboard, screen, timing.
-                    Snapshots and tape are landing at M6; there is no AY module yet — it
-                    is M7 scope. This line lists the crate's remit, not its contents.
+crates/spectrum/    The machine: paged memory, ULA, contention, keyboard, screen, timing,
+                    snapshots (`.z80`/`.sna`) and tape (`.tap`). No AY module yet — it is
+                    M7 scope. This line lists the crate's remit, not its contents.
 crates/frontend/    macroquad frontend — native and WebAssembly.
 crates/testsupport/ The corpus-absence policy every gate shares. Test-only, never published.
-docs/               Architecture, the machine design, the M6 design, the Z80 reference,
-                    the status register.
+docs/               Architecture, the machine design, the M6 and M7 designs, the Z80
+                    reference, the status register.
 testdata/           Conformance suites, fetched locally. The Sinclair 48K ROM is the one
                     exception and is committed.
 ```
@@ -159,8 +202,18 @@ Fetch the rest locally:
 |---|---|---|
 | `testdata/fuse/` | `tests.in`, `tests.expected` — 1335 per-instruction vectors | no — belongs to the FUSE project |
 | `testdata/zex/` | `zexdoc.com`, `zexall.com` | no — third-party conformance binaries |
-| `testdata/roms/48.rom` | the Sinclair 48K ROM | **yes** — Amstrad permits redistribution, and a subtly wrong ROM is the one corpus failure no harness here would explain. SHA-1 and fetch commands in `testdata/README.md` |
-| `testdata/roms/` — 128 ROMs | Sinclair 128 editor + 48 BASIC | absent — needed at M7. Note they will be committed *by default* when added: the un-ignore rule is `!testdata/roms/*.rom`, not one path |
+| `testdata/roms/48.rom` | the Sinclair 48K ROM | **yes** — under the permission quoted in `testdata/README.md`, which is also where the SHA-1, the CRC-32 and the fetch commands are. A subtly wrong ROM is the one corpus failure no harness here would explain |
+| `testdata/snapshots/`, `testdata/tapes/`, `testdata/timing/` | third-party `.z80`/`.sna`, `.tap` and the 48K timing suite | no — fetched; each is the *external* check on our reading of a format, or of the machine's timing |
+| `testdata/roms/` — 128 ROMs | Sinclair 128 editor + 48 BASIC | absent — needed at M7, and adding one is now a **deliberate** act |
+
+> **The 128-ROM row said they *"will be committed by default when added: the un-ignore rule is
+> `!testdata/roms/*.rom`, not one path"*, and `.gitignore` no longer works that way.** The glob was
+> replaced by one explicit filename per ROM, so a new ROM is ignored until somebody edits
+> `.gitignore` — which is where a reviewer sees it and where the licence question has to be answered
+> rather than assumed. The reason it mattered is not that some *Sinclair* ROM has a different
+> licence: it is that `*.rom` also accepts a game cartridge, a Multiface image, or an Interface 1
+> ROM, and the permission this repository relies on **disclaims** the Interface 1 and 2 ROMs
+> outright. The glob turned "may we redistribute this?" from a decision into an accident.
 
 Game images are never distributed here. Supply your own.
 
@@ -194,10 +247,30 @@ These are enforced, not aspirational:
 | Document | Contents |
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crate boundaries, the five load-bearing design decisions, the 48K↔128 differences, milestones, and the *Measured* section — every performance and codegen claim with the command that produced it |
-| [`docs/MACHINE.md`](docs/MACHINE.md) | The machine from M5 onward: why it owns the clock, the ULA as the second clock, and the verification plan for a layer that has **no oracle** |
+| [`docs/MACHINE.md`](docs/MACHINE.md) | The machine from M5 onward: why it owns the clock, the ULA as the second clock, the verification plan, and **the timing oracle** — 68 rows measured on real Spectrums, and the precise statement of what its green does and does not settle |
 | [`docs/M6.md`](docs/M6.md) | The M6 design — `.z80`/`.sna` snapshots and `.tap` tape. Each decision carries its class of evidence, plus **ruling** for a choice no evidence forces. *This table and the `docs/` line in Layout both omitted it while the file existed and ran to hundreds of lines; nothing in the repository linked to it at all.* |
+| [`docs/M7.md`](docs/M7.md) | The M7 design — the 128: paging, the second ROM, the AY-3-8912, per-bank contention. **In flight and unmerged**; its gate is T1+T2+T3 on the same four-tier scheme M6 uses |
 | [`docs/Z80-REFERENCE.md`](docs/Z80-REFERENCE.md) | Register file, flag semantics, the undocumented 3/5 bits and register Q, `DAA`, instruction timing, prefix traps, interrupts |
 | [`docs/STATUS.md`](docs/STATUS.md) | **What is currently true**, and the only register of what is open. Also the catalogue of this project's own failures — read it before trusting a number anywhere else |
+
+> **Correction — the `MACHINE.md` row described it as *"the verification plan for a layer that has
+> **no oracle**"*, and that stopped being true on 2026-09-01.** It was accurate as history and
+> misleading as a description: `crates/spectrum/tests/timing_oracle.rs` grades the 48K contention
+> model against 68 rows measured on real Spectrums, with 0 disagreements, bounded by thirteen
+> mutations — `FIRST_CONTENDED_T_STATE` at 14333, 14334, 14336 and 14337 all red, only 14335 green.
+>
+> **State the scope, because the obvious reading is too strong.** What is established is that **the
+> first contended T-state falls exactly 14335 T-states after `/INT`**, given that this machine
+> asserts `/INT` at frame T-state 0. Three things stay open and each is its own row in
+> `docs/STATUS.md`'s register: the frame's **origin** is a convention (moving `/INT` and the window
+> together leaves the oracle green), the interrupt window's **length** is unmeasured (32 → 24 leaves
+> it green), and the `64 × 224` **factorisation** is not measured — its *product* is.
+>
+> The floating bus, progressive drawing and keyboard ghosting remain unmodelled, so they are not
+> gradeable rather than ungraded, and the *observation* half of that plan is unchanged for them.
+> **`docs/M6.md`'s opening and `crates/spectrum/src/lib.rs`'s coverage table carried the same
+> superseded claim**; the first is corrected, and the second is another agent's file and is named
+> here so it cannot go quiet.
 
 Claims in these documents are labelled by the kind of evidence behind them — proven, measured,
 derived, or observed — and a claim whose evidence has expired is corrected in place, loudly, rather
@@ -209,6 +282,21 @@ than deleted. If you find one that is stale, that is a defect report, not a tidy
 
 The emulator is MIT OR Apache-2.0.
 
-Amstrad has explicitly permitted redistribution of the Sinclair ROMs alongside emulators,
-so the Spectrum ROMs may be placed in `testdata/roms/` locally. Game images may not be
+**Amstrad have kindly given their permission for the redistribution of their copyrighted
+material but retain that copyright.**
+
+That sentence is not a paraphrase. The permission — Cliff Lawson of Amstrad plc, posted to
+`comp.sys.sinclair` on 31 August 1999 — asks in those words that *"the program/manual includes a
+note to the effect that"* it, and this is that note. `testdata/roms/48.rom` is committed on its
+strength; the Spectrum ROMs may be placed in `testdata/roms/` locally. Game images may not be
 redistributed — they are yours to supply.
+
+**The quotation, the author, the date, the four conditions, the hedged scope, and the one gap
+still open in the sourcing are in [`testdata/README.md`](testdata/README.md) and only there.** This
+section used to assert *"Amstrad has explicitly permitted redistribution of the Sinclair ROMs
+alongside emulators"* and stop — one of five copies of a licensing claim carrying no quotation, no
+author, no date and no URL between them. A licensing claim is the one kind where the quotation
+**is** what is being relied on, so it has one home and everything else points at it. Read alongside
+it: the scope is narrower and more hedged than the old sentence implied — the ZX80, the ZX81 and
+the Interface 1 and 2 ROMs are disclaimed as **not Amstrad's copyright at all**, which is why
+`.gitignore` names every committed ROM individually.

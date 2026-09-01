@@ -30,6 +30,41 @@ been labelled as such; nothing in them changed.
 
 ## Unreleased — M6 · `crates/spectrum` — the applier and the tape
 
+### Added — `pub mod snapshot`
+
+- **`snapshot::Snapshot`** (`pub cpu: z80::CpuState`, `pub border: Colour`,
+  `pub frame_t_state: u32`; the bank array **private**), re-exported as `spectrum::Snapshot`.
+- **`Snapshot::bank(BankIndex) -> Option<&[u8; PAGE_SIZE]>`**.
+- **`snapshot::Error`** (`#[non_exhaustive]`, `Copy`, allocation-free), whose every variant names
+  the byte or offset that failed.
+- **`snapshot::z80::parse` / `snapshot::z80::write`**, and **`snapshot::sna::parse`**.
+  **There is no `sna::write`**, deliberately and permanently until something needs one: a `.sna`
+  writer must push `PC` onto the guest's stack, destroying two bytes of the RAM it is recording, and
+  a save that modifies what it is saving is not a save.
+
+> **This entry was missing, and its absence is the exact defect this file exists to prevent.**
+> `pub mod snapshot` and the six items above shipped in the M6 merge with **no changelog entry at
+> all**, while the applier and the tape below were written up at length. A published surface with no
+> record is what `spectrum` had between `2157331` and the M5 entry, and the widening note at the top
+> of this file argues that case; the same gap reopened one milestone later inside the milestone that
+> opened the module. Added on 2026-09-01 from the crate rather than from the design document,
+> because the design document is where the items were *proposed* and the crate is where they are.
+
+**The parser's fields are public because there is no invariant to protect**, following `CpuState`'s
+own precedent: `Colour::new` wraps into range and an out-of-range `frame_t_state` is absorbed by the
+clock's documented rollover. **The banks are private** because *which* bank indices are meaningful is
+a property of the model, and the parser is where that is decided — a `Snapshot` that reaches
+`restore` cannot name a bank the machine lacks, which is a parse-don't-validate boundary rather than
+a style choice.
+
+**`Error` is the module's whole hostile-input contract, and it is closed structurally rather than by
+care.** The crate builds with `panic = "abort"`, so a panic on a malformed file kills the process and
+`catch_unwind` is not a backstop. There is no slice indexing anywhere in the module — every byte
+moves through one `Reader`/`Writer` pair — no `unwrap`/`expect`/`panic!` in the production half, and
+**no allocation is ever sized from the file**. All three are asserted by tests over the module's own
+source, and the indexing scanner carries positive *and* negative cases so it cannot pass by finding
+nothing. `docs/STATUS.md`'s M6 section has the account.
+
 ### Added — `Spectrum::snapshot()` and `Spectrum::restore()`
 
 - **`Spectrum::snapshot(&self) -> Snapshot`** and **`Spectrum::restore(&mut self, &Snapshot)`**.
