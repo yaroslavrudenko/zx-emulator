@@ -34,7 +34,69 @@
 //! | Border colour | latched, but sampled once per frame — see [`crate::screen`] |
 //! | Floating bus | **no** — an undecoded port reads [`FLOATING_BUS_BYTE`] |
 //! | Speaker and `MIC` | **no** — bits 3 and 4 of a `0xFE` write are discarded |
-//! | `EAR` input | **no** — bit 6 of a `0xFE` read idles low |
+//! | `EAR` input | **yes** — bit 6 of a `0xFE` read follows [`crate::tape::Tape::level`] |
+//! | Issue 2 / issue 3 `EAR` readback | **no** — writing bit 3 or 4 does not change what bit 6 reads |
+//! | Interrupt-acknowledge contention | **charged seven times, not once** — see below |
+//!
+//! ## The `EAR` bit, and where the tape gets its time
+//!
+//! M6 turned the `EAR` row from **no** into **yes**, and the sentence that used to stand here
+//! — *"the tape port M6 brings"* — is what a milestone boundary does to a doc comment.
+//! `docs/STATUS.md` records that class: *"every one of those comments was true when written…
+//! they are falsified at milestone boundaries, because that is when the claims they encode
+//! stop holding."*
+//!
+//! With no tape in the drive the bit still reads **low**, which is the state an issue 3
+//! machine idles in and is what `UNDRIVEN_INPUT_BITS` has always produced.
+//! `crates/spectrum/tests/keyboard_matrix.rs` pins the literal `0xBF` a real `IN A,(0xFE)`
+//! returns across the whole membrane, so this change is graded from outside this file.
+//!
+//! What is **not** modelled is the issue 2 / issue 3 readback: writing bit 3 or 4 of a `0xFE`
+//! write and reading bit 6 back. It is a real cause of *"loads on one emulator and not
+//! another"*, and it is named here so it is the first thing suspected if a specific loader
+//! fails.
+//!
+//! Contention means the clock does not advance one T-state at a time, so the tape cannot be
+//! driven from [`Ula::tick`] alone: a stall is elapsed time the tape has to see. `Ula::advance`
+//! is the one place that moves both, and every `Clock::advance` call site routes through it,
+//! so the two cannot drift.
+//!
+//! The sampling point is an approximation and its size is known. [`Ula::in_port`] runs after
+//! the cycle's contention stall is charged and **before** its four nominal T-states arrive as
+//! ticks, so the level is read up to four T-states early relative to where real hardware
+//! latches it. The ROM's loader distinguishes an 855-T-state half-bit from a 1710-T-state one,
+//! so four T-states is far inside its tolerance; a turbo loader with tighter margins is where
+//! it could matter, and a turbo loader failing is what would decide it.
+//!
+//! ## The acknowledge cycle is the one machine cycle this model prices per T-state
+//!
+//! Every other cycle reaches this bus as a transfer callback followed by its own T-states,
+//! so its stall is charged **once**. An interrupt acknowledge has no callback — it
+//! reads no memory, asserting `/IORQ` in place of `/MREQ` — so `crates/z80` delivers it as
+//! seven bare [`Bus::tick`] calls at the refresh address. Recorded off a real `Cpu`:
+//!
+//! ```text
+//!   IM 1   IC@IR:1 x7   MW@sp-1:3   MW@sp-2:3
+//!   IM 2   IC@IR:1 x7   MW@sp-1:3   MW@sp-2:3   MR@vector:3   MR@vector+1:3
+//! ```
+//!
+//! Each of those seven arrives with no cycle outstanding, so [`Ula::tick`] treats it as a
+//! standalone internal cycle and contends it on its own account. The hardware performs
+//! **one** machine cycle there — M1 stretched by two wait states — so a contended `IR`
+//! would be charged seven stalls where it owes one.
+//!
+//! **It is unobservable on a 48K, and that is why it is written down rather than fixed.**
+//! The ULA holds `/INT` low for the first [`timing::INTERRUPT_T_STATES`] of the frame, and
+//! contention does not begin until [`timing::FIRST_CONTENDED_T_STATE`] — 14335 — so an
+//! accepted interrupt and its acknowledge always land in the top border, where every stall
+//! is zero whatever the address. No test can currently tell the two models apart, which
+//! means a "fix" would be an unverifiable guess and a gate for it would assert a number
+//! nothing produces. The mode 2 vector reads are ordinary memory reads and *are* shaped
+//! correctly, so they would contend properly if they ever landed in the window.
+//!
+//! What makes this worth recording now: the 128 has a different frame geometry, and
+//! `docs/STATUS.md` already lists interrupt acceptance as having **no oracle in this project
+//! at all**. This is the shape that gap has.
 //!
 //! The floating bus is the interesting omission. Everything needed to model it is already
 //! here — the clock knows where in the fetch window it is — but the byte-to-phase mapping
@@ -43,11 +105,12 @@
 //! Returning a constant is wrong in a way that is *visible*; a plausible guess would be
 //! wrong in a way that is not.
 
-use z80::Bus;
+use z80::{Bus, MEMORY_ACCESS_T_STATES, OPCODE_FETCH_T_STATES, PORT_ACCESS_T_STATES};
 
 use crate::keyboard::Keyboard;
 use crate::memory::Memory;
 use crate::screen::Colour;
+use crate::tape::Tape;
 use crate::timing::{self, Clock};
 
 /// What the data bus reads as when nothing drives it.
@@ -65,29 +128,21 @@ const ULA_PORT_SELECT: u16 = 0x0001;
 /// Bits of a `0xFE` write that set the border colour.
 const BORDER_MASK: u8 = 0x07;
 
-/// Bits 5–7 of a `0xFE` read, which the keyboard does not drive.
+/// Bits 5 and 7 of a `0xFE` read, which nothing drives.
 ///
-/// Bits 5 and 7 float high. Bit 6 is the `EAR` input, low with nothing connected to the
-/// tape socket — the state an issue 3 machine idles in. Software that detects issue 2
-/// versus issue 3 does it by writing bit 3 or 4 and reading bit 6 back, which needs the
-/// tape port M6 brings.
+/// They float high. Bit 6 used to be described here as part of the same set — *"the `EAR`
+/// input, low with nothing connected to the tape socket"* — because until M6 that was the
+/// only state it could be in. It is now driven by [`Ula::ear_bit`], and the constant is
+/// unchanged: with no tape the level is low, so `IN A,(0xFE)` still returns the same literal
+/// it did at M5.
 const UNDRIVEN_INPUT_BITS: u8 = 0xA0;
 
-/// T-states an M1 opcode fetch occupies.
-///
-/// This and the two below are the published Z80 machine-cycle lengths, and they duplicate
-/// `crates/z80`'s own constants, which that crate keeps private. Nothing compares the two
-/// sets directly. What grades them is
-/// `tests/contention_magnitude.rs::real_instructions_are_stalled_by_the_pattern_at_each_cycle_they_open`,
-/// which runs real instructions through a real `Cpu<Ula>` against hand-derived totals — so a
-/// wrong length here moves a figure there rather than passing silently.
-const OPCODE_FETCH_CYCLE: u8 = 4;
+/// Bit 6 of a `0xFE` read: the `EAR` input, driven by the tape.
+const EAR_BIT: u8 = 0x40;
 
-/// T-states a memory read or write cycle occupies.
-const MEMORY_CYCLE: u8 = 3;
-
-/// T-states an I/O port cycle occupies.
-const PORT_CYCLE: u8 = 4;
+// The tape must drive a bit nothing else claims, and the two constants are written
+// independently — bit 6 from the port's documented layout, bits 5 and 7 from the keyboard's.
+const _: () = assert!(EAR_BIT & UNDRIVEN_INPUT_BITS == 0);
 
 /// The bus the CPU is wired to: memory, ports, the keyboard, and the frame clock.
 #[derive(Debug)]
@@ -104,10 +159,11 @@ pub struct Ula {
     /// measuring time, and the next transfer overwrites it.
     covered_t_states: u8,
     border: Colour,
+    tape: Tape,
 }
 
 impl Ula {
-    /// A ULA at the start of frame zero, fronting `memory`.
+    /// A ULA at the start of frame zero, fronting `memory`, with no tape in the drive.
     #[must_use]
     pub fn new(memory: Memory) -> Self {
         Self {
@@ -116,13 +172,15 @@ impl Ula {
             clock: Clock::new(),
             covered_t_states: 0,
             border: Colour::BLACK,
+            tape: Tape::default(),
         }
     }
 
     /// Put the clock back to the start of frame zero and clear the border.
     ///
-    /// Memory and the keyboard are left alone: a reset button does not clear RAM, and the
-    /// ROM's own start-up clears what it relies on.
+    /// Memory, the keyboard and **the tape** are left alone: a reset button does not clear
+    /// RAM, does not lift the keys, and does not rewind a cassette. The ROM's own start-up
+    /// clears what it relies on.
     pub fn reset(&mut self) {
         self.clock = Clock::new();
         self.covered_t_states = 0;
@@ -169,12 +227,87 @@ impl Ula {
         self.clock.interrupt_asserted()
     }
 
+    /// Set the border **without performing an `OUT`**.
+    ///
+    /// The one thing a snapshot applier needs that no existing method provides, and the
+    /// reason is concrete rather than stylistic. Routing a restore through [`Ula::out_port`]
+    /// charges a four-T-state I/O cycle that never happened, and two consequences follow that
+    /// `crates/spectrum/tests/snapshot_apply.rs` **measured** — both leaving R1 and R3 green,
+    /// which is why they need assertions of their own:
+    ///
+    /// - **The tape moves.** A port cycle advances the clock by its contention stall, and the
+    ///   tape advances with the clock. Restoring a snapshot is not elapsed time. This one
+    ///   survives whatever order the applier's setters run in.
+    /// - **`covered_t_states` is left armed at 4**, so the next four **bare ticks** are
+    ///   treated as an open cycle's own and skip their contention. An interrupt acknowledge is
+    ///   seven bare ticks with no transfer between them.
+    ///
+    /// The second bullet used to read *"the first four ticks of the next **instruction**"*, in
+    /// this comment and in `docs/M6.md`, and that is **false**: every instruction opens with a
+    /// fetch, and `begin_memory_cycle` assigns `covered_t_states` unconditionally, so a stale
+    /// value is overwritten before it can be spent. Nothing reachable through
+    /// [`crate::Spectrum::step`] can see it. The correction is recorded rather than applied
+    /// silently, because the setter is still unavoidable and a reader who checked the stated
+    /// reason would have found it did not hold.
+    ///
+    /// It does not touch the clock, the tape, or the cycle bookkeeping, because setting state
+    /// is not elapsed time.
+    pub(crate) fn set_border(&mut self, border: Colour) {
+        self.border = border;
+    }
+
+    /// Put the clock at `frame_t_state`, leaving the frame counter alone.
+    ///
+    /// The applier's second unavoidable setter. [`Clock::advance`] is `pub(crate)` and
+    /// [`Ula::clock`] returns a `Copy` **by value**, so there is no route to this machine's
+    /// clock from outside that is not a silent no-op — which is deliberate, and is why the
+    /// applier needs a setter here rather than reaching through the accessor.
+    ///
+    /// The frame **counter** is not touched: it is the machine's uptime since power-on, the
+    /// boot gate asserts on it and the FLASH phase derives from it, so rewinding it on a load
+    /// would make one number mean two things. That is a convention — no format carries a
+    /// frame count — and its cost is a snapshot taken mid-flash rendering inverted for up to
+    /// [`crate::screen::FLASH_FRAMES`] frames after loading.
+    ///
+    /// The tape does not move either: restoring a snapshot is not elapsed time.
+    pub(crate) fn set_frame_t_state(&mut self, frame_t_state: u32) {
+        self.clock.set_frame_t_state(frame_t_state);
+    }
+
+    /// Put `tape` in the drive, stopped and wound to wherever it stands.
+    pub(crate) fn insert_tape(&mut self, tape: Tape) {
+        self.tape = tape;
+    }
+
+    /// The tape in the drive — how anything starts, stops or rewinds it.
+    pub(crate) fn tape_mut(&mut self) -> &mut Tape {
+        &mut self.tape
+    }
+
+    /// Let `t_states` elapse: the clock moves, and the tape moves with it.
+    ///
+    /// **The one place time passes.** Contention advances the clock by a stall of 0–6
+    /// T-states outside any `tick`, so a tape driven from [`Ula::tick`] alone would run slow
+    /// by exactly the contention a loader suffers — and would do it silently. Every
+    /// `Clock::advance` call site in this file routes through here for that reason;
+    /// `crates/spectrum/tests/tape_signal.rs` asserts that a stalled access moves the tape.
+    #[inline]
+    fn advance(&mut self, t_states: u32) {
+        self.clock.advance(t_states);
+        self.tape.advance(t_states);
+    }
+
+    /// Bit 6 of a `0xFE` read: the level the tape is driving the `EAR` line to.
+    #[inline]
+    fn ear_bit(&self) -> u8 {
+        if self.tape.level() { EAR_BIT } else { 0 }
+    }
+
     /// Charge the stall a contended access starting *now* at `address` would suffer.
     #[inline]
     fn contend(&mut self, address: u16) {
         if self.memory.is_contended(address) {
-            self.clock
-                .advance(timing::delay(self.clock.frame_t_state()));
+            self.advance(timing::delay(self.clock.frame_t_state()));
         }
     }
 
@@ -231,27 +364,27 @@ impl Ula {
     /// Open an I/O machine cycle, charging its contention.
     #[inline]
     fn begin_port_cycle(&mut self, port: u16) {
-        self.clock.advance(self.port_delay(port));
-        self.covered_t_states = PORT_CYCLE;
+        self.advance(self.port_delay(port));
+        self.covered_t_states = PORT_ACCESS_T_STATES;
     }
 }
 
 impl Bus for Ula {
     #[inline]
     fn fetch(&mut self, address: u16) -> u8 {
-        self.begin_memory_cycle(address, OPCODE_FETCH_CYCLE);
+        self.begin_memory_cycle(address, OPCODE_FETCH_T_STATES);
         self.memory.read(address)
     }
 
     #[inline]
     fn read(&mut self, address: u16) -> u8 {
-        self.begin_memory_cycle(address, MEMORY_CYCLE);
+        self.begin_memory_cycle(address, MEMORY_ACCESS_T_STATES);
         self.memory.read(address)
     }
 
     #[inline]
     fn write(&mut self, address: u16, value: u8) {
-        self.begin_memory_cycle(address, MEMORY_CYCLE);
+        self.begin_memory_cycle(address, MEMORY_ACCESS_T_STATES);
         self.memory.write(address, value);
     }
 
@@ -261,7 +394,7 @@ impl Bus for Ula {
         if port & ULA_PORT_SELECT != 0 {
             return FLOATING_BUS_BYTE;
         }
-        self.keyboard.read(port) | UNDRIVEN_INPUT_BITS
+        self.keyboard.read(port) | UNDRIVEN_INPUT_BITS | self.ear_bit()
     }
 
     #[inline]
@@ -281,7 +414,7 @@ impl Bus for Ula {
             // Nothing open: a standalone internal cycle, contending on its own account.
             None => self.contend(address),
         }
-        self.clock.advance(1);
+        self.advance(1);
     }
 }
 
@@ -533,6 +666,111 @@ mod tests {
         read_cycle(&mut ula, UNCONTENDED);
         assert_eq!(ula.clock.frames(), 1);
         assert_eq!(ula.clock.frame_t_state(), 1);
+    }
+
+    #[test]
+    fn with_no_tape_the_ear_bit_reads_low() {
+        // The literal a real `IN A,(0xFE)` returns on an idle machine with no key held.
+        // `tests/keyboard_matrix.rs` pins the same value from outside this file, across the
+        // whole membrane, which is what makes the M6 change graded rather than asserted here.
+        let mut ula = ula();
+        assert_eq!(ula.in_port(0xFEFE), 0xBF);
+        assert_eq!(
+            0xBF,
+            UNDRIVEN_INPUT_BITS | 0x1F,
+            "bit 6 clear, bits 0-4 high"
+        );
+    }
+
+    #[test]
+    fn the_ear_bit_follows_the_tape_and_nothing_else_does() {
+        // Bit 6 tracks the level; the keyboard bits must not move with it.
+        let mut ula = ula();
+        ula.insert_tape(Tape::new(vec![4, 4]));
+        assert_eq!(ula.in_port(0xFEFE) & EAR_BIT, 0, "low before playback");
+
+        ula.tape_mut().play();
+        ula.tick(UNCONTENDED);
+        ula.tick(UNCONTENDED);
+        ula.tick(UNCONTENDED);
+        ula.tick(UNCONTENDED);
+        assert_eq!(ula.in_port(0xFEFE), 0xBF | EAR_BIT, "high after one pulse");
+        assert_eq!(
+            ula.in_port(0xFEFE) & !EAR_BIT,
+            0xBF,
+            "and nothing else moved"
+        );
+    }
+
+    #[test]
+    fn a_contention_stall_moves_the_tape_and_not_only_the_ticks() {
+        // The property `Ula::advance` exists for. A contended read at this phase costs
+        // 6 T-states of stall and then its 3 nominal ones; an uncontended one costs 3. A tape
+        // driven from `tick` alone would see 3 in both cases and run slow by exactly the
+        // contention a loader suffers — silently, because nothing else would move.
+        //
+        // The first half-period is 9 T-states long, so the level flips at the end of the
+        // contended read and does not flip at the end of the uncontended one. One tape, two
+        // addresses, and the only difference between the runs is the stall.
+        for (address, flipped) in [(CONTENDED, true), (UNCONTENDED, false)] {
+            let mut ula = at(FIRST_CONTENDED_T_STATE);
+            ula.insert_tape(Tape::new(vec![9, 100]));
+            ula.tape_mut().play();
+            read_cycle(&mut ula, address);
+            assert_eq!(
+                ula.tape.level(),
+                flipped,
+                "a read at {address:#06X} left the tape at the wrong place"
+            );
+        }
+    }
+
+    #[test]
+    fn setting_the_border_charges_no_machine_cycle() {
+        // Why `set_border` exists at all. `out_port` would move the clock by an I/O cycle's
+        // contention and leave `covered_t_states` armed at four, so the next instruction's
+        // first four ticks would be charged as an open cycle and skip their contention.
+        let mut ula = at(FIRST_CONTENDED_T_STATE);
+        ula.set_border(Colour::new(5));
+        assert_eq!(ula.border(), Colour::new(5));
+        assert_eq!(ula.clock.frame_t_state(), FIRST_CONTENDED_T_STATE);
+        assert_eq!(ula.covered_t_states, 0, "no cycle is open");
+
+        // The same border through the bus does all three of those things.
+        let mut through_the_bus = at(FIRST_CONTENDED_T_STATE);
+        through_the_bus.out_port(0x00FE, 5);
+        assert_ne!(
+            through_the_bus.clock.frame_t_state(),
+            FIRST_CONTENDED_T_STATE
+        );
+        assert_eq!(through_the_bus.covered_t_states, PORT_ACCESS_T_STATES);
+    }
+
+    #[test]
+    fn setting_the_frame_position_moves_neither_the_frame_counter_nor_the_tape() {
+        let mut ula = ula();
+        ula.insert_tape(Tape::new(vec![10, 10]));
+        ula.tape_mut().play();
+        ula.clock.advance(T_STATES_PER_FRAME * 2 + 5);
+
+        ula.set_frame_t_state(30_000);
+        assert_eq!(ula.clock.frame_t_state(), 30_000);
+        assert_eq!(ula.clock.frames(), 2, "uptime is not rewound by a load");
+        assert!(!ula.tape.level(), "a restore is not elapsed time");
+    }
+
+    #[test]
+    fn reset_does_not_rewind_the_tape() {
+        // Pressing reset does not rewind a cassette.
+        let mut ula = ula();
+        ula.insert_tape(Tape::new(vec![2, 2, 2]));
+        ula.tape_mut().play();
+        ula.tick(UNCONTENDED);
+        ula.tick(UNCONTENDED);
+        assert!(ula.tape.level());
+        ula.reset();
+        assert!(ula.tape.level(), "the head stays where it was");
+        assert_eq!(ula.clock, Clock::new());
     }
 
     #[test]

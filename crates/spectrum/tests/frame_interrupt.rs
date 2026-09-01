@@ -10,9 +10,9 @@
 //!
 //! # What is graded here
 //!
-//! - The line is asserted at frame position zero, and stays asserted for exactly
-//!   [`INTERRUPT_T_STATES`] — checked at each position it reaches, and at the last T-state
-//!   inside the window and the first outside it.
+//! - The line is asserted at frame position zero, and both edges of the window are pinned by
+//!   **literals** — the line is low at 31 and released at 32 — so the file has a failing case
+//!   whichever way the window moves.
 //! - Acceptance as a function of `IFF1` **and** position, as one table rather than as
 //!   separate cases: the window and the flip-flop are two independent reasons to decline and
 //!   a gate that varies one at a time cannot see them interact.
@@ -21,15 +21,48 @@
 //!   evidence available here: it is not this crate asserting that it raised an interrupt, it
 //!   is Sinclair's interrupt handler being reached, executing, and leaving a number behind.
 //!
+//! # This file used to grade the window against its own constant
+//!
+//! Every position it sampled **and** every value it expected came from [`INTERRUPT_T_STATES`],
+//! the constant it appears to pin. That is the keyboard-matrix tautology again — the gate that
+//! derived both the port it scanned and the byte it expected from `Key::position()`, and under
+//! which 38 of 40 keys could be rewired with the whole suite green.
+//!
+//! It was **measured**, not inferred. `INTERRUPT_T_STATES` moved 32 → 24 reddened exactly one
+//! test in the workspace and it was not in this file; it was
+//! `frame_boundary.rs`'s `an_overshoot_past_the_interrupt_window_misses_that_frames_interrupt`.
+//! Moving it 32 → **33** did redden this file — but only by an accident of divisibility: a
+//! `NOP` is four T-states, 33 is not a multiple of four, and the sampling loop could no longer
+//! land on it. A one-sided pin held up by an accident reads in a run log exactly like a
+//! two-sided one.
+//!
+//! The fix is the one the keyboard got: **expectations that owe nothing to the constant under
+//! test**. [`LAST_ASSERTED_POSITION`] and [`FIRST_RELEASED_POSITION`] are literals, written out
+//! separately rather than one derived from the other, and `frame_boundary.rs`'s overshoot case
+//! is the model — it uses 31 and 32 and names the constant nowhere.
+//!
+//! ## A derived *position* is not a derived *expectation*
+//!
+//! The distinction is the reusable half of this, and it is why [`INTERRUPT_T_STATES`] still
+//! appears once below. [`halt_is_escaped_by_the_frame_interrupt`] advances to it as a way of
+//! saying *"wherever the window ends, get past it"* — a **precondition**, which stays true and
+//! stays legible whatever the constant becomes. A test that computes what it expects to
+//! observe from the subject has no failing case; a test that computes where to stand has one,
+//! and it is the assertion it then makes.
+//!
 //! # What is not graded here
 //!
-//! - **The 32 T-state window length itself.** It is asserted to be what the crate says it is,
-//!   which pins it against drift; no oracle in this project measures it against hardware. A
-//!   machine holding the line for 24 or 48 T-states would pass every assertion here after
-//!   the constant was changed to match.
+//! - **Whether 32 is the right number.** Both edges are now pinned by literals, which catches
+//!   drift in either direction; nothing in this project compares 32 to hardware.
+//!   `docs/STATUS.md` carries that as an open row and `timing_oracle.rs` is demonstrated
+//!   unable to close it — the oracle is green at 24.
+//! - **The line's state deep inside a frame.** Nothing here samples past the window's far
+//!   edge. `frame_boundary.rs` is the witness: its overshoot case spins a whole frame waiting
+//!   for the next offer, and would accept immediately if the line were held frame-wide.
 //! - **Interrupt modes 0 and 2.** The Spectrum's bus floats to `RST 38h`, so mode 0 lands
 //!   where mode 1 does and mode 2 is never used by the 48K ROM. `crates/spectrum/src/lib.rs`
-//!   covers the mode 0 case; nothing here or anywhere else grades mode 2 on a machine.
+//!   covers the mode 0 case; `block_interrupt.rs` and `interrupt_block_families.rs` drive
+//!   mode 2 through the machine.
 //! - **`docs/STATUS.md` still records that interrupts have no external oracle at all** — no
 //!   FUSE vector injects one and no exerciser generates one. Everything here grades the
 //!   *machine's* side of the wire against this crate's own model of it.
@@ -43,6 +76,21 @@ use common::{
 use spectrum::Spectrum;
 use spectrum::timing::INTERRUPT_T_STATES;
 use z80::InterruptMode;
+
+/// The last frame position at which the ULA is still holding `/INT` low.
+///
+/// **A literal, and that is the entire point of it.** Every window position in this file used
+/// to be `INTERRUPT_T_STATES` or `INTERRUPT_T_STATES - 1`, so the constant supplied both sides
+/// of every comparison and the file had no failing case for the property it appeared to test.
+/// Written out here as a number a reader can check against the published 48K figure, and
+/// **not** as `FIRST_RELEASED_POSITION - 1`: two literals cannot slide together, one literal
+/// and an offset from it can.
+const LAST_ASSERTED_POSITION: u32 = 31;
+
+/// The first frame position at which the line has been released.
+///
+/// The other literal. See [`LAST_ASSERTED_POSITION`].
+const FIRST_RELEASED_POSITION: u32 = 32;
 
 /// Where a mode 1 interrupt vectors.
 const MODE_1_VECTOR: u16 = 0x0038;
@@ -113,14 +161,20 @@ fn the_line_is_asserted_at_the_top_of_the_frame() {
 fn the_line_is_held_across_the_whole_window_and_drops_at_its_end() {
     // Sampled at every position the machine actually reaches, rather than at the boundary
     // alone: a line that flickered inside the window would pass a boundary-only check.
+    //
+    // The loop's bound and its landing are both literals now. That is what makes this a gate
+    // rather than a restatement: at a 24 T-state window the sample taken at position 24 finds
+    // the line already released and fails inside the loop; at 33 the landing at 32 finds it
+    // still low and fails after it. One test, a failing case in each direction.
     let mut machine = machine();
     write_program(&mut machine, UNCONTENDED_CODE, &[NOP; 16]);
     set_pc(&mut machine, UNCONTENDED_CODE);
 
-    while machine.frame_t_state() < INTERRUPT_T_STATES {
+    while machine.frame_t_state() <= LAST_ASSERTED_POSITION {
         assert!(
             machine.ula().interrupt_asserted(),
-            "/INT dropped at frame position {}, inside the {INTERRUPT_T_STATES} T-state window",
+            "/INT dropped at frame position {}, which is at or before {LAST_ASSERTED_POSITION} \
+             and so inside the window",
             machine.frame_t_state()
         );
         machine.step();
@@ -128,30 +182,38 @@ fn the_line_is_held_across_the_whole_window_and_drops_at_its_end() {
 
     assert_eq!(
         machine.frame_t_state(),
-        INTERRUPT_T_STATES,
-        "uncontended NOPs should land exactly on the end of the window"
+        FIRST_RELEASED_POSITION,
+        "a NOP is four T-states and {FIRST_RELEASED_POSITION} is a multiple of four, so \
+         uncontended NOPs from the top of the frame land exactly on it"
     );
     assert!(
         !machine.ula().interrupt_asserted(),
-        "/INT must drop once the window has elapsed"
+        "/INT must be released by frame position {FIRST_RELEASED_POSITION}"
     );
 }
 
 #[test]
 fn the_last_t_state_inside_the_window_still_asserts_and_the_first_outside_does_not() {
     // The boundary itself, positioned exactly rather than stepped over — the sampling above
-    // can only land on multiples of a NOP.
-    let inside = machine_at(INTERRUPT_T_STATES - 1);
-    assert_eq!(inside.frame_t_state(), INTERRUPT_T_STATES - 1);
+    // can only land on multiples of a NOP, so 31 is a position no other test in this file
+    // reaches.
+    //
+    // The two positions are one T-state apart and are the two literals. Everything else about
+    // the two machines is identical.
+    let inside = machine_at(LAST_ASSERTED_POSITION);
+    assert_eq!(inside.frame_t_state(), LAST_ASSERTED_POSITION);
     assert!(
         inside.ula().interrupt_asserted(),
-        "the window includes its last T-state"
+        "the line must still be low at frame position {LAST_ASSERTED_POSITION}: a window \
+         shorter than that has already let go"
     );
 
-    let outside = machine_at(INTERRUPT_T_STATES);
+    let outside = machine_at(FIRST_RELEASED_POSITION);
+    assert_eq!(outside.frame_t_state(), FIRST_RELEASED_POSITION);
     assert!(
         !outside.ula().interrupt_asserted(),
-        "the window excludes the T-state after its last"
+        "and it must be released by {FIRST_RELEASED_POSITION}: a window longer than that is \
+         still holding it"
     );
 }
 
@@ -166,24 +228,27 @@ fn machine_at(at: u32) -> Spectrum {
 fn acceptance_depends_on_iff1_and_on_the_position_in_the_window() {
     // One table over both reasons to decline. The two are independent, and separate tests
     // that each hold one fixed cannot show that either alone is sufficient.
+    //
+    // The positions are the two literals, so the rows carry their own claim about where the
+    // window ends rather than restating the constant back at itself.
     let cases = [
         ("open window, interrupts enabled", 0, true, true),
         (
             "last T-state of the window, interrupts enabled",
-            INTERRUPT_T_STATES - 1,
+            LAST_ASSERTED_POSITION,
             true,
             true,
         ),
         (
             "one T-state past the window, interrupts enabled",
-            INTERRUPT_T_STATES,
+            FIRST_RELEASED_POSITION,
             true,
             false,
         ),
         ("open window, interrupts disabled", 0, false, false),
         (
             "last T-state of the window, interrupts disabled",
-            INTERRUPT_T_STATES - 1,
+            LAST_ASSERTED_POSITION,
             false,
             false,
         ),
@@ -228,6 +293,13 @@ fn acceptance_depends_on_iff1_and_on_the_position_in_the_window() {
 fn halt_is_escaped_by_the_frame_interrupt() {
     // Positioned past the window first, so the `HALT` genuinely executes rather than being
     // pre-empted by the offer waiting at the top of the frame.
+    //
+    // **The one place [`INTERRUPT_T_STATES`] is still read, and deliberately.** It is a
+    // position, not an expectation: the sentence it encodes is "wherever the window ends, get
+    // past it", which stays both true and legible whatever the constant becomes. Substituting
+    // the literal 32 here would make this test red under a 33 T-state window for a reason that
+    // has nothing to do with `HALT` — the offer would pre-empt the instruction — which is a
+    // worse failure message than the ones the window's own gates already produce.
     let mut machine = machine();
     advance_to(&mut machine, INTERRUPT_T_STATES);
     write_program(&mut machine, UNCONTENDED_CODE, &[HALT]);

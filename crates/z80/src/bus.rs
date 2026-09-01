@@ -23,14 +23,25 @@
 //!
 //! | Machine cycle | T-states | Address driven | Transfer method |
 //! |---|---|---|---|
-//! | Opcode fetch (M1) | 4 | `PC` | [`Bus::fetch`] |
-//! | Memory read or write | 3 | the address transferred | [`Bus::read`] / [`Bus::write`] |
-//! | I/O port read or write | 4 | the port | [`Bus::in_port`] / [`Bus::out_port`] |
+//! | Opcode fetch (M1) | [`OPCODE_FETCH_T_STATES`] | `PC` | [`Bus::fetch`] |
+//! | Memory read or write | [`MEMORY_ACCESS_T_STATES`] | the address transferred | [`Bus::read`] / [`Bus::write`] |
+//! | I/O port read or write | [`PORT_ACCESS_T_STATES`] | the port | [`Bus::in_port`] / [`Bus::out_port`] |
 //! | Internal operation | instruction-specific | `IR`, or the last address used | none |
 //!
 //! That last column is what makes a cycle's *length* knowable from the call stream. Without
 //! it a three-T-state read followed by one internal cycle is indistinguishable from a
 //! four-T-state opcode fetch — see [`Bus::fetch`], which exists for exactly that reason.
+//!
+//! The three lengths are **exported**, not merely tabulated, and the reason is that the
+//! table above is not documentation of an internal choice — it is the **decoding key for
+//! the call stream**. An implementation cannot honour the contract without them: to tell a
+//! tick that belongs to the cycle a transfer just opened from a standalone internal cycle
+//! that must contend on its own account, it has to know how long that cycle is. A
+//! contention model that guesses instead has already been written here once, and
+//! `docs/MACHINE.md` records what the guess cost. So these are part of what the trait
+//! promises rather than an implementation detail a machine happens to need, and a machine
+//! that had to re-transcribe them would be keeping a second copy of the crate's own
+//! knowledge — with nothing to notice if the two ever disagreed.
 //!
 //! # Implementors should mark every method `#[inline]`
 //!
@@ -38,6 +49,23 @@
 //! but LLVM will not inline across a crate boundary unless the callee is either marked
 //! `#[inline]` or reachable through LTO. Since `fetch`, `read` and `write` are the hottest
 //! calls in the emulator, the annotation is worth the two seconds it costs.
+
+/// T-states an opcode fetch (M1) occupies, delivered as that many [`Bus::tick`] calls.
+///
+/// One of the three published Z80 machine-cycle lengths that make a cycle's *length*
+/// knowable from the call stream — see the module documentation for why they are part of
+/// this trait's contract rather than an internal constant.
+pub const OPCODE_FETCH_T_STATES: u8 = 4;
+
+/// T-states a memory read or write cycle occupies.
+///
+/// See [`OPCODE_FETCH_T_STATES`].
+pub const MEMORY_ACCESS_T_STATES: u8 = 3;
+
+/// T-states an I/O port read or write cycle occupies.
+///
+/// See [`OPCODE_FETCH_T_STATES`].
+pub const PORT_ACCESS_T_STATES: u8 = 4;
 
 /// Memory and I/O as seen by the Z80, plus the clock the CPU advances as it runs.
 ///

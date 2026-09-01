@@ -35,6 +35,12 @@
 //!
 //! ## What the boot gate was measured to prove, which is much less than it looks
 //!
+//! **These verdicts were taken at commit `2157331`, against the boot *example*.** At that
+//! commit there was no `crates/spectrum/tests/` directory; the gate was
+//! `crates/spectrum/examples/boot.rs`, and `cargo test` builds an example without ever
+//! calling its `main`. So every "green" below means green under a program nothing ran. The
+//! table is left exactly as it was recorded, and what it is worth is corrected beneath it.
+//!
 //! This table used to end with "*All of it together* — **the boot gate**". That row was
 //! doing almost none of the work it claimed. Measured by mutation, each verified present in
 //! the file before its verdict was trusted:
@@ -52,6 +58,39 @@
 //! the one number that *did* discriminate — the frame the message first appeared on — was
 //! printed and never asserted, so it caught nothing. `tests/boot.rs` now asserts it.
 //!
+//! ### Re-measured against the whole workspace, where the claim got smaller and sharper
+//!
+//! A coverage table is a claim about a *run*, and naming the wrong run makes every row wrong
+//! at once — in both directions. Re-run under `cargo test --workspace`, **four of the five
+//! green rows above were already red**, from unit tests inside `src` that an uncalled
+//! example never involved. **Exactly one** of the five survived the whole workspace — the
+//! contention phase off by one — together with a permutation of the keyboard matrix that
+//! **is not in the table above at all**, which a cold review found.
+//!
+//! > That count was itself reported as *three of five* for a while, and was corrected to
+//! > four when it was measured properly rather than carried forward. It is noted rather than
+//! > silently bumped, because a re-measured number that changes quietly is the same defect
+//! > this whole section is about.
+//!
+//! So the before-picture is not "five properties were ungraded". It is that the machine's
+//! behaviour was tested **in isolation and never through the machine**, and that the
+//! contention phase and the keyboard-matrix wiring had no gate in any form. That is the
+//! smaller claim, and it is what makes those two survivors the significant ones:
+//! `tests/contention_phase.rs` and `tests/keyboard_matrix.rs` exist because those were the
+//! only two properties nothing anywhere could see.
+//!
+//! **Which four were already red is not recorded, and is not derived here.** Re-running the
+//! five mutations under `cargo test -p spectrum --lib` names them, because the lib target
+//! alone is what "unit tests inside `src`" means; whoever wants that list should take it
+//! that way rather than infer it from the table below. Use `--no-fail-fast` for anything
+//! wider: `cargo test` stops at the first failing target, and "the integration gates did not
+//! run" is indistinguishable from "the integration gates passed".
+//!
+//! The next table therefore **disagrees with the one above on every green row** — the
+//! interrupt, the keyboard, ROM writes and both halves of contention each have a gate now,
+//! six in `crates/spectrum/tests/` between them. That is the correction and not a
+//! contradiction: the rows above describe `2157331`, the rows below describe this commit.
+//!
 //! ## What is asserted, and by what
 //!
 //! | Property | Evidence |
@@ -64,13 +103,38 @@
 //! | Keyboard matrix | `tests/keyboard_matrix.rs` — the full 40 key × 8 half-row cross product, against a membrane table written independently of [`keyboard`]'s own map, plus the two absolute anchors |
 //! | 50 Hz interrupt | `tests/frame_interrupt.rs` — the line, its window, acceptance against `IFF1` × position, `HALT` escape, and the real ROM's own `FRAMES` counter advancing once per frame |
 //! | Contention *magnitude* | `tests/contention_magnitude.rs` — the same instruction one bank apart, per phase and over a run, driven through a real `Cpu<Ula>` |
+//! | Read-modify-write contention, **across the family** | `tests/contention_magnitude.rs` — `INC (HL)` at 26/19 T-states, `RLC (HL)` at 34/27, `INC (IX+d)` and `RLC (IX+d)` at 58/51, and `EX (SP),HL` at 48/41, per contention phase. The family used to be gated by one member, with the rest correct *by construction* — an argument, not a verdict |
+//! | Internal cycles on a **contended refresh address** | `tests/contention_magnitude.rs`. Nothing had ever graded this: only the uncontended case was covered, and it is the case M7 makes routine, since a 128 contends its banks in any slot |
 //! | The whole machine | `tests/boot.rs` — the ROM reaching `© 1982 Sinclair Research Ltd`, **and the frame it does it on** |
 //! | Contention *phase* — [`timing::FIRST_CONTENDED_T_STATE`] | `tests/contention_phase.rs` pins it to the frame's structure. **No oracle.** The derivation is `64 x 224 - 1`; nothing measures it against hardware |
 //! | Floating bus | **nothing** — not modelled; see [`ula`] |
 //! | Progressive drawing: multicolour, border stripes | **nothing** — not modelled; see [`screen`] |
 //! | The 32 T-state interrupt window's *length* | **nothing** — pinned against drift, never measured |
-//! | I/O contention through a real `Cpu<Ula>` | **nothing** — [`ula`]'s unit tests synthesise the tick stream by hand |
+//! | I/O contention through a real `Cpu<Ula>` | `tests/io_contention.rs` — real `IN A,(n)`, `OUT (n),A` and `IN A,(C)` instructions, three forms × four ports × eight contention phases. It was **nothing** until that gate landed; [`ula`]'s unit tests synthesise the tick stream by hand and grade the rule, not the wiring |
 //! | Keyboard ghosting / rollover | **nothing** — not modelled |
+//! | `.z80` and `.sna` **header offsets** | `tests/snapshot_vectors.rs` — a file transcribed byte by byte from the format description, with its expected state written separately. **No round trip covers this**, and that is the point: a field read from the wrong offset by both the parser and the writer survives every round trip |
+//! | The `.z80` run-length codec | `decompress(compress(page)) == page` as a property test in [`snapshot`], with the format description's own example (`ED 00 ED ED 05 00`) as the asymmetric anchor |
+//! | The `.z80` version 3 frame-position counter | exhaustive over all 69888 positions, **which cannot see a wrong formula** — plus **six** positions derived by hand from the format description's sentence, and `libspectrum`'s independent expressions transcribed and compared. *(This row and `docs/M6.md` both said "three" while `the_counter_matches_the_format_descriptions_own_sentence` asserted six. Understated rather than false, and corrected in both places at once, because a correction that leaves another copy standing has only added a disagreement.)* |
+//! | The parsers on hostile input | `tests/snapshot_hostile.rs` — an exhaustive truncation sweep, a single-byte mutation sweep, two `proptest`s, and one case per row of `docs/M6.md`'s hostile-input table. The **structural** half is asserted in [`snapshot`] itself: no indexing expression anywhere in the module, and no allocation sized from the file |
+//! | Our **reading of the two formats** | `tests/snapshot_corpus.rs` — third-party files from three independent emulators, and a `.z80`/`.sna` pair a third party saved from one machine, which is the only external grading `.sna` gets. Corpus-dependent: absent by default, through `crates/testsupport`'s shared policy |
+//! | Whether our **arithmetic** on a format's fields is right | **not the corpus**, and that was measured: under a symmetric mutation of the T-state formula the whole corpus sweep stayed green, because everything it asserts about a foreign file is symmetric in the same way. A foreign file proves a field is *readable*. Only loading one of **our** files in another emulator would settle the arithmetic, and that is observation, not automated, and **not done** |
+//! | `.sna` offsets, without a corpus | **nothing beyond the transcribed vector.** There is no `.sna` writer — [`snapshot::sna`] explains why — so the format has **no round trip at all** |
+//! | Applying a `Snapshot` to a running machine | `tests/snapshot_apply.rs` — **R1** (`snapshot(restore(s)) == s`, format-free and corpus-free) and **R3** (`write(snapshot(restore(parse(f)))) == f`, over bytes). R1 is structurally immune to the permutation R2 fears, because its two halves share no field map: `restore` writes through `Cpu::set_state` and `snapshot` reads through `Cpu::state` |
+//! | Which **address** a restored bank lands at | **not** R1 or R3 — measured: inverting the bank→address map in *both* halves leaves every round trip green. `a_restored_bank_lands_where_the_48k_memory_map_says` is the anchor, and its addresses are the 48K's published map |
+//! | That a restore charges **no machine cycle** | `a_restore_leaves_no_machine_cycle_half_open` and `a_restore_does_not_move_the_tape`. Both were needed: routing the border through `Bus::out_port` turns exactly these two red and leaves R1, R3 and everything else green |
+//! | `frames()` across a load | `a_restore_does_not_rewind_the_machines_uptime`, plus unit tests in [`timing`] and [`ula`]. A **convention**, not a measurement — no format carries a frame count |
+//! | The tape's **pulse timings** | `tests/tape_rom_timings.rs` — the ROM's own `SA-BYTES` run on the machine and its `MIC` edges measured, compared to our converter's train for the same bytes, contention removed so the comparison is an equality. 3305 half-periods, two implementations, no shared code. It found two deviations the derivation had not predicted and one it had got wrong |
+//! | The tape's timings against **hardware** | **nothing.** The ROM defines what a `.tap` means and every loader was written against it, but nobody here has measured a real Spectrum |
+//! | The `.tap` **block framing** | `tests/tape_corpus.rs` — third-party tapes, decoded back out of the pulse train and checked against **somebody else's parity byte** over 14300-byte blocks. Corpus-dependent, through `crates/testsupport`'s shared policy |
+//! | The pulse train's **shape** | `tests/tape_signal.rs` — a one-byte block written out by hand from the format's rule, a decoder this project wrote reading it back, and a `proptest` over arbitrary payloads |
+//! | The `EAR` bit reaching the CPU | `tests/tape_rom_load.rs` — **the M6 gate.** The real ROM's `LD-BYTES` loads a tape through bit 6 of port `0xFE` (**T2**), and a program we wrote loads from tape and then *computes* a value that appears nowhere in its own bytes (**T3**). `no_shortcut_exists_past_the_ear_bit` is the standing assertion that nothing supplies a byte by any other route |
+//! | The tape seeing **contention** | `the_tape_advances_by_contention_as_well_as_by_ticks` and a unit test in [`ula`]. Measured: a tape driven from `Bus::tick` alone leaves both red and **leaves the ROM load gates green**, because the loader's thresholds are hundreds of T-states wide |
+//! | Contention *during* a load | **nothing.** It is exercised on every one of the loader's thousands of port reads and it is not graded — the loader does not depend on it |
+//! | Timing **precision** on a load | **nothing.** Measured: one T-state wrong in a sync pulse, one in the pilot period, or one pulse missing from the pilot tone all leave T2 and T3 green. That is what `tests/tape_rom_timings.rs` is for, and it is why T2 grades the mechanism rather than the numbers |
+//! | Issue 2 / issue 3 `EAR` readback | **nothing** — not modelled; writing bit 3 or 4 does not change what bit 6 reads. A real cause of *"loads on one emulator and not another"* |
+//! | The `EAR` sampling point within an `IN` cycle | **nothing.** Approximated to the start of the cycle, ≤4 T-states early — far inside the ROM's tolerance, and a turbo loader failing is what would decide it |
+//! | Turbo loaders, and a real game | **nothing.** `.tap` cannot represent a turbo loader at any speed; `.tzx` can and is deferred. A real game is T4 — observation, corpus-dependent, and **not done** |
+//! | `CpuState::wz`, `CpuState::q`, `halted` across a load | **no format carries them.** Enumerated in [`snapshot::UNPRESERVED`] and each one proven to be dropped, because a field dropped in *both* directions is the one defect a round trip is green for |
 //!
 //! The rows reading **nothing** are the point of this table. `docs/MACHINE.md` asks for what
 //! is *not* covered to be written down rather than inferred from the absence of a failing
@@ -81,14 +145,19 @@
 pub mod keyboard;
 pub mod memory;
 pub mod screen;
+pub mod snapshot;
+pub mod tape;
 pub mod timing;
 pub mod ula;
 
 pub use keyboard::{Key, Keyboard};
 pub use memory::{Memory, RomSizeError};
 pub use screen::{Colour, Frame};
+pub use snapshot::Snapshot;
+pub use tape::Tape;
 pub use ula::{FLOATING_BUS_BYTE, Ula};
 
+use memory::{BankIndex, PAGE_SIZE, Slot};
 use z80::{Cpu, CpuState, StepError};
 
 /// A ZX Spectrum 48K.
@@ -248,6 +317,126 @@ impl Spectrum {
     pub fn border(&self) -> Colour {
         self.cpu.bus().border()
     }
+
+    /// This machine's whole state, as a value a snapshot format can encode.
+    ///
+    /// The CPU, the border, the frame position, and every RAM bank the **slot map** currently
+    /// exposes. ROM is not carried: no format carries it, and a machine that loaded one would
+    /// be loading somebody else's ROM.
+    ///
+    /// The frame *counter* is not carried either — see [`Spectrum::restore`].
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        let ula = self.cpu.bus();
+        let mut snapshot =
+            Snapshot::new(self.cpu.state(), ula.border(), ula.clock().frame_t_state());
+        for (bank, base) in exposed_banks(ula.memory()) {
+            let mut page = Box::new([0_u8; PAGE_SIZE]);
+            for (offset, byte) in (0..PAGE_SIZE_U16).zip(page.iter_mut()) {
+                *byte = ula.memory().read(base.wrapping_add(offset));
+            }
+            snapshot.set_bank(bank, page);
+        }
+        snapshot
+    }
+
+    /// Put `snapshot`'s state into this machine.
+    ///
+    /// **Nothing is stepped, nothing is ticked, and no contention is charged.** A restore is
+    /// not a machine cycle, so it goes through [`Ula`]'s own setters rather than through the
+    /// bus — `docs/M6.md` Decision 2. Two things go wrong if it does not, and both were
+    /// measured rather than reasoned about: a port cycle **advances the clock by its
+    /// contention stall, and the tape advances with the clock**, so a restore would move the
+    /// head; and it leaves the ULA's cycle bookkeeping armed for four T-states, which the next
+    /// **bare tick** — an interrupt acknowledge is seven of them, with no transfer in between —
+    /// would spend on contention it owes.
+    ///
+    /// Three things deliberately survive the load, and each is a convention rather than a
+    /// measurement because no format carries the field:
+    ///
+    /// - **[`Spectrum::frames`]** — the machine's uptime. The boot gate asserts on it and the
+    ///   FLASH phase derives from it, so rewinding it would make one number mean two things.
+    ///   The visible cost is a snapshot taken mid-flash rendering inverted for up to
+    ///   [`screen::FLASH_FRAMES`] frames after loading.
+    /// - **The ROM**, which no format carries.
+    /// - **The tape**, because loading a snapshot does not eject a cassette.
+    ///
+    /// A bank the snapshot carries that the slot map does not expose is dropped. It cannot
+    /// happen at M6 — the parsers reject any page a 48K does not have, and
+    /// `the_bank_set_matches_what_the_48k_slot_map_exposes` in [`snapshot`] compares the two
+    /// sets against each other rather than reasoning about them — and it is what
+    /// `Memory::bank_mut` becomes unavoidable for at M7, where a 128 snapshot carries banks
+    /// that are paged out and therefore have no address at all.
+    pub fn restore(&mut self, snapshot: &Snapshot) {
+        self.cpu.set_state(snapshot.cpu);
+        let ula = self.cpu.bus_mut();
+        ula.set_border(snapshot.border);
+        ula.set_frame_t_state(snapshot.frame_t_state);
+
+        for (bank, page) in snapshot.banks() {
+            let Some(base) = slot_address(ula.memory(), bank) else {
+                continue;
+            };
+            for (offset, &byte) in (0..PAGE_SIZE_U16).zip(page.iter()) {
+                ula.memory_mut().write(base.wrapping_add(offset), byte);
+            }
+        }
+    }
+
+    /// Put a tape in the drive, stopped. [`Spectrum::tape_mut`] is how it is started.
+    pub fn insert_tape(&mut self, tape: Tape) {
+        self.cpu.bus_mut().insert_tape(tape);
+    }
+
+    /// The tape in the drive — how a frontend or a test plays, stops or rewinds it.
+    ///
+    /// With nothing inserted this is a blank tape rather than a `None`: a drive with no
+    /// cassette and a cassette with nothing on it drive the `EAR` line identically, so there
+    /// is no state for a caller to distinguish and no option for it to unwrap.
+    pub fn tape_mut(&mut self) -> &mut Tape {
+        self.cpu.bus_mut().tape_mut()
+    }
+}
+
+/// [`PAGE_SIZE`] as the `u16` offset bound the address arithmetic wants.
+///
+/// Converted once, at compile time, with the conversion asserted — so walking a page needs no
+/// cast at the point of use, which is where a silent truncation would turn into a wrong
+/// address rather than a compile error.
+const PAGE_SIZE_U16: u16 = PAGE_SIZE as u16;
+
+const _: () = assert!(PAGE_SIZE_U16 as usize == PAGE_SIZE);
+
+/// Every RAM bank the slot map exposes, as `(bank, the address it starts at)`.
+///
+/// Derived from [`Memory::slots`] rather than from the 48K's particular map, so this is the
+/// same code on a 128 where the map moves — and so a snapshot's banks are matched to
+/// addresses by the machine's own answer rather than by a table repeated here.
+fn exposed_banks(memory: &Memory) -> impl Iterator<Item = (BankIndex, u16)> {
+    memory
+        .slots()
+        .into_iter()
+        .zip(0..)
+        .filter_map(|(slot, index)| match slot {
+            Slot::Bank(bank) => Some((bank, slot_base(index)?)),
+            Slot::Rom(_) => None,
+        })
+}
+
+/// Where the slot map currently shows `bank`, or `None` if it shows it nowhere.
+fn slot_address(memory: &Memory, bank: BankIndex) -> Option<u16> {
+    exposed_banks(memory)
+        .find(|&(exposed, _)| exposed == bank)
+        .map(|(_, base)| base)
+}
+
+/// The first address slot `index` covers, or `None` if that is not a 16-bit address.
+///
+/// Fallible rather than cast: the slot count and the page size are both constants here, but a
+/// silent `as` would be the one place in this file where a change to either turns a wrong
+/// address into a wrong machine instead of into a compile error or a `None`.
+fn slot_base(index: usize) -> Option<u16> {
+    u16::try_from(index.checked_mul(PAGE_SIZE)?).ok()
 }
 
 #[cfg(test)]

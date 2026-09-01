@@ -21,8 +21,40 @@ or adapted from another emulator.
 
 `DD` and `FD` substitute `IX` or `IY` for `HL` in the following instruction. Held as named
 fields, that becomes a branch inside every `HL`-touching handler. Held as `[u8; 26]` with
-index constants, it is a **constant offset**: one `hl_base: usize` selects HL, IX or IY and
-the entire instruction set works unchanged.
+index constants, it is a **constant offset**: one `PairBase` value — called `base` at every
+site that takes it — selects HL, IX or IY, and the entire instruction set works unchanged.
+
+> **Correction — this sentence named `hl_base`, a symbol that has never existed.**
+> `grep -rn 'hl_base' crates/` returns zero hits, at every commit. The mechanism is real and the
+> argument above is right; the *name* was the wrong part. The value is a `PairBase` newtype over
+> `usize` — `crates/z80/src/registers.rs` — and it is **threaded as a parameter rather than stored
+> as a field**: `pair(base)`, `set_pair(base, value)`, `register_index(base)`,
+> `resolve(operand, index, register_base)`. There is no `base` field on `Cpu`. That is why
+> `DD 29` becomes `ADD IX,IX` with no new code — `add_pair(base, base)` already says it.
+>
+> **It is recorded rather than quietly renamed, because it had already been caught and the fix did
+> not reach this file.** [`ARCHITECTURE.md:150`](ARCHITECTURE.md) carries the note that *"two
+> independent reviewers found `grep hl_base` returning zero hits while this document described it
+> as the decision 'everything hangs on'"*, and [`STATUS.md:540`](STATUS.md)'s M1 hardening-round
+> table records the resolution — *"fixed; `base` threaded, so `DD 29` becomes `ADD IX,IX` with no
+> new code"*. Two documents found the phantom in a third. **Neither of them carried the fix all the
+> way**, and the sweep run for this correction says exactly where it stopped: `ARCHITECTURE.md`
+> attached its correction *beneath* the prose but left the phantom name standing in the sentence
+> above it (`:146`) and in a forward-looking one below (`:162` — *"`hl_base` will sit on top of
+> that"*, future tense about work that has landed under another name); this file received nothing
+> at all. So a reader who grepped today reproduced, in full, the failure a sibling document
+> describes as solved.
+>
+> **That is this project's propagation lesson running backwards.** `STATUS.md` writes it up as *a
+> derived figure repeated across documents acquires authority it never earned* — a wrong claim
+> spreading by being copied. This is the mirror case and it is the quieter one: a **correction**
+> failing to spread, which leaves no trace at all, because the uncorrected copy still reads exactly
+> as it always did. The rule covers both directions: **a correction is not landed until you have
+> grepped for every other copy of the thing you corrected.**
+>
+> Same class as `Cpu::pc()`, which `MACHINE.md` documented as an available method for two
+> milestones and which never existed — `MACHINE.md:383` records that correction. A name is a claim
+> about the code, and it is the cheapest claim in any of these documents to check.
 
 ## Flag register
 
@@ -263,5 +295,18 @@ handler, not after the vector fails.
 | 3 | `zexall` | undocumented flags included — the real gate |
 | 4 | `proptest` | ALU flag invariants against an independent derivation |
 
-These are conformance suites, not code. They are fetched locally into `testdata/` (which is
-gitignored) and never vendored into this repository.
+These are conformance suites, not code. They are fetched locally into `testdata/` and never
+vendored into this repository.
+
+> **Correction — this said `testdata/` is *"gitignored"*, full stop, and that is incomplete in the
+> one place it matters.** `.gitignore` carries `testdata/**` and then **un-ignores by exception**:
+> `!testdata/.gitkeep`, `!testdata/README.md`, `!testdata/roms/`, `!testdata/roms/*.rom`. So the
+> Sinclair 48K ROM **is committed** — `git ls-files testdata/` returns `.gitkeep`, `README.md` and
+> `roms/48.rom` — because Amstrad permits redistributing it, and a subtly wrong ROM is the one
+> corpus failure no harness here would explain. `README.md`'s *Test data* table states this
+> correctly and `MACHINE.md` calls it *"the committed ROM"*; this line did not, and is corrected to
+> match rather than left as the odd one out.
+>
+> Absence is not silent. A missing corpus makes its gate **fail**, naming the fetch instructions;
+> `ZX_CORPUS_ALLOW_MISSING=1` is the deliberate opt-out and is **refused** when `CI` is also set.
+> The rule and its failing cases live in `crates/testsupport`.

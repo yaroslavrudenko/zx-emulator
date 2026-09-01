@@ -18,7 +18,7 @@
 //!     fn tick(&mut self, addr: u16);      // ONE T-state, with the address on the bus
 //! }
 //!
-//! pub struct Cpu<B: Bus>;
+//! pub struct Cpu<B>;
 //! impl<B: Bus> Cpu<B> {
 //!     fn new(bus: B) -> Self;
 //!     fn step(&mut self) -> u32;

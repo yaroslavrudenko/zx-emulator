@@ -6,13 +6,16 @@
 //! matters is the **realtime multiple**, and the useful question is whether it moves when
 //! M2 quadruples the opcode count and M7 puts contention on every access.
 //!
-//! Two buses are measured because they bracket the real machine:
+//! Three cases are measured. The first two bracket the real machine; the third exists so
+//! that a number `ARCHITECTURE.md` has carried since M1 can be re-run rather than re-quoted:
 //!
 //! - `FlatRam` — the cost of the core alone, with a bus that does nothing.
-//! - `PagedRam` — an M7-shaped bus: a slot lookup per access, and per T-state a bank
+//! - `PagedRam<false>` — an M7-shaped bus: a slot lookup per access, and per T-state a bank
 //!   lookup on the driven address plus a stall calculation for contended banks. This is
 //!   the one that predicts the shipped emulator, and the one whose cost the per-T-state
 //!   `Bus::tick` contract makes visible.
+//! - `PagedRam<true>` — the same bus with the bank index masked into range. The difference
+//!   between the two is the cost of an index LLVM cannot prove, and nothing else.
 //!
 //! Run with `cargo bench -p z80`. The counter column reports **T-states per second**, so
 //! the realtime multiple is that figure divided by the Z80's 3.5 MHz — no arithmetic on
@@ -148,15 +151,31 @@ impl Bus for FlatRam {
     }
 }
 
+/// Banks in this stand-in machine. A power of two, which is what lets `MASKED` below
+/// convert a bank index into one the compiler can prove is in range.
+const BANK_COUNT: usize = 4;
+
 /// An M7-shaped bus: every access goes through a slot lookup, and every tick advances a
 /// frame position and computes a contention delay for contended banks.
 ///
 /// This is not the real machine — the real one is M5 and M7 work — but it has the same
 /// per-access and per-tick shape, so it is the honest number to watch as the core grows.
-struct PagedRam {
-    banks: [Vec<u8>; 4],
-    slots: [usize; 4],
-    contended: [bool; 4],
+///
+/// # `MASKED` — the cost of a bank index the compiler cannot prove
+///
+/// `slots` holds a `usize` per slot, so `banks[self.slots[slot]]` is an index LLVM has no
+/// way to bound: it emits a check and a panic path on the hottest path in the machine.
+/// Masking it to `BANK_COUNT - 1` removes the check without changing a single result,
+/// because the value is already in range — the compiler simply could not tell.
+///
+/// `ARCHITECTURE.md` has carried a **6.6 %** figure for that difference since M1 with no
+/// way to re-run it. The two instantiations below are that way: same bus, same workload,
+/// one line apart. `MASKED = false` is the shipped shape and its number must not move when
+/// this parameter was added.
+struct PagedRam<const MASKED: bool> {
+    banks: [Vec<u8>; BANK_COUNT],
+    slots: [usize; BANK_COUNT],
+    contended: [bool; BANK_COUNT],
     t_states: u64,
     frame_position: u32,
 }
@@ -167,7 +186,7 @@ const FRAME_T_STATES: u32 = 70_908;
 /// The ULA's eight-T-state stall pattern, indexed by frame position.
 const CONTENTION_PATTERN: [u8; 8] = [6, 5, 4, 3, 2, 1, 0, 0];
 
-impl PagedRam {
+impl<const MASKED: bool> PagedRam<MASKED> {
     fn new() -> Self {
         let mut flat = vec![0; ADDRESS_SPACE];
         load(&mut flat);
@@ -187,15 +206,22 @@ impl PagedRam {
         }
     }
 
+    /// Slot lookup, then bank lookup. The second index is the one under measurement.
     #[inline]
     fn locate(&self, addr: u16) -> (usize, usize) {
         let address = usize::from(addr);
         let slot = address / BANK_SIZE;
-        (self.slots[slot], address % BANK_SIZE)
+        let bank = self.slots[slot];
+        let bank = if MASKED {
+            bank & (BANK_COUNT - 1)
+        } else {
+            bank
+        };
+        (bank, address % BANK_SIZE)
     }
 }
 
-impl Bus for PagedRam {
+impl<const MASKED: bool> Bus for PagedRam<MASKED> {
     #[inline]
     fn read(&mut self, addr: u16) -> u8 {
         let (bank, offset) = self.locate(addr);
@@ -260,12 +286,34 @@ fn flat_bus(bencher: Bencher) {
         });
 }
 
+/// The M7-shaped bus as it is written today: the bank index is unproven.
 #[divan::bench]
 fn paged_contended_bus(bencher: Bencher) {
     bencher
         .counter(ItemsCount::new(t_states_per_iteration()))
         .with_inputs(|| {
-            let mut cpu = Cpu::new(PagedRam::new());
+            let mut cpu = Cpu::new(PagedRam::<false>::new());
+            cpu.set_state(start_state());
+            cpu
+        })
+        .bench_local_values(|mut cpu| {
+            for _ in 0..STEPS_PER_ITERATION {
+                black_box(cpu.step());
+            }
+            black_box(cpu.bus().t_states)
+        });
+}
+
+/// The same bus with the bank index masked into range — identical results, one fewer
+/// bounds check per memory access. The delta between this and [`paged_contended_bus`] is
+/// what `ARCHITECTURE.md`'s "unproven bank index" row costs, and running both is how that
+/// row gets re-measured instead of re-quoted.
+#[divan::bench]
+fn paged_contended_bus_masked(bencher: Bencher) {
+    bencher
+        .counter(ItemsCount::new(t_states_per_iteration()))
+        .with_inputs(|| {
+            let mut cpu = Cpu::new(PagedRam::<true>::new());
             cpu.set_state(start_state());
             cpu
         })

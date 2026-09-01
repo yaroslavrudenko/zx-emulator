@@ -16,11 +16,21 @@
 //!
 //! # The bank index is provably in range
 //!
-//! `MACHINE.md` Decision 3 requires it and prices it: an unproven index measured **6.6 %**
-//! at M1, and it is free to avoid. [`BankIndex`] and [`RomIndex`] mask on construction
-//! *and* at the point of use, so every `[]` in this module indexes a fixed-size array with
-//! a value the compiler can see is in range. The masks are only correct because the counts
-//! are powers of two, which is asserted at compile time below rather than assumed.
+//! [`BankIndex`] and [`RomIndex`] mask on construction *and* at the point of use, so every
+//! `[]` in this module indexes a fixed-size array with a value the compiler can see is in
+//! range. The masks are only correct because the counts are powers of two, which is
+//! asserted at compile time below rather than assumed.
+//!
+//! **The reason is clarity, and it is no longer speed.** This paragraph used to price the
+//! decision — *"an unproven index measured **6.6 %** at M1"* — and that figure is
+//! **falsified**. `benches/step.rs` now measures the two variants against each other
+//! instead of quoting a number: one bus, one line of difference, and the masked variant
+//! came out *slower* in three runs of four, with the spread inside a single variant larger
+//! than the gap between them. The bounds checks the masking removes are real — they are
+//! visible in the emitted assembly, present in the unmasked instantiation and absent from
+//! the masked one — and on this core they cost nothing measurable. So nobody should read
+//! this module and expect the masks to buy time at M7; they buy a `[]` that cannot panic,
+//! which is worth having on its own. The measurement is in `docs/ARCHITECTURE.md`.
 
 use std::fmt;
 
