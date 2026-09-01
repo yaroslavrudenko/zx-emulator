@@ -83,8 +83,33 @@ pub mod z80;
 use std::fmt;
 
 use crate::memory::{BANK_COUNT, BankIndex, PAGE_SIZE};
+use crate::model::Model;
 use crate::screen::Colour;
 use crate::timing::T_STATES_PER_FRAME;
+
+/// A snapshot of one machine offered to another.
+///
+/// **Both directions are refused, and the symmetry is the point.** A 128 image restored into a
+/// 48K has five banks with nowhere to go, and dropping them silently is the *"silent
+/// last-write-wins"* `docs/M6.md` refused for duplicate pages. The other direction is broken
+/// too and much easier to talk yourself out of: a 48K image carries no paging byte, so
+/// restoring one into a 128 leaves 48K code running against the **128 editor ROM** — a machine
+/// that looks loaded and executes the wrong ROM.
+///
+/// A 128 *can* legitimately host a 48K image — that is what the ROM's own **48 BASIC** menu
+/// entry does, and it is one paging value. Making [`crate::Spectrum::restore`] do it
+/// automatically is deliberately **not** built: it is a second meaning for one method, it needs
+/// a rule for what the un-restored five banks contain, and no caller wants it. Anyone who does
+/// should add a separate entry point rather than weaken this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a {snapshot} snapshot cannot be restored into a {machine}")]
+#[non_exhaustive]
+pub struct ModelMismatch {
+    /// The machine the snapshot describes.
+    pub snapshot: Model,
+    /// The machine it was offered to.
+    pub machine: Model,
+}
 
 /// A field of [`CpuState`](::z80::CpuState) that no snapshot format this crate reads can
 /// carry, and what happens to it instead.
@@ -252,17 +277,58 @@ pub struct Snapshot {
     pub frame_t_state: u32,
     /// One page per RAM bank the file carried, `None` for a bank it did not.
     banks: [Option<Box<[u8; PAGE_SIZE]>>; BANK_COUNT],
+    /// Which machine this describes.
+    ///
+    /// Private and read-only from outside, for the same reason `banks` is: which bank indices
+    /// are meaningful is a property of the model, so a caller able to relabel a 48K snapshot
+    /// as a 128 could hand [`crate::Spectrum::restore`] a value whose bank set and whose claim
+    /// disagree — and the refusal that exists to catch exactly that would pass it.
+    model: Model,
+    /// The `0x7FFD` value the machine stood at, which is its whole memory map.
+    ///
+    /// Meaningless on a 48K beyond its fixed `0x20`, and the entire arrangement of the eight
+    /// banks on a 128 — so a `Snapshot` carrying eight banks without it would describe a
+    /// machine it could not restore.
+    paging_port: u8,
 }
 
 impl Snapshot {
     /// A snapshot with the given CPU, border and frame position, and no memory at all.
+    ///
+    /// A **48K** unless [`Snapshot::set_model`] says otherwise, which is what both parsers
+    /// currently produce and what every caller before M7 meant.
     pub(crate) fn new(cpu: ::z80::CpuState, border: Colour, frame_t_state: u32) -> Self {
+        const DEFAULT_MODEL: Model = Model::Spectrum48K;
         Self {
             cpu,
             border,
             frame_t_state,
             banks: [const { None }; BANK_COUNT],
+            model: DEFAULT_MODEL,
+            paging_port: DEFAULT_MODEL.paging_port_at_reset(),
         }
+    }
+
+    /// Which machine this snapshot describes.
+    #[must_use]
+    pub fn model(&self) -> Model {
+        self.model
+    }
+
+    /// The `0x7FFD` value the machine stood at.
+    pub(crate) fn paging_port(&self) -> u8 {
+        self.paging_port
+    }
+
+    /// Record which machine this describes, and the memory map it stood in.
+    ///
+    /// One setter for both, because they are one fact: a model without its paging byte cannot
+    /// arrange a 128's banks, and a paging byte without its model cannot be checked against the
+    /// machine it is offered to. Splitting them is how a `Snapshot` comes to hold a 128's map
+    /// and a 48K's label.
+    pub(crate) fn set_model(&mut self, model: Model, paging_port: u8) {
+        self.model = model;
+        self.paging_port = paging_port;
     }
 
     /// The contents of `bank`, or `None` if the snapshot does not carry it.
@@ -309,6 +375,8 @@ impl fmt::Debug for Snapshot {
             .map(|(bank, page)| format!("{}:{:016x}", bank.get(), digest(page)))
             .collect();
         f.debug_struct("Snapshot")
+            .field("model", &self.model)
+            .field("paging_port", &format_args!("{:#04X}", self.paging_port))
             .field("cpu", &self.cpu)
             .field("border", &self.border)
             .field("frame_t_state", &self.frame_t_state)

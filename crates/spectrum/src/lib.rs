@@ -31,7 +31,35 @@
 //! # Verification, honestly
 //!
 //! M1–M4 had oracles: FUSE grades an instruction, `zexdoc` and `zexall` grade the
-//! processor. **Nothing grades a machine.**
+//! processor. This section used to continue **"Nothing grades a machine."**
+//!
+//! **That is no longer true, and the correction is narrower than the sentence it replaces.**
+//! `crates/spectrum/tests/timing_oracle.rs` runs Richard Butler's 48K timing suite — T-state
+//! counts measured on real Spectrums — and grades this machine against them. What it
+//! establishes, stated at exactly its own width:
+//!
+//! > **The first contended T-state falls exactly 14335 T-states after `/INT`**, given that this
+//! > machine asserts `/INT` at frame T-state 0.
+//!
+//! Two neighbouring things stay open, each because a mutation of it left the oracle *green*:
+//! the frame's **origin** is a convention (moving `/INT` and the window together passes), and
+//! `64 x 224` is measured only as its **product** and not as its factors.
+//!
+//! **A third used to be on that list and has come off it, which is worth more than the row.**
+//! [`timing::INTERRUPT_T_STATES`] was called unmeasured on the strength of one mutation, 32 →
+//! 24, coming back green. Sweeping the whole range 1–65 pins it to **`17..=32`**, with 24 sitting
+//! comfortably inside the band — so the single sample was not evidence of insensitivity, it was
+//! a sample from the flat part of a curve with sharp edges either side. That is this project's
+//! standing failure, *"reporting the absence of a distinguishing test as evidence of
+//! correctness"*, in the form where one probe of a parameter is read as a verdict about the
+//! parameter. Details, including the 14–16 band nothing explains, are in
+//! [`timing::Timing::SPECTRUM_48K`].
+//!
+//! **The rest of the old sentence is not merely still true, it is the stronger claim.** The
+//! floating bus, progressive drawing and keyboard ghosting are **not modelled**, so they are
+//! not *gradeable* rather than ungraded — the suite's own groups 35–37 are excluded by name for
+//! exactly that reason. And **none of it transfers to the 128**, whose contention figures are
+//! transcribed from a source that cites nothing; see [`timing::Timing::SPECTRUM_128`].
 //!
 //! ## What the boot gate was measured to prove, which is much less than it looks
 //!
@@ -106,7 +134,19 @@
 //! | Read-modify-write contention, **across the family** | `tests/contention_magnitude.rs` — `INC (HL)` at 26/19 T-states, `RLC (HL)` at 34/27, `INC (IX+d)` and `RLC (IX+d)` at 58/51, and `EX (SP),HL` at 48/41, per contention phase. The family used to be gated by one member, with the rest correct *by construction* — an argument, not a verdict |
 //! | Internal cycles on a **contended refresh address** | `tests/contention_magnitude.rs`. Nothing had ever graded this: only the uncontended case was covered, and it is the case M7 makes routine, since a 128 contends its banks in any slot |
 //! | The whole machine | `tests/boot.rs` — the ROM reaching `© 1982 Sinclair Research Ltd`, **and the frame it does it on** |
-//! | Contention *phase* — [`timing::FIRST_CONTENDED_T_STATE`] | `tests/contention_phase.rs` pins it to the frame's structure. **No oracle.** The derivation is `64 x 224 - 1`; nothing measures it against hardware |
+//! | Contention *phase* on a **48K** — [`timing::FIRST_CONTENDED_T_STATE`] | `tests/timing_oracle.rs`, **against hardware**, and precisely this much: the first contended T-state falls exactly **14335 T-states after `/INT`**, given `/INT` at frame T-state 0. Of the values near it only 14335 is green — 14333, 14334, 14336, 14337 and 14361 all turn it red. `tests/contention_phase.rs` additionally pins it to the frame's structure. *(This row read **"No oracle"** for a milestone after `timing_oracle.rs` closed it, while [`timing`]'s own module documentation said the opposite three files away. A coverage table is the thing a reader trusts, so of two contradicting statements it was the worse one to leave standing.)* |
+//! | The frame's **origin** and the `64 x 224` **factorisation** | **nothing**, and each is a mutation the oracle came back *green* under. They are the claims the row above must not be read as covering |
+//! | The interrupt window's **length** on a 48K | `tests/timing_oracle.rs`, **against hardware**, as a band rather than a point: a sweep over 1–65 is green only on **`17..=32`**. Below 17 the contended rows disagree; at 33 the suite's *class* flips; from 44 it stops terminating. This row previously read **nothing** on the strength of a single 32 → 24 mutation — one sample from inside the band, mistaken for the band |
+//! | The interrupt window's **length** on a 128 | **nothing, and it is the number the first 128 measurement will actually be sensitive to.** The 128 suite's detection row is a function of this and **not** of the contention offset: 32 predicts 1, `33..=43` predicts the 121 the file carries. 32 is shipped as a labelled hold rather than a belief, and the prediction is asserted in [`timing`] so it goes red the moment anyone moves it |
+//! | Contention phase on a **128** — [`timing::Timing::SPECTRUM_128`] | **nothing that reaches *measured*.** 14361 is transcribed from the World of Spectrum 128K reference and repeated by the Sinclair Wiki **citing no source** — one ancestor seen twice, no primary posting or measurement found. A lower evidence tier than the 48K's 14335, and the two must not be quoted alike |
+//! | The 128's **frame length** — 70908 | **derived, and unusually well.** Three independent lineages agree, `228 x 311` closes it, and the 128 timing suite's own detection row corroborates it arithmetically from its bytes — with a stated blind spot, since that check is periodic in 512 T-states |
+//! | The 128's contention **pattern** and **contended bank set** | **derived**, from the same single ancestry as 14361. `tests/m7_contention.rs` grades the *mechanism* — that contention follows the bank into whichever slot it is paged — which is a different claim from the numbers being right |
+//! | The paging port `0x7FFD` | `tests/m7_paging.rs` — all 256 values through a real `OUT`, the lock's absorbing behaviour, and the derived slot map. The **bit layout** and the **partial decode** both have a primary witness in the Sinclair *Servicing Manual* (§4.3, §4.12.11–12) and are graded here against the transcription; nothing in reach grades the decode's outer family, because no software addresses the port any other way |
+//! | Reading `0x7FFD` | **not modelled, and deliberately.** On the hardware a read latches the floating bus into the paging register — the manual has the latch firing on an *"I/O read or write cycle"* and the Sinclair Wiki reports that reads crash the machine. The value latched **is** the floating bus, which this machine does not model, so implementing it would page to a byte we invented. See [`ula`] |
+//! | The 128's second ROM | `tests/m7_boot_128.rs` — reached **from the keyboard**, through the menu, and confirmed by the ROM's own copyright *year* changing from 1986 to 1982. The two images are also proven distinct at construction in `tests/m7_paging.rs` |
+//! | The shadow screen | `tests/m7_shadow_screen.rs` — bit 3 changing what [`screen::render`] draws **and nothing else**, and the contended set **not** following the screen select. That second property is the one a plausible wrong model passes every bank-5 test with |
+//! | Paging is what makes the 128 different | `tests/m7_bank_signature.rs` — a program that passes on a 128 **and fails in an asserted way on a 48K**. Without the negative half it could be passing for a reason unrelated to paging |
+//! | The interrupt **acknowledge** as one machine cycle | `tests/m7_acknowledge.rs`, through a real `Cpu<Ula>` with `IR` in a contended bank. **Pinned, not graded, and nothing can grade it** — no software on either machine reaches a contended acknowledge, which `ula`'s documentation re-derives on the 128's own geometry rather than inheriting |
 //! | Floating bus | **nothing** — not modelled; see [`ula`] |
 //! | Progressive drawing: multicolour, border stripes | **nothing** — not modelled; see [`screen`] |
 //! | The 32 T-state interrupt window's *length* | **nothing** — pinned against drift, never measured |
@@ -144,6 +184,7 @@
 
 pub mod keyboard;
 pub mod memory;
+pub mod model;
 pub mod screen;
 pub mod snapshot;
 pub mod tape;
@@ -152,20 +193,37 @@ pub mod ula;
 
 pub use keyboard::{Key, Keyboard};
 pub use memory::{Memory, RomSizeError};
+pub use model::Model;
 pub use screen::{Colour, Frame};
-pub use snapshot::Snapshot;
+pub use snapshot::{ModelMismatch, Snapshot};
 pub use tape::Tape;
 pub use ula::{FLOATING_BUS_BYTE, Ula};
 
-use memory::{BankIndex, PAGE_SIZE, Slot};
+use memory::BankIndex;
 use z80::{Cpu, CpuState, StepError};
 
-/// A ZX Spectrum 48K.
+/// A ZX Spectrum — a 48K or a 128.
 ///
 /// Owns the CPU, which owns the [`Ula`], which owns the [`Memory`]. That chain is the
 /// `crates/z80` ownership model rather than a choice made here: the core takes its bus by
 /// value so the calls monomorphise, and reaches it back out through
 /// [`z80::Cpu::bus_mut`].
+///
+/// # One type, because a 48K *is* a 128 that powered on with the lock set
+///
+/// There is no `Spectrum128`, no model generic and no trait. The two machines differ in the
+/// contents of fields that already existed — the slot map, the contended-bank array, the frame
+/// geometry — and in one new byte, the paging port. `M7.md` Decision 1 makes that an equation
+/// rather than a slogan: port value `0x20` derives a 48K's map exactly, and its inability to
+/// page is exactly the lock bit already being set, which [`memory`] asserts at compile time.
+///
+/// The alternative costs more than it looks. A sibling type duplicates **this file's frame
+/// loop** — the part of the crate with the subtlest rules in the project, `MACHINE.md`
+/// Decisions 1 and 2 — and a second copy is a second place to get them wrong, with the copy's
+/// failure invisible until a 128 game runs 20 % long and nothing fails. A `Ula<M: Model>`
+/// generic is worse still: it buys runtime polymorphism nothing needs, since a machine does not
+/// change model mid-run, and pays by monomorphising the whole `Cpu<Ula<M>>` instantiation
+/// twice.
 #[derive(Debug)]
 pub struct Spectrum {
     cpu: Cpu<Ula>,
@@ -174,6 +232,9 @@ pub struct Spectrum {
 impl Spectrum {
     /// Build a 48K holding `rom`, at the start of frame zero.
     ///
+    /// Unchanged by M7 in signature and in meaning: this already meant a 48K, because a 48K
+    /// was the only machine there was.
+    ///
     /// # Errors
     ///
     /// [`RomSizeError`] if `rom` is not exactly one 16 KB page.
@@ -181,6 +242,30 @@ impl Spectrum {
         Ok(Self {
             cpu: Cpu::new(Ula::new(Memory::spectrum_48k(rom)?)),
         })
+    }
+
+    /// Build a 128 holding both its ROMs, at the start of frame zero.
+    ///
+    /// `editor` is the 128's own ROM — page 0, the one it resets into and the one that prints
+    /// `© 1986 Sinclair Research Ltd` — and `basic` is the 48 BASIC ROM its menu's *48 BASIC*
+    /// entry selects with bit 4 of `0x7FFD`.
+    ///
+    /// The machine starts with paging **live**: `0x7FFD` reads as `0x00`, so bank 0 is at
+    /// `0xC000`, the screen is bank 5 and the editor ROM is selected. Everything that follows
+    /// is the guest's business.
+    ///
+    /// # Errors
+    ///
+    /// [`RomSizeError`] if either image is not exactly one 16 KB page.
+    pub fn spectrum_128(editor: &[u8], basic: &[u8]) -> Result<Self, RomSizeError> {
+        Ok(Self {
+            cpu: Cpu::new(Ula::new(Memory::spectrum_128(editor, basic)?)),
+        })
+    }
+
+    /// Which machine this is.
+    fn model(&self) -> Model {
+        self.cpu.bus().memory().model()
     }
 
     /// Press the reset button: CPU and ULA back to their power-on state, RAM untouched.
@@ -320,22 +405,32 @@ impl Spectrum {
 
     /// This machine's whole state, as a value a snapshot format can encode.
     ///
-    /// The CPU, the border, the frame position, and every RAM bank the **slot map** currently
-    /// exposes. ROM is not carried: no format carries it, and a machine that loaded one would
-    /// be loading somebody else's ROM.
+    /// The CPU, the border, the frame position, the model and its paging port, and **every RAM
+    /// bank the machine has**. ROM is not carried: no format carries it, and a machine that
+    /// loaded one would be loading somebody else's ROM.
     ///
     /// The frame *counter* is not carried either — see [`Spectrum::restore`].
+    ///
+    /// # Why this reads banks and not addresses
+    ///
+    /// It used to walk the slot map and read through the addresses each bank appeared at. That
+    /// is correct on a 48K, where all three banks always have an address, and it captures
+    /// **three banks of eight** on a 128, where five of them typically have no address at all.
+    /// [`Memory::bank`] is what makes the difference, and the model is what says how many there
+    /// are — not the slot map, whose premise dissolves the moment paging exists.
+    ///
+    /// The paging port goes with them, because eight banks without the map that arranges them
+    /// do not describe a machine that can be restored.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         let ula = self.cpu.bus();
+        let memory = ula.memory();
         let mut snapshot =
             Snapshot::new(self.cpu.state(), ula.border(), ula.clock().frame_t_state());
-        for (bank, base) in exposed_banks(ula.memory()) {
-            let mut page = Box::new([0_u8; PAGE_SIZE]);
-            for (offset, byte) in (0..PAGE_SIZE_U16).zip(page.iter_mut()) {
-                *byte = ula.memory().read(base.wrapping_add(offset));
-            }
-            snapshot.set_bank(bank, page);
+        snapshot.set_model(memory.model(), memory.paging_port());
+        for &bank in memory.model().banks() {
+            let bank = BankIndex::new(bank);
+            snapshot.set_bank(bank, Box::new(*memory.bank(bank)));
         }
         snapshot
     }
@@ -361,26 +456,49 @@ impl Spectrum {
     /// - **The ROM**, which no format carries.
     /// - **The tape**, because loading a snapshot does not eject a cassette.
     ///
-    /// A bank the snapshot carries that the slot map does not expose is dropped. It cannot
-    /// happen at M6 — the parsers reject any page a 48K does not have, and
-    /// `the_bank_set_matches_what_the_48k_slot_map_exposes` in [`snapshot`] compares the two
-    /// sets against each other rather than reasoning about them — and it is what
-    /// `Memory::bank_mut` becomes unavoidable for at M7, where a 128 snapshot carries banks
-    /// that are paged out and therefore have no address at all.
-    pub fn restore(&mut self, snapshot: &Snapshot) {
+    /// # Why it is fallible, and why the rule is symmetric
+    ///
+    /// **This is M7's one breaking change**, and both directions of the refusal earn it. A 128
+    /// snapshot restored into a 48K has five banks with nowhere to go, and dropping them
+    /// silently is the *"silent last-write-wins"* `docs/M6.md` refused for duplicate pages. The
+    /// other direction is broken too and is the quieter half: a 48K image carries no paging
+    /// byte, so restoring one into a 128 leaves 48K code running against the **128 editor
+    /// ROM** — a machine that looks loaded and executes the wrong ROM. See [`ModelMismatch`].
+    ///
+    /// # Why banks are written through [`Memory::bank_mut`] and the map through
+    /// `Memory::set_paging_port`
+    ///
+    /// It used to write each bank through the addresses the slot map showed it at, and skip any
+    /// bank the map did not show. On a 128 that would silently drop five of eight — the exact
+    /// defect the refusal above exists to prevent, reappearing one layer down. And the paging
+    /// port cannot go through `Ula`'s `out_port` either: the machine being restored **into** may
+    /// already be locked from whatever it was running before, so a guest-facing write would be
+    /// discarded and every field a round trip compares would still match.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelMismatch`] if `snapshot` describes a different machine. Nothing is changed when
+    /// it does: the check runs before anything is written, so a refused restore leaves the
+    /// machine exactly as it was rather than half-loaded.
+    pub fn restore(&mut self, snapshot: &Snapshot) -> Result<(), ModelMismatch> {
+        let machine = self.model();
+        if snapshot.model() != machine {
+            return Err(ModelMismatch {
+                snapshot: snapshot.model(),
+                machine,
+            });
+        }
+
         self.cpu.set_state(snapshot.cpu);
         let ula = self.cpu.bus_mut();
         ula.set_border(snapshot.border);
         ula.set_frame_t_state(snapshot.frame_t_state);
+        ula.memory_mut().set_paging_port(snapshot.paging_port());
 
         for (bank, page) in snapshot.banks() {
-            let Some(base) = slot_address(ula.memory(), bank) else {
-                continue;
-            };
-            for (offset, &byte) in (0..PAGE_SIZE_U16).zip(page.iter()) {
-                ula.memory_mut().write(base.wrapping_add(offset), byte);
-            }
+            *ula.memory_mut().bank_mut(bank) = *page;
         }
+        Ok(())
     }
 
     /// Put a tape in the drive, stopped. [`Spectrum::tape_mut`] is how it is started.
@@ -398,46 +516,12 @@ impl Spectrum {
     }
 }
 
-/// [`PAGE_SIZE`] as the `u16` offset bound the address arithmetic wants.
-///
-/// Converted once, at compile time, with the conversion asserted — so walking a page needs no
-/// cast at the point of use, which is where a silent truncation would turn into a wrong
-/// address rather than a compile error.
-const PAGE_SIZE_U16: u16 = PAGE_SIZE as u16;
-
-const _: () = assert!(PAGE_SIZE_U16 as usize == PAGE_SIZE);
-
-/// Every RAM bank the slot map exposes, as `(bank, the address it starts at)`.
-///
-/// Derived from [`Memory::slots`] rather than from the 48K's particular map, so this is the
-/// same code on a 128 where the map moves — and so a snapshot's banks are matched to
-/// addresses by the machine's own answer rather than by a table repeated here.
-fn exposed_banks(memory: &Memory) -> impl Iterator<Item = (BankIndex, u16)> {
-    memory
-        .slots()
-        .into_iter()
-        .zip(0..)
-        .filter_map(|(slot, index)| match slot {
-            Slot::Bank(bank) => Some((bank, slot_base(index)?)),
-            Slot::Rom(_) => None,
-        })
-}
-
-/// Where the slot map currently shows `bank`, or `None` if it shows it nowhere.
-fn slot_address(memory: &Memory, bank: BankIndex) -> Option<u16> {
-    exposed_banks(memory)
-        .find(|&(exposed, _)| exposed == bank)
-        .map(|(_, base)| base)
-}
-
-/// The first address slot `index` covers, or `None` if that is not a 16-bit address.
-///
-/// Fallible rather than cast: the slot count and the page size are both constants here, but a
-/// silent `as` would be the one place in this file where a change to either turns a wrong
-/// address into a wrong machine instead of into a compile error or a `None`.
-fn slot_base(index: usize) -> Option<u16> {
-    u16::try_from(index.checked_mul(PAGE_SIZE)?).ok()
-}
+// `exposed_banks`, `slot_address`, `slot_base` and `PAGE_SIZE_U16` used to live here: the
+// snapshot writer and the applier both matched banks to addresses through the slot map, and
+// walked pages with a `u16` offset. `Memory::bank`/`bank_mut` replace all four — the map is the
+// wrong question on a 128, where a bank the map shows nowhere is still part of the machine —
+// and they are deleted rather than left, because a private helper with no caller is
+// indistinguishable from one whose caller was lost.
 
 #[cfg(test)]
 mod tests {

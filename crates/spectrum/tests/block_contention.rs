@@ -83,7 +83,13 @@
 //!   I/O patterns — see `contention_magnitude.rs` and `io_contention.rs`.
 //! - **The phase.** Every position is relative to
 //!   [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE], so every
-//!   assertion here survives that constant being wrong. That is `contention_phase.rs`.
+//!   assertion here survives that constant being wrong. That is `contention_phase.rs` —
+//!   which pins the constant to the frame's structure and says in its own header that it does
+//!   **not** establish it. What does is `tests/timing_oracle.rs`, and only this far: **the
+//!   first contended T-state falls exactly 14335 after `/INT`**, given that this machine
+//!   asserts `/INT` at frame T-state 0. The frame's **origin** stays a convention, the
+//!   interrupt window's **length** stays unmeasured, and the `64 × 224` **factorisation**
+//!   stays unmeasured because only its *product* is — three rows in `docs/STATUS.md`.
 //! - **The block instructions' flags and results.** `P/V` from `BC != 0` rather than
 //!   parity, and bit 5 of `F` from bit 1 of `A + transferred byte`, are graded by the FUSE
 //!   vectors in `crates/z80`. This file grades only time.

@@ -149,6 +149,10 @@ pub fn compare_memory(expected: &[MemoryBlock], read: impl Fn(u16) -> u8) -> Vec
 /// four-T-state fetch says nothing about that fetch's remaining three T-states, and this
 /// comparison invents no claim the corpus does not make.
 ///
+/// The gap is now counted rather than estimated. Over `testdata/fuse/tests.expected`,
+/// 2026-09-01: **20,383 T-states across 1335 vectors, 7637 of them pinned** by an `MC` or
+/// `PC` event — so **62.5% go unpinned**, and *"roughly two thirds"* below is right.
+///
 /// # Do not "close" that gap by asserting the address holds constant across a cycle
 ///
 /// It is tempting, since roughly two thirds of T-states go unpinned, to add an assertion
@@ -165,6 +169,174 @@ pub fn compare_memory(expected: &[MemoryBlock], read: impl Fn(u16) -> u8) -> Vec
 /// The rule this is an instance of: **the gate asserts the chip, never our convenience.**
 /// The same principle, applied in the other direction, is why `CORPUS_OMISSIONS` exists —
 /// there the corpus was wrong about the chip, and the harness bent rather than the core.
+///
+/// # Three corrections to the section above, 2026-09-01
+///
+/// **The rule stands, this function stays as it is, and the paragraph enforcing it is right
+/// about the chip.** What was wrong was its *status* and its *consequence*: the hardware
+/// sentence was stated as a fact with nothing behind it, the assertion it forbids had already
+/// been written in fourteen other places, and the failure it predicts is not the kind it says.
+/// The last of those is the one that changes what should be done.
+///
+/// ## 1. *"A real Z80 drives …"* was asserted here as a fact with no source. It now has one,
+/// and it is **proven**
+///
+/// It was sourced nowhere: not in `docs/Z80-REFERENCE.md`, where hardware rules live and
+/// which said only that an M1 cycle has *"the address driven from `PC`"* without resolving it
+/// per T-state; not in `docs/ARCHITECTURE.md`, which repeated it in the same unlabelled form;
+/// not here. The project's own vocabulary — *proven / measured / derived / observed* — had no
+/// row for it, which is the tell. **A gate whose justification is an unlabelled claim is one
+/// rung below the thing it is guarding against**, and this guard was written in the belief
+/// that it was the other way round.
+///
+/// The claim is now settled, from the vendor. *Z80 CPU User Manual*, Zilog, **UM008011-0816**,
+/// `https://www.zilog.com/docs/z80/um0080.pdf`, fetched 2026-09-01, SHA-256
+/// `e3c83da5a5d8e372364c20fa53665e6fbb165ec6ac38c8c1eebc359603447b5e`. Section *Instruction
+/// Fetch*, verbatim:
+///
+/// > The Program Counter is placed on the address bus at the beginning of the M1 cycle. …
+/// > Clock states T3 and T4 of a fetch cycle are used to refresh dynamic memories. … **During
+/// > T3 and T4, the lower seven bits of the address bus contain a memory refresh address** and
+/// > the RFSH signal becomes active … To prevent data from different memory segments from
+/// > being gated onto the data bus, an RD signal is not generated during this refresh period.
+/// > … the refresh address is only guaranteed to be stable during the MREQ period.
+///
+/// Figure 5, *Instruction Op Code Fetch*, draws the `A15–A0` row as two fields with the
+/// boundary between T2 and T3: **`PC`** then **`Refresh Address`**. And, separately, under
+/// *Memory Refresh (R) Register*: *"During refresh, the contents of the I Register are placed
+/// on the upper eight bits of the address bus."*
+///
+/// So the sentence in the section above is **right**, and the manual refines it in two ways
+/// worth carrying:
+///
+/// - **`A8–A15` = `I` is proven, but by a different sentence from the one about T3–T4.** The
+///   timing text guarantees only the *lower seven bits*; the upper eight come from the `R`
+///   register's own description. `A7` — `R`'s eighth bit, the latch `LD R,A` writes — is
+///   **derived**: the manual says the counter's data *"is sent out on the lower portion of the
+///   address bus"* and guarantees seven of it. `{I, R}` as a whole 16-bit value is therefore
+///   *proven for 15 bits and derived for one*, and `Registers::refresh_address` composes all
+///   sixteen.
+/// - **It is not claimed to be stable for the whole of T3–T4** — only *"during the MREQ
+///   period"*. A model that pins an address to every T-state of the refresh half would be
+///   claiming more than Zilog does.
+///
+/// ## 2. The assertion this forbids is already in the tree, in **fourteen** places
+///
+/// *"It must not be added"* was written as though it had not been. It had. Not in this
+/// function — `compare_contention` is clean and stays clean — but:
+///
+/// - `crates/z80/tests/bus_timing.rs` pairs `OPCODE_FETCH` with `PROGRAM_START` in
+///   **thirteen** address-stream expectations, each pinning all four M1 T-states to `PC`;
+/// - `crates/z80/src/lib.rs`'s `every_t_state_reports_the_address_the_z80_drives` pins the
+///   whole stream for seven instructions, M1 interiors included.
+///
+/// That count is not a grep. It is the set of tests that went red when `Cpu::fetch_opcode`
+/// was mutated to drive `PC, PC, IR, IR` (below), which is the only way to enumerate it
+/// without missing one.
+///
+/// The second name is the sharper problem, and with UM0080 in hand it is no longer merely
+/// unsourced — it is **contradicted**. A test called *"every T-state reports the address the
+/// Z80 drives"* reports, for two T-states in every four, the address **this core** drives,
+/// which Figure 5 says is not the one the Z80 drives. Its expectation for those T-states came
+/// from the implementation it is grading. `docs/STATUS.md` catalogues that exact shape:
+/// *a test whose expectation is computed by the subject is not a weak test; it is a tautology
+/// with a cross product attached*. Here the cross product is seven instructions and the
+/// tautology is two T-states wide.
+///
+/// The test is still worth having — it is the only thing in the workspace that would notice
+/// the M1 interior changing at all, which is precisely what the mutation below demonstrates.
+/// What it needs is a name and a comment that claim what it checks. Neither file is mine to
+/// change; both are reported.
+///
+/// ## 3. It would not fire as a *false* failure — and the failure would cost nothing
+///
+/// This is the correction that matters, because it is the one that changes what should be
+/// done about the other two. The claim was that such an assertion *"would fire as a false
+/// failure the day somebody makes M1 hardware-accurate"*. It would fire, and the failure
+/// would be **true**: the expectations would be stale and would need updating, which is what
+/// a change detector is for. Calling a true failure false is what turns a gate into a
+/// nuisance and gets it deleted.
+///
+/// **And nothing else would move. Measured, 2026-09-01**, in a scratch clone of `0d3e7ef`,
+/// never in the shared tree: `Cpu::fetch_opcode` mutated to drive `PC, PC, IR, IR`, the
+/// mutation confirmed present by `git diff` before any verdict was read, then
+/// `cargo test -p z80 -p spectrum --no-fail-fast` — **425 passed / 0 failed** before,
+/// **410 passed / 15 failed** after, and reverting restored 425/0 exactly.
+///
+/// The fifteen are the fourteen above plus `codegen.rs`'s
+/// `bounds_checks_in_the_execute_path_have_not_moved` (7 → 8), which is an artefact of the
+/// naive mutation's extra `refresh_address()` call and says nothing about M1. Everything
+/// that grades behaviour stayed green:
+///
+/// - `fuse_conformance_unprefixed` (290 vectors) and `fuse_conformance_prefixed` (1045),
+///   both **unchanged** — so the corpus genuinely cannot see it, over every vector rather
+///   than over the three that were read by hand;
+/// - `crates/spectrum/tests/timing_oracle.rs`, all **68 hardware rows unchanged**, in the
+///   shipped configuration *and* under an `INTERRUPT_T_STATES = 33` probe where its three
+///   residual disagreements came back byte-identical with the mutation applied.
+///
+/// **Why the corpus cannot see it, stated exactly.** `tests.expected` carries 1335 vectors,
+/// **1335 `MC` events at T=0 and zero at T=1, T=2 or T=3** — the interior of the M1 fetch
+/// every vector opens with. The two vectors with a non-zero `I` show what the corpus *does*
+/// resolve: `ed57` (`I`=`0x1e`, `R`=`0x17`) records `0 MC 0000`, `4 MC 0001`, `8 MC 1e19`.
+/// The `MC` opening the **second** M1 is at `0001` — `PC`, not `IR`, which would have been
+/// `1e18` — so the corpus does pin the *first* T-state of a fetch to `PC` and is decisive
+/// about it. The internal cycle at T=8 is at `1e19`, unmistakably `{I, R}`. Between them,
+/// the fetch's own T2–T4: never named, in any vector.
+///
+/// **Why the machine cannot see it either.** `Ula::tick` consults its `address` argument
+/// only when no machine cycle is open; a fetch opens one four T-states long, so the address
+/// supplied on T2–T4 of an M1 is discarded before it is read. `Ula` is the only `Bus`
+/// implementation outside tests and benches. Contention is priced **once per machine cycle,
+/// at the address the cycle opens on** — so M1's second half is never separately contended
+/// on *any* address, whatever is driven there.
+///
+/// ## What this leaves, and it is a better answer than "one of the two files is wrong"
+///
+/// The section above is **right about the hardware and wrong about the consequence**. The
+/// address bus almost certainly does change mid-M1; asserting that it does not is still
+/// wrong in principle and still must not go into this function; and it is nonetheless
+/// **unobservable in this emulator**, so the fourteen assertions elsewhere are sound as
+/// change detectors even though their names claim more than they check.
+///
+/// The right disposition follows from that and is deliberately not a code change: rename
+/// or re-document the two offenders so they claim what they check, and leave the core alone
+/// until something can grade it. A "fix" to `fetch_opcode` today would be an unverifiable
+/// guess whose gate asserts a number nothing produces — the same reasoning, and the same
+/// wording, that `crates/spectrum/src/ula.rs` used to leave the interrupt-acknowledge shape
+/// standing until an oracle arrived for it.
+///
+/// ## And the divergence cannot cost a T-state on the hardware either — same manual
+///
+/// This is stronger than *"unobservable in this emulator"*, it is not an argument from our
+/// contention model, and it is the reason the disposition above is safe rather than merely
+/// convenient. A Spectrum charges contention by holding the Z80's `/WAIT` line, and UM0080's
+/// *T Cycle* section says exactly when the CPU looks at it:
+///
+/// > During T2 and every subsequent automatic WAIT state (TW), the CPU samples the WAIT line
+/// > with the falling edge of the clock. If the WAIT line is active at this time, another
+/// > WAIT state is entered during the following cycle.
+///
+/// **T2 and TW. Not T3, not T4.** Wait states are inserted between T2 and T3, which is
+/// before the refresh address reaches the bus at all. So the address driven during T3–T4 of
+/// an M1 **cannot** lengthen that M1, whatever it is and whoever is snooping it: by the time
+/// the ULA could react to it the CPU has stopped asking. Contention charged once per machine
+/// cycle at the address the cycle opens on is not this emulator's simplification of the
+/// hardware — for M1 it is the only thing the hardware can do.
+///
+/// Which closes the question that started this: **`PC`-for-all-four and `PC,PC,IR,IR` are not
+/// two behaviours, they are one behaviour in two coordinate systems.** No `Bus` that models a
+/// real Z80 machine can separate them, because the pin that would have to carry the
+/// difference is not being read. Measuring 68 hardware rows and 1335 vectors unchanged was
+/// the empirical half of that; this is why the empirical half had to come out that way.
+///
+/// The residue — what a refresh address in contended RAM *does* do on real hardware — is not
+/// a timing effect at all. `I` in `0x40..=0x7F` points the refresh strobe at the screen bank
+/// and produces visible "snow", which is the ULA's *display* fetch being disturbed, not the
+/// CPU being stalled. That is outside anything this core models, and it is the one thing left
+/// that a divergence here could ever be observed by. `I` is `0x3F` under the 48K ROM — 399,992
+/// of 400,000 sampled instructions, measured 2026-09-01 — and an `IM 2` table is
+/// conventionally placed high, so the configuration is rare as well as inert.
 pub fn compare_contention(expected: &Expectation, tick_addresses: &[u16]) -> Vec<Mismatch> {
     expected
         .contention_points()

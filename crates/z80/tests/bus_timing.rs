@@ -56,7 +56,68 @@ const REFRESH: u8 = 0x05;
 /// `IR` as seen *during* the instruction — the opcode fetch has already bumped `R` to 6.
 const REFRESH_ADDRESS: u16 = 0x4006;
 
+/// The four T-states of an M1 opcode fetch — every expectation here spends them on `PC`.
+///
+/// # Only the first of the four is sourced. The other three are this core's shape
+///
+/// Each use below pairs this constant with [`PROGRAM_START`], which pins **all four**
+/// T-states of the fetch to `PC`. The corpus pins **one**. Counted rather than assumed, on
+/// 2026-09-01, with `grep -cE` over `testdata/fuse/tests.expected`: 1335 vectors, **1335
+/// `MC` events at T=0**, and **zero `MC` events at T=1, T=2 or T=3** — which are the
+/// interior of the M1 fetch that every vector begins with. Not one vector in the corpus
+/// names an address inside a fetch.
+///
+/// So the corpus is exhaustive over 1335 opcodes and varies *nothing* on the axis *"which
+/// T-state within this machine cycle"*. That is `docs/STATUS.md`'s **exhaustive on one
+/// axis** lesson in the place it is easiest to miss: the cross product is over opcodes, and
+/// the silent axis is inside a single cycle, so 1335 vectors have no more discriminating
+/// power on it than one would.
+///
+/// `MEMORY_CYCLE` needs no such note. A read or write holds one address for all three of
+/// its T-states, so pinning all three claims nothing the transfer has not already said. M1
+/// is the one cycle whose address bus is documented to change mid-cycle, and therefore the
+/// one place a constant address is a claim rather than a restatement.
+///
+/// **What sources the *other* three, then? Nothing in this repository.**
+/// `common/report.rs` states as fact that a real Z80 drives `PC` for T1–T2 and the refresh
+/// address for T3–T4 and cites no measurement; `docs/ARCHITECTURE.md` repeats it; this core
+/// contradicts both by driving `PC` for all four. That disagreement, its evidence and what
+/// would settle it are written up once, on `compare_contention` in `common/report.rs` —
+/// read them there rather than re-deriving them here.
+///
+/// # Why the simplification is recorded here rather than fixed
+///
+/// **Measured, 2026-09-01**, in a scratch clone of `0d3e7ef` (never in the shared tree):
+/// `Cpu::fetch_opcode` was mutated to drive `PC, PC, IR, IR` — the mutation verified by
+/// `git diff` before any verdict was trusted — and the workspace re-run with
+/// `cargo test -p z80 -p spectrum --no-fail-fast`. Baseline: 425 passed, 0 failed.
+/// Mutated: 410 passed, **15 failed**, and the whole list is
+///
+/// - the **thirteen** address-stream tests in this file (the six `M1Counter` tests, which
+///   count fetches rather than compare addresses, stay green);
+/// - `every_t_state_reports_the_address_the_z80_drives` in `crates/z80/src/lib.rs`;
+/// - `codegen.rs`'s `bounds_checks_in_the_execute_path_have_not_moved`, 7 → 8, an artefact
+///   of the naive mutation's extra `refresh_address()` call and not a fact about M1.
+///
+/// **Nothing else moved.** `fuse_conformance_unprefixed` (290 vectors) and
+/// `fuse_conformance_prefixed` (1045) stayed green — the corpus reading above, confirmed
+/// mechanically over every vector rather than argued. `crates/spectrum/tests/timing_oracle.rs`
+/// stayed green too: all 68 hardware rows unchanged, in the shipped configuration *and*
+/// under the `INTERRUPT_T_STATES = 33` probe, where its three residual disagreements
+/// (`group 3 contended` 42 against 41, `group 7 uncontended` 95 against 98, `group 34
+/// uncontended` 42 against 44) came back **byte-identical** with the mutation applied.
+///
+/// The mechanism, read out of `crates/spectrum/src/ula.rs` rather than inferred: `Ula::tick`
+/// consults its `address` argument **only** when no machine cycle is open, and a fetch opens
+/// one four T-states long — so the address supplied on T2, T3 and T4 of an M1 is discarded
+/// before it is looked at. `Ula` is the only `Bus` implementation outside tests and benches.
+///
+/// **This constant is therefore the single point where the simplification lives.** A
+/// hardware-accurate M1 would split it into two T-states on [`PROGRAM_START`] and two on
+/// [`REFRESH_ADDRESS`]; those thirteen expectations plus the one in `lib.rs` are the entire
+/// list of what would have to change, and no machine's timing would change with them.
 const OPCODE_FETCH: usize = 4;
+/// The three T-states of a memory read or write, which hold one address throughout.
 const MEMORY_CYCLE: usize = 3;
 
 #[test]

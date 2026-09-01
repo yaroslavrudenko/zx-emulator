@@ -191,6 +191,168 @@ Ranked by how much they actually prove:
 The M3 lesson stands: reporting the absence of a distinguishing test as evidence of correctness is
 the failure this project keeps catching.
 
+### The ranking has been overtaken by events, and is re-read here rather than re-ordered in place
+
+**The five items above are left exactly as they were written, including their own inline
+corrections.** A ranking is a claim with a date on it, and re-sorting the list would destroy the
+only interesting thing about it: **which items moved, in which direction, and what moved them.**
+Three of the five turned out to be worth something quite different from what they were ranked for,
+and in two cases the surprise was not that the item was weaker than advertised but that it was
+*differently shaped*.
+
+Taken 2026-09-01, in the order the list gives them.
+
+| # | Ranked as | Where it lives now | What it turned out to be | Class |
+|---|---|---|---|---|
+| **1** | *"exercises the memory map, the interrupt, the keyboard scan and the screen in one go"* | `crates/spectrum/tests/boot.rs` | **Breadth without discrimination.** Ranked first for a reason that was measured and found false. It grades the memory map's read side and the screen | **measured**, about its own coverage |
+| **2** | *"the closest thing to an oracle available"* | `crates/spectrum/tests/timing_oracle.rs` | **Right, taken, and it produced a kind of result this plan did not anticipate** — see below | **measured**, corroborated by independent hardware |
+| **3** | *"Byte-identical or the state model is wrong"* | `snapshot_apply.rs`, `snapshot_vectors.rs`, `snapshot_corpus.rs`, `snapshot_hostile.rs` | **The second half is false, and it was measured false rather than argued.** A round trip grades *readability*, not arithmetic | **measured**, about its own blindness |
+| **4** | *"proves change, which is what catches a regression once something works"* | **nowhere** | **Never written.** The description was accurate and nothing was built to it | — |
+| **5** | *"This is observation and must be labelled as such"* | `crates/spectrum/tests/memptr_oracle.rs` | **The largest single change to this plan.** The tape loader made it reachable, and it crossed from observation into measurement | **measured** |
+
+**Item 1 — the boot.** Its rank was wrong and its value is real, which is an awkward combination
+to state and the reason it is stated at length above rather than quietly demoted. Four of the five
+mutations that were supposed to demonstrate its power were **already red from unit tests inside
+`src`**, and exactly one survived. So it never had the discriminating power the ranking claimed.
+What it does have is the only property nothing else in the suite has: **it runs the whole machine,
+on the real ROM, end to end, and asserts the frame the message lands on.** That is worth keeping
+and it is worth describing correctly — a gate that fails when something structural breaks, and
+that cannot say what.
+
+**Item 3 — the snapshot round trip.** *"Byte-identical or the state model is wrong"* is the clause
+to retire, and `M6.md` Decision 7 predicted it before it was measured. Two symmetric mutations —
+`HL` and `DE` permuted in **both** the parser and the writer; the version 3 T-state origin shifted
+in **both** directions — leave **every** round trip green, including the exhaustive sweep over all
+69888 frame positions and the third-party corpus sweep. What went red in each case was a
+hand-transcribed vector, a hand-built cross-format pair, and a `.z80`/`.sna` pair a third party
+saved from one machine. So the sharper statement, which is the one `STATUS.md` records:
+
+> **Only an expectation that owes nothing to the code under test sees a symmetric error**, and a
+> foreign file proves a field is *readable* rather than that our arithmetic on it is right.
+
+**A round trip is a consistency check between two functions this project wrote.** That is the
+keyboard-matrix tautology in different clothing — and the difference, which is real and is why the
+item keeps its rank, is that a round trip **does** have a reachable failing case: an asymmetric
+error. It is not a tautology. It is a test whose failing case is exactly half of the error space,
+and the plan should say which half.
+
+**Item 4 — the frame hash. It was never written, and this plan should stop implying it is
+coming.** No gate carries the name; `ls -1 crates/spectrum/tests/*.rs` is the check, and the
+integer it returns is not the point. What arrived instead, in two other shapes: `boot.rs` asserts
+the *frame number* the copyright message lands on, and `crates/frontend/tests/ppm_encoding.rs`
+asserts that a screenshot's body is byte-identical to the buffer the window uploads. Neither is a
+frame hash and neither replaces one. **The honest position is that a frame hash remains a good
+idea nobody has needed**, because every regression so far has been caught by something with a
+name, and a hash's whole value is catching the ones that do not have one. If it is ever written,
+the thing to decide first is its false-positive rate: a Spectrum frame changes with the FLASH
+phase, so a hash taken at an unstated frame position grades the position as much as the pixels —
+which is `STATUS.md`'s *"a test's position in the frame is part of its failing case"* arriving
+before the test rather than after.
+
+**Item 5 — known-demanding software. This is the one that moved, and it moved because of
+something that is not a test.** It was ranked last, labelled observation, and understood to be
+unreachable in a repository that may not carry games. M6's tape loader changed the premise: real
+Spectrum programs now arrive through the ROM's own `LD-BYTES`, off the `EAR` bit, over thousands
+of contended `IN A,($FE)` cycles, with nothing bypassed. `crates/spectrum/tests/memptr_oracle.rs`
+loads Patrik Rak's `z80test` MEMPTR build from a `.tap` — all four blocks — runs it on the whole
+machine, and reads its verdict out of the display file, printed by the ROM.
+
+**The mechanism is worth naming because it generalises.** What made item 5 automatable was not a
+better test and not a better argument. **It was a loader** — a piece of *machine* that turned a
+category of third-party software into an input the suite can accept. That is a different kind of
+move from anything else on this list, and it is the one to look for when an item here looks
+permanently stuck: not *"what test would grade this"* but *"what would make this class of external
+artefact runnable at all."*
+
+What it did **not** move: `.tap` cannot represent a turbo loader at any speed, and most commercial
+titles are turbo-loaded. So *"a real game"* remains T4, remains observation, and remains the only
+tier that grades a loader nobody here wrote.
+
+### Item 2 produced a kind of result this plan did not anticipate — a sourced negative
+
+The plan ranked item 2 by what it could *confirm*. It has done that: 68 hardware rows, 0
+disagreements, thirteen mutations, and `FIRST_CONTENDED_T_STATE = 14335` the unique survivor over
+±2. The section below is the full account.
+
+**What the plan had no category for is that the same corpus produced a negative result about the
+limits of the model it grades.** Three of the 68 rows — groups 3, 7 and 34 — resist when the
+machine is made to classify as the *other* hardware table, and [`M7.md`](M7.md) Decision 11
+establishes that **their demands are mutually inconsistent**: each row implies an offset, the
+implied intervals do not intersect, and one of the three wants the opposite sign from the other
+two. **No single integer-T-state change closes them, and that is a proof about a family of models
+rather than a disagreement about a number.** What would settle it is named there and is not
+software: a `TYPE2` machine's full hardware submission, or an interrupt-sampling model finer than
+one T-state. Neither is in hand.
+
+**Rank that result properly, because it is better than the green.** A green tells you that you
+agree with a measurement. **A sourced negative tells you that no model of the shape you are using
+can agree with it** — which is information you cannot get from any number of passing rows, and
+which stops the next person spending a week adjusting a constant that cannot work. This plan
+ranked its items by their power to confirm; **an oracle's power to *refuse a whole class of
+answers* is a separate axis and it is the more valuable one.** `STATUS.md` reaches the same
+conclusion from the other direction, about the same corpus: it *"cannot say whether 14335 or 14336
+is right, because real Spectrums are both; what it can do is refuse a machine that is neither —
+and that turned out to be the sharper instrument, because it is the one every emulator bug
+actually trips."*
+
+### The finding that changes how this whole plan should be read: a gauge is not a defect
+
+This is the reason the plan needed re-reading rather than re-ordering, and it belongs above every
+item on the list.
+
+> **Sampling `/INT` at the instruction boundary with contention at 14335, and sampling at the
+> instruction's last T-state with contention at 14336, are the same machine.** They agree on all
+> 68 rows *and* on the detection row, at the window width that classifies `TYPE1` and at the width
+> that classifies `TYPE2` — the same three resisting rows with the same values. **Only the
+> *difference* between the two is observable.**
+
+`M7.md` Decision 11 establishes it and this file's own mutation table already contained the
+corroborating row before anyone drew the conclusion: *"Interrupt asserted one T-state later **and**
+the window moved to 14336 — **GREEN**."*
+
+**So an entire class of prospective defects is not a defect. It is a gauge.** *"This machine
+samples `/INT` at the wrong point"* is not a well-posed claim against this corpus, because a
+compensating shift in a constant absorbs it exactly, and the pair is free. A test commissioned to
+settle it would grade nothing while looking decisive — and would come back green under both
+models, which reads as confirmation of whichever one the author had in mind.
+
+**Three consequences for how this plan is used, and the third is the one that keeps costing
+money:**
+
+1. **Before commissioning any test of the form *"is X done at the right moment"*, ask what else
+   moves with X.** If some constant absorbs the shift, the pair is a gauge, no test can exist, and
+   the correct output is a note in the register rather than a gate.
+2. **State every timing claim as an interval between two things the machine does**, never as a
+   position relative to an origin. The corpus grades intervals. `FIRST_CONTENDED_T_STATE = 14335`
+   is not a measurement; *"the first contended T-state falls exactly 14335 T-states after `/INT`"*
+   is.
+3. **Do not confuse a gauge with an unobservable defect. They look identical from a run log and
+   they are opposites.**
+
+| | A gauge | An unobservable defect |
+|---|---|---|
+| Is there a fact of the matter? | **No.** Two descriptions, one machine | **Yes.** One of the two is wrong |
+| What a test would find | Nothing, ever, by construction | Nothing *yet*, for a stated reason |
+| Correct action | Pick a convention, record that it is one, stop | Write the defect down where the register lives; fix it if a rule decides it |
+| Examples here | `/INT` origin + contention window; `/INT` sample point + contention constant | The `EAR` sample point, up to four T-states early; the floating bus; the interrupt acknowledge before M7 |
+
+**The acknowledge is the instructive one, because it was mistaken for the first kind and was
+actually the second.** *"No test can distinguish the two models"* was true of software running on
+the machine and false of a test driving the bus, and `M7.md` Decision 5 fixed it on a documented
+hardware rule — closing a model defect while closing no verification gap. **A gauge cannot be
+resolved by any evidence; an unobservable defect can be resolved by evidence from outside the
+machine.** Asking which kind you have, first, is what separates a note in the register from a week
+of test design.
+
+### What this plan does not reach at all
+
+The five items are a plan for `crates/spectrum`. **`crates/frontend` is a workspace member with its
+own headless gates and its own explicit *not gated* table, and nothing in this plan reaches it** —
+nor does `STATUS.md`, which mentions the crate nowhere. Its own `src/lib.rs` carries the two lists
+in this document's format and states the boundary in the same terms: *"almost everything a person
+means by 'is it right' … has no oracle here and never will."* [`M8.md`](M8.md) is where that stops
+being a note and becomes a milestone gate, and its Decision 7 is written against this section.
+
 ## The timing oracle
 
 Verification item 2, taken. This section says what was surveyed, what was chosen, what it proves,
@@ -296,6 +458,15 @@ moving the directory aside; this table is checked rather than asserted, because
 > **`testdata/README.md` does not yet have a section for this corpus**, and that file is owned
 > elsewhere. Until it does, the fetch command lives here, in the gate's own module documentation,
 > and in the failure message the gate prints — which is the one a developer actually reads.
+>
+> > **It does now** — `testdata/README.md`'s *`testdata/timing/`* section carries the size, the
+> > SHA-256, the fetch command, the verification date and the absence-policy table, in the shape its
+> > FUSE and `zex` sections already had. Recorded rather than deleted, because the sentence above is
+> > a claim about the present tense and the present tense is what rots: a reader who met it and went
+> > looking would have found the section and no explanation of the disagreement. **The duplication
+> > it created is real and is left standing**: the fetch command is now in three places, and three
+> > copies of a `curl` line is a smaller hazard than a gate whose corpus nobody can find, which is
+> > the trade this note is recording rather than pretending away.
 
 ### What it does, and why it can see what the other gates cannot
 
@@ -437,7 +608,7 @@ an accident.
 | **M5** | 48K: paged memory, ULA screen, keyboard, 50 Hz interrupt | **the gates in `crates/spectrum/tests/`** — boot **and the frame it lands on**, the 50 Hz interrupt line, the 40 × 8 keyboard matrix, ROM write protection through all three write paths, contention magnitude (the whole read-modify-write family), contention phase, and the four-case I/O rule through a real `Cpu<Ula>`. **Count them, do not quote a number:** `ls -1 crates/spectrum/tests/*.rs \| wc -l` |
 | M6 | `.z80`/`.sna` snapshots, `.tap` tape | **T1 + T2 + T3** ([`M6.md`](M6.md) Decision 8) — the round trips, hand-transcribed vectors and hostile-input sweeps; the real ROM's `LD-BYTES` loading a synthetic tape through the `EAR` bit; and **a program we wrote, loaded from tape by the ROM and executed**. *"A real game runs"* is **T4**, observation, and cannot be automated in a repository that may not carry games |
 | M7 | 128: paging, second ROM, AY-3-8912, per-bank contention | **T1 + T2 + T3** ([`M7.md`](M7.md) Decision 5) — the paging port exhaustively, the AY's checkable state machine, the round trips; the real 128 ROMs reaching their own menu and reaching the 48K message through the second ROM; and **a program we wrote that a 48K gets demonstrably wrong**. *"128-only software runs"* is **T4** |
-| M8 | WASM + macroquad | playable from a URL |
+| M8 | WASM + macroquad — the browser build | **T1 + T2 + T3** ([`M8.md`](M8.md) Decision 7) — the frontend's existing headless gates, plus the browser's argument path asserted to agree with the command line's; the `wasm32-unknown-unknown` build linking and emitting a module, with the vendored `mq_js_bundle.js` matching the pinned crate by SHA-256; and the two seams where a silent fork or a silent no-op would otherwise live. *"Playable from a URL"* is **T4** |
 
 > **The M5 row said *"boots to the copyright message"*, and that is corrected here rather than
 > quietly widened.** It was the whole gate at commit `2157331` — and this document's own
@@ -484,6 +655,47 @@ an accident.
 > the same edit made for M7 at the same time so the next milestone does not inherit the same
 > mismatch. **`ARCHITECTURE.md`'s copy of the table is owned elsewhere and still carries the old
 > wording for all three rows.**
+>
+> > **That last sentence was already wrong when it was written, and it is corrected rather than
+> > deleted because *how* it was wrong is the useful part.** `ARCHITECTURE.md`'s **M6** row had been
+> > corrected to `T1 + T2 + T3` in the same commit (`0d3e7ef`) that corrected this table — so *"all
+> > three rows"* described a state that no longer existed at the moment it was published. The M5 and
+> > M7 rows there genuinely did carry the old wording, and both are corrected now.
+> >
+> > **The shape is the propagation defect in its symmetrical form.** This document is not simply
+> > lagging behind that one: each file was partly corrected in the same session and **each recorded
+> > the other as untouched**. A reader checking two sources would have found them agreeing that the
+> > *other* was stale, which reads exactly like corroboration. The remedy is the one this document
+> > set already has and keeps failing to apply first: **when a row is corrected in two files, the
+> > note about the second file is written last, from the second file, not from memory of it.**
+
+> **The M6 gate, now that it has merged, in the terms `M6.md` Decision 8 sets.** T3 is a program
+> written here, stored as a `.tap`, loaded by the real ROM's own `LD-BYTES` through the `EAR` bit,
+> and executed — and the loaded program **computes a value asserted to appear nowhere in its own
+> bytes**, so *"the data arrived"* and *"it ran"* are two claims rather than one. That separation is
+> what the row's *"and executed"* is carrying, and it is worth naming because the obvious way to
+> write that gate — assert the bytes landed — grades the loader and nothing after it. What the
+> milestone opened and closed is in [`STATUS.md`](STATUS.md)'s M6 section.
+
+> **The M8 row said *"playable from a URL"*, and it is corrected in advance for the third time —
+> but the reason is different from M6's and M7's, and the difference is the part worth reading.**
+> Those two rows were unautomatable because their corpus could not be committed: a licensing
+> accident, which a differently-licensed repository could have fixed. **M8's cannot be automated
+> because *playable* is not a property of an artefact.** It is a property of a browser rendering a
+> canvas, a GPU compositing it, a keyboard delivering keys, and a person forming an opinion — and
+> no corpus, no licence and no amount of engineering reaches any of the four.
+>
+> So the row now names what T1 + T2 + T3 actually grade, and [`M8.md`](M8.md) Decision 7 states in
+> its own words what they do not: **not one of them observes a pixel, a keypress or a frame in a
+> browser.** That sentence belongs beside any future *"M8: green"*, because writing the verdict
+> without it would be this project's familiar failure committed **knowingly in advance**, which
+> [`M6.md`](M6.md) already identified as *"a different and worse category than the first three."*
+>
+> `README.md`'s and `ARCHITECTURE.md`'s copies of this table are owned elsewhere and still carry
+> the old wording for M8; `M8.md`'s closing section lists them alongside every other copy it
+> found. **This note is written from this file, and the note about those two is written there** —
+> which is the remedy the M6/M7 correction two blocks above had to learn the hard way, after each
+> of two files recorded the other as untouched.
 
 Contention lands at M5 for the 48K and is extended at M7. It is not deferred: the entire `tick`
 contract exists for it, and a machine built without it would have to be rebuilt rather than

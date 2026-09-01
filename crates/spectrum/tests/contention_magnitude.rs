@@ -37,17 +37,34 @@
 //!
 //! # What is not graded here
 //!
-//! - **The phase** — where in the frame the pattern begins. That is
-//!   `contention_phase.rs`, and it is a separate gate because it is separately unverified:
-//!   every assertion in this file is relative to
+//! - **The phase** — where in the frame the pattern begins. That is `contention_phase.rs`,
+//!   and it is a separate gate because every assertion in this file is relative to
 //!   [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE] and therefore
-//!   survives that constant being wrong.
+//!   survives that constant being wrong. **This bullet also said "because it is separately
+//!   unverified", and that clause is now false.** `tests/timing_oracle.rs` establishes —
+//!   narrowly — that **the first contended T-state falls exactly 14335 after `/INT`**, given
+//!   that this machine asserts `/INT` at frame T-state 0. What stays open is the frame's
+//!   **origin** (a convention: moving `/INT` and the window together leaves the oracle
+//!   green), the interrupt window's **length** (32 → 24 leaves it green), and the
+//!   `64 × 224` **factorisation**, whose *product* is measured while its factors are not.
+//!   `contention_phase.rs` still opens with "the absolute phase remains unverified against
+//!   any external oracle" and has **not** been corrected; `docs/STATUS.md` carries the three
+//!   rows that remain.
 //! - **I/O contention's four-case pattern**, which is `io_contention.rs` — a separate gate
 //!   because a port cycle is priced by a different rule from a memory cycle and reads the
 //!   clock rather than the cycle.
 //! - Whether the published pattern is *right*. It is the emulator community's figure for an
-//!   issue 3 48K, and this project has no oracle for it — `docs/MACHINE.md`'s timing-test
-//!   program is the only one available and is not written.
+//!   issue 3 48K, and nothing here **establishes** it. **The clause that used to follow —
+//!   "`docs/MACHINE.md`'s timing-test program is the only one available and is not written" —
+//!   is false: it is written.** It is `tests/timing_oracle.rs`, which is `MACHINE.md`'s
+//!   verification item 2. That narrows this row without closing it. The oracle *constrains*
+//!   the pattern — `docs/MACHINE.md`'s mutation table has `DELAY_PATTERN`'s last slot
+//!   `0 → 1` red at 14 of 68 hardware rows and the pattern zeroed red at 38 — but it compares
+//!   a whole frame's **integrated** cost over hundreds of loop iterations, not a single
+//!   cycle's stall. So it cannot single `[6,5,4,3,2,1,0,0]` out from another pattern with the
+//!   same integral over those loops. That last sentence is reasoning from what the suite
+//!   measures, **not** a mutation anybody has run; whoever wants it as a measurement should
+//!   construct such a pattern and run the oracle against it.
 //! - **`DEC`, and the `IY` half of every indexed form.** They share their handlers with the
 //!   forms above, which is the *by construction* argument this file exists to distrust — so
 //!   it is recorded rather than relied on. (The *block* families' decrementing twins are no

@@ -40,11 +40,20 @@
 //! # What is not graded here
 //!
 //! - **Whether the published four-case pattern is right.** It is the emulator community's
-//!   figure for an issue 3 48K and this project has no oracle for it, exactly as for the
-//!   memory pattern — see `contention_magnitude.rs`.
+//!   figure for an issue 3 48K and nothing **establishes** it, exactly as for the memory
+//!   pattern — see `contention_magnitude.rs`. `tests/timing_oracle.rs` reaches part of it and
+//!   is measured to miss the rest: `docs/MACHINE.md`'s mutation table has the `N:1, C:3` case
+//!   losing its stall red at 4 of 68 hardware rows, and the **fourth** term dropped
+//!   (`C:1,C:1,C:1,C:1`) **green**, because the suite's groups never reach a contended
+//!   non-ULA port. This file remains that term's only gate.
 //! - **The phase.** Every position here is relative to
 //!   [`FIRST_CONTENDED_T_STATE`][spectrum::timing::FIRST_CONTENDED_T_STATE], so every
-//!   assertion survives that constant being wrong. That is `contention_phase.rs`.
+//!   assertion survives that constant being wrong. That is `contention_phase.rs` — which pins
+//!   the constant to the frame's structure and says in its own header that it does **not**
+//!   establish it. What does is `tests/timing_oracle.rs`, and only this far: **the first
+//!   contended T-state falls exactly 14335 after `/INT`**, given that this machine asserts
+//!   `/INT` at frame T-state 0. The frame's **origin**, the interrupt window's **length** and
+//!   the `64 × 224` **factorisation** stay open — three rows in `docs/STATUS.md`.
 //! - **`OUT (C),r`.** `IN A,(C)` covers the `ED`-page shape — two M1 fetches then the port
 //!   cycle — and nothing here reaches the `OUT` half of it.
 //! - **The `ED` block I/O forms** (`INI`/`OUTI`/`INIR`/`OTIR` and their twins), which add

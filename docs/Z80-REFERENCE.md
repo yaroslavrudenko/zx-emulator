@@ -229,6 +229,77 @@ count; bit 7 keeps whatever was last written by `LD R,A`. Games use it as a chea
 source and some protection schemes check it, so an emulator that ignores it will run most
 software and fail a few titles strangely.
 
+### What the address bus carries during each T-state of M1
+
+`R` exists to drive a refresh address at DRAM, and *where in M1* that address appears is a separate
+question from what `R` counts. This project asserted an answer to it in three places without ever
+citing one; it is settled here, once, with the evidence class attached.
+
+**Source, and it is primary.** *Z80 CPU User Manual*, Zilog, **UM008011-0816**, ©2016 —
+<https://www.zilog.com/docs/z80/um0080.pdf>, fetched 2026-09-01, SHA-256
+`e3c83da5a5d8e372364c20fa53665e6fbb165ec6ac38c8c1eebc359603447b5e`. Section *Instruction Fetch* and
+Figure 5, *Instruction Op Code Fetch*.
+
+| T-state | `A15–A8` | `A7` | `A6–A0` | Class |
+|---|---|---|---|---|
+| T1, T2 | `PC` | `PC` | `PC` | **proven** — *"The Program Counter is placed on the address bus at the beginning of the M1 cycle"*, and Figure 5 labels the `A15–A0` row `PC` across T1–T2 |
+| T3, T4 | `I` | `R` bit 7 | `R` bits 6–0 | `A15–A8` and `A6–A0` **proven**; `A7` **derived** — see below |
+
+Figure 5 draws the address-bus row as exactly two fields, `PC` then `Refresh Address`, **with the
+boundary between T2 and T3**. The address bus changes mid-cycle, and M1 is the only cycle where it
+does — a memory read or write holds one address for all three of its T-states.
+
+The two halves of the refresh address come from two different sentences, which is why the bits are
+classed separately:
+
+> During T3 and T4, **the lower seven bits of the address bus contain a memory refresh address** and
+> the RFSH signal becomes active, indicating that a refresh read of all dynamic memories must be
+> performed. To prevent data from different memory segments from being gated onto the data bus, an
+> RD signal is not generated during this refresh period. The MREQ signal during this refresh period
+> should be used to perform a refresh read of all memory elements. The refresh signal cannot be used
+> by itself, because **the refresh address is only guaranteed to be stable during the MREQ period**.
+
+> *(Memory Refresh (R) Register)* … The data in the refresh counter is sent out on the lower portion
+> of the address bus along with a refresh control signal while the CPU is decoding and executing the
+> fetched instruction. … **During refresh, the contents of the I Register are placed on the upper
+> eight bits of the address bus.**
+
+So `A8–A15` = `I` is stated outright, and `A0–A6` = the seven counting bits is stated outright.
+**`A7` is the one bit the manual never names**: it is `R`'s eighth bit, the latch `LD R,A`
+writes and the counter does not touch, and it reaches the bus only via *"sent out on the
+lower portion of the address bus"*. `Registers::refresh_address` composes all sixteen as
+`{I, R}`, which is the universal emulator convention and is **derived, not proven, in exactly
+one bit**. Nothing here depends on that bit, but a claim that `IR` is proven wholesale would
+be one bit too strong.
+
+Two further things the manual settles, both of which matter more than they look:
+
+- **`RD` is not asserted during T3–T4.** The refresh is an `MREQ`-only cycle. A machine that decides
+  "is this a memory access" from `MREQ` alone sees the refresh address; one that requires `RD` or
+  `WR` does not.
+- **`/WAIT` is sampled at T2 and at each `TW`, and nowhere else**: *"During T2 and every subsequent
+  automatic WAIT state (TW), the CPU samples the WAIT line with the falling edge of the clock. If
+  the WAIT line is active at this time, another WAIT state is entered during the following
+  cycle."* Wait states are inserted **between T2 and T3 — before the refresh address exists**. A
+  Spectrum charges contention by holding `/WAIT`, so **the address driven during T3–T4 of an M1 can
+  never lengthen that M1**, whatever it is. Contention priced once per machine cycle, at the address
+  the cycle opens on, is not a simplification of M1; for M1 it is all the hardware can do.
+
+**What this core does, and why the difference is inert.** `Cpu::fetch_opcode` drives `PC` for all
+four T-states — it diverges from the hardware on T3–T4 and matches it on T1–T2. Nothing can see it:
+the FUSE corpus names T=0 of every fetch and no interior T-state in any of its 1335 vectors; `Ula`
+discards `Bus::tick`'s address inside an open machine cycle; and the paragraph above says the
+hardware cannot charge for it either. Verified by mutation rather than argued — driving
+`PC, PC, IR, IR` leaves 290/290, 1045/1045 and all 68 rows of the hardware timing oracle unmoved.
+The full account, the mutation table and the disposition are on `compare_contention` in
+`crates/z80/tests/common/report.rs`.
+
+> The `HALT` paragraph below says a halted M1 cycle has *"the address driven from `PC`"*. Read as a
+> statement about the machine **cycle** — which bus transfer it performs, and therefore whether it
+> is a `fetch` or a `read` — that is right and is the point being made there. Read per T-state it is
+> the same approximation as everywhere else in this repository, and the table above is what it
+> approximates.
+
 ### Which M1 cycles read memory, and why `R` and the opcode fetch are not the same count
 
 `R` counts M1 cycles. It does **not** count opcode fetches, and the two part company because two M1
@@ -300,12 +371,20 @@ vendored into this repository.
 
 > **Correction — this said `testdata/` is *"gitignored"*, full stop, and that is incomplete in the
 > one place it matters.** `.gitignore` carries `testdata/**` and then **un-ignores by exception**:
-> `!testdata/.gitkeep`, `!testdata/README.md`, `!testdata/roms/`, `!testdata/roms/*.rom`. So the
+> `!testdata/.gitkeep`, `!testdata/README.md`, `!testdata/roms/`, `!testdata/roms/48.rom`. So the
 > Sinclair 48K ROM **is committed** — `git ls-files testdata/` returns `.gitkeep`, `README.md` and
-> `roms/48.rom` — because Amstrad permits redistributing it, and a subtly wrong ROM is the one
-> corpus failure no harness here would explain. `README.md`'s *Test data* table states this
-> correctly and `MACHINE.md` calls it *"the committed ROM"*; this line did not, and is corrected to
-> match rather than left as the odd one out.
+> `roms/48.rom` — under the permission quoted in [`../testdata/README.md`](../testdata/README.md),
+> and because a subtly wrong ROM is the one corpus failure no harness here would explain.
+> `README.md`'s *Test data* table states this correctly and `MACHINE.md` calls it *"the committed
+> ROM"*; this line did not, and is corrected to match rather than left as the odd one out.
+>
+> > **The last exception was `!testdata/roms/*.rom` when this block was written, and it is now one
+> > explicit filename per ROM.** The quotation above is corrected in place rather than annotated,
+> > because it is a transcription of another file and a transcription that has drifted is simply
+> > wrong. Why the glob went: it accepts *any* file ending in `.rom` — a game cartridge, a Multiface
+> > image, an Interface 1 ROM — and the permission this repository relies on **disclaims** the
+> > Interface 1 and 2 ROMs as not Amstrad's copyright at all. A glob turns *"may we redistribute
+> > this?"* from a decision into an accident.
 >
 > Absence is not silent. A missing corpus makes its gate **fail**, naming the fetch instructions;
 > `ZX_CORPUS_ALLOW_MISSING=1` is the deliberate opt-out and is **refused** when `CI` is also set.
