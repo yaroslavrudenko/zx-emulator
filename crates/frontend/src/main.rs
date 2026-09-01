@@ -61,6 +61,7 @@ use macroquad::prelude::*;
 
 use frontend::audio::{self, Resampler};
 use frontend::bundle;
+use frontend::drive;
 use frontend::keymap::Hotkey;
 use frontend::media;
 use frontend::pacing::{self, LossMeter, Pacer, RateMeter, Rung, Speed, Tick};
@@ -263,7 +264,13 @@ async fn main() {
             }
         }
         for file in get_dropped_files() {
-            status.report(accept(&mut machine, &file));
+            let message = accept(&mut machine, &file);
+            // A dropped cassette replaces what is in the drive, so the tape that was turning a
+            // moment ago is simply gone. That is not a tape running out, and without this the
+            // next tick would say so over the top of the message naming the file. See
+            // [`drive::Drive::follow`].
+            status.drive.follow(machine.tape());
+            status.report(message);
         }
         // Both devices are rebuilt from the host's state every frame. The joystick needs it
         // more than the membrane does: it is active high and has no interlock, so a direction
@@ -284,6 +291,10 @@ async fn main() {
         // was added to remove, and the reason it is an accessor rather than a flag over here.
         let tick = pacing::RUNGS[status.speed].this_tick(machine.tape().is_playing());
         run_tick(tick, &mut machine, &mut pacer);
+        // **Asked here, immediately after the frames that could have ended the tape.** Under
+        // `Rung::Automatic` a three-minute cassette reaches its end in about two seconds, so a
+        // report arriving a tick late is a report nobody can connect to anything.
+        report_a_finished_tape(&machine, &mut status);
         // One clock reading for both, so the figure and the colour describe the same second
         // rather than two instants a few microseconds apart.
         let now = get_time();
@@ -498,22 +509,50 @@ fn run_tick(tick: Tick, machine: &mut Spectrum, pacer: &mut Pacer) {
     }
 }
 
+/// Say so when the tape has run out, which is the one drive change no key made.
+///
+/// # A named function rather than three lines in the loop, for [`ink`]'s reason
+///
+/// [`ink`] records what happens to a decision left inside a function no test can reach: putting
+/// the old defect back left **every** test green, because `Status::draw` needs a GPU. The frame
+/// loop is worse — it needs a window *and* never returns — so a call site in it is not merely
+/// hard to grade, it is unreachable. Out here `mod tests` drives it directly, and the assertion
+/// that the wiring exists is a machine's rather than a reader's.
+///
+/// The drive is asked **after** the frames have run, because those frames are what ends a
+/// cassette; asking first would report every tape one tick late.
+fn report_a_finished_tape(machine: &Spectrum, status: &mut Status) {
+    if let Some(message) = status.drive.ran_out(machine.tape()) {
+        status.report(message.to_owned());
+    }
+}
+
 /// Carry out a hotkey.
 fn act(action: Hotkey, machine: &mut Spectrum, status: &mut Status) {
     match action {
         Hotkey::ToggleStatus => status.visible = !status.visible,
         Hotkey::SaveSnapshot => status.report(write_snapshot(machine)),
+        // **Each of the three asks the drive afterwards rather than announcing beforehand.**
+        // `spectrum::tape::Tape::play` starts nothing on an empty drive and nothing on a tape
+        // wound to its end, and this arm used to report `tape playing` in both — a message that
+        // reports the keystroke cannot be wrong about the keystroke and cannot be right about
+        // anything else. `frontend::drive` carries the whole argument and owns the strings, which
+        // is also what makes them reachable from a test; `tests/on_screen_strings.rs` records that
+        // literals living here are not.
         Hotkey::PlayTape => {
             machine.tape_mut().play();
-            status.report("tape playing".to_owned());
+            let message = status.drive.played(machine.tape());
+            status.report(message.to_owned());
         }
         Hotkey::StopTape => {
             machine.tape_mut().stop();
-            status.report("tape stopped".to_owned());
+            let message = status.drive.stopped(machine.tape());
+            status.report(message.to_owned());
         }
         Hotkey::RewindTape => {
             machine.tape_mut().rewind();
-            status.report("tape rewound".to_owned());
+            let message = status.drive.rewound(machine.tape());
+            status.report(message.to_owned());
         }
         Hotkey::Reset => {
             machine.reset();
@@ -690,6 +729,13 @@ struct Status {
     /// the mixer all look identical from the outside. A number that climbs and falls says the
     /// device is alive; `--` says there is not one.
     audio_queued: i32,
+    /// The tape drive as this bar last described it, so that a tape ending is news.
+    ///
+    /// It lives here rather than beside [`Pacer`] in the frame loop because it is a property of
+    /// the *readout* and not of the machine: it records what was last said out loud, which is a
+    /// question only the thing doing the saying can answer. [`drive::Drive`] carries the argument
+    /// for why that is not the shadow copy `keymap` warns about.
+    drive: drive::Drive,
     message: String,
     /// Reused so the per-frame path formats without allocating.
     line: String,
@@ -709,6 +755,7 @@ impl Status {
             arrows: 0,
             speed: 0,
             audio_queued: -1,
+            drive: drive::Drive::new(),
             message: OPENING_MESSAGE.to_owned(),
             line: String::with_capacity(128),
         }
@@ -968,6 +1015,85 @@ mod tests {
             named >= 4,
             "only {named} droppable formats were checked — the table has shrunk",
         );
+    }
+
+    /// A ROM of nothing but `NOP`, so the clock advances and the cassette with it.
+    const NOTHING: [u8; 16 * 1024] = [0x00; 16 * 1024];
+
+    /// A machine whose 60-T-state cassette has already been played off the end.
+    fn a_machine_with_a_spent_cassette() -> Spectrum {
+        let mut machine = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        machine.insert_tape(spectrum::Tape::new(vec![10, 20, 30]));
+        machine.tape_mut().play();
+        machine.run_frame();
+        assert!(
+            !machine.tape().is_playing(),
+            "the fixture is wrong: 60 T-states must not survive a 69,888 T-state frame",
+        );
+        machine
+    }
+
+    #[test]
+    fn pressing_play_on_a_spent_cassette_does_not_claim_to_be_playing() {
+        // **The wiring, not the decision.** `tests/tape_reports.rs` grades `frontend::drive` and
+        // would stay perfectly green with this file's `Hotkey::PlayTape` arm reverted to the
+        // `status.report("tape playing".to_owned())` it used to be — which is the whole of the
+        // defect, and it lived here rather than in the library. `ink` records the same lesson
+        // from the same file: a mutation that survives is a gate looking at the wrong function.
+        let mut machine = a_machine_with_a_spent_cassette();
+        let mut status = Status::new();
+
+        act(Hotkey::PlayTape, &mut machine, &mut status);
+        assert_eq!(status.message, drive::AT_THE_END);
+
+        // And the empty drive, which is the other press `tape playing` used to answer.
+        let mut empty = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        act(Hotkey::PlayTape, &mut empty, &mut status);
+        assert_eq!(status.message, drive::NO_TAPE);
+    }
+
+    #[test]
+    fn a_tape_running_out_is_reported_by_the_loop() {
+        // The other half of the wiring, and the half the frame loop cannot be asked about at all:
+        // it needs a window and never returns. So the call it makes is a named function, and this
+        // drives that function exactly as the loop does — press PLAY, run the frames, ask.
+        let mut machine = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        machine.insert_tape(spectrum::Tape::new(vec![10, 20, 30]));
+        let mut status = Status::new();
+
+        act(Hotkey::PlayTape, &mut machine, &mut status);
+        assert_eq!(status.message, drive::PLAYING);
+        report_a_finished_tape(&machine, &mut status);
+        assert_eq!(status.message, drive::PLAYING, "nothing has ended yet");
+
+        machine.run_frame();
+        report_a_finished_tape(&machine, &mut status);
+        assert_eq!(status.message, drive::RAN_OUT);
+    }
+
+    #[test]
+    fn every_thing_the_drive_can_say_fits_the_row_it_is_drawn_on() {
+        // These share row 1 with `OPENING_MESSAGE`, and they are the messages a person reads at
+        // the moment they are most confused — a press that did nothing, or a cassette that has
+        // just ended. A sentence explaining the recovery is worth nothing with the recovery off
+        // the right-hand edge, which is exactly what happened to `OPENING_MESSAGE` for a
+        // fortnight while width was gated in one place and not the other.
+        //
+        // Listed rather than looped over a table, because there is no table: each is a `pub const`
+        // in `frontend::drive` and a new one that nobody added here would be a new way to overrun
+        // the row. That is the same trade `spectrum::tape`'s own `SOURCES` makes, and for the same
+        // reason — a walk that silently stopped visiting a file reads as a file with nothing to
+        // find.
+        for (name, text) in [
+            ("drive::PLAYING", drive::PLAYING),
+            ("drive::NO_TAPE", drive::NO_TAPE),
+            ("drive::AT_THE_END", drive::AT_THE_END),
+            ("drive::RAN_OUT", drive::RAN_OUT),
+            ("drive::STOPPED", drive::STOPPED),
+            ("drive::REWOUND", drive::REWOUND),
+        ] {
+            assert_fits(name, text);
+        }
     }
 
     #[test]

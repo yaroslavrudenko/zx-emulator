@@ -92,6 +92,7 @@
 //! | **The rung that decides for itself decides the same machine** — with a cassette playing, [`pacing::Rung::Automatic`] and 1× leave the same [`spectrum::Spectrum::cpu_state`], the same 327,680 bytes and the same [`spectrum::tape::Tape`], *including across the moment the drive stops itself* | `tests/speed_multiplier.rs`'s `a_tape_loaded_under_automatic_is_the_same_tape`. It is a **separate** claim from the row above and not a repetition of it: every multiplier reaches its frame count from `elapsed × factor`, and this rung reaches it by spending [`pacing::FLAT_OUT_BUDGET`] of wall clock, so nothing proven of the one carries to the other. The cassette is thirty frames of a forty-frame run, so the machine must key itself back to real time partway and finish paced — the transition `tests/speed_multiplier.rs` predicted a milestone earlier as *"the moment the emulator would key an automatic fast-load off"* | **proven** |
 //! | **Automatic speeds up only while the drive is turning, and no other rung reads the drive at all** | `tests/speed_multiplier.rs`'s `automatic_runs_flat_out_only_while_the_drive_is_turning`, over the whole of [`pacing::RUNGS`] in both drive states. The second half is the one a person would feel: a machine parked at 1× to watch the loading stripes must not be overtaken when they press PLAY. The equivalence row above **cannot** catch a blinded trigger — two machines that both ran paced are still identical — so the discriminating assertion is that automatic reached the frame count in less than half the display ticks | **proven** |
 //! | **A flat-out burst spends its budget and stops** | `tests/speed_multiplier.rs`'s `a_flat_out_tick_stops_when_its_budget_is_spent`, against a stepped clock so the count is a property of the budget rather than of how busy the machine is. Pinned **twice and independently**: a `const` assertion in [`pacing`] refuses at compile time any budget past the tenth of a second a person notices, and this asserts the same bound where it is spent. It is the one thing in this file whose failure mode is a **hang** rather than a red test — the burst owns its own loop — which is why the bound is asserted rather than argued | **proven** |
+//! | **The tape keys report what the drive did, not what the key meant** — an empty drive, a tape wound to its end, and a tape that ran out on its own are each named, and none of the three says `tape playing` | `tests/tape_reports.rs`, driving a real [`spectrum::tape::Tape`] in a real machine to each of the three states rather than constructing the answer. The discriminating half is the **negative** controls, because the positive ones pass on a [`drive::Drive`] that simply always reported: `F4` must not produce [`drive::RAN_OUT`], a dropped cassette must not either, and the report must fire **once** rather than on every tick after. `the_reports_can_disagree` is the control proving the three cases are actually distinguishable | **proven** |
 //!
 //! ## Not gated, and it is observation
 //!
@@ -116,6 +117,7 @@
 
 pub mod audio;
 pub mod bundle;
+pub mod drive;
 pub mod host;
 pub mod keymap;
 pub mod media;

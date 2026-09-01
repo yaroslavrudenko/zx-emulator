@@ -29,7 +29,7 @@
 //! attempted, which is the property that failed.
 
 use frontend::host::SaveError;
-use frontend::{keymap, media};
+use frontend::{drive, keymap, media};
 
 /// Where the committed 48K ROM is, from the workspace root.
 const ROM: &str = "testdata/roms/48.rom";
@@ -244,6 +244,38 @@ fn every_arrow_scheme_name_and_hint_is_drawable() {
         "the loop and the table disagree about how many schemes there are",
     );
     assert!(checked >= 2, "there is nothing to cycle");
+}
+
+#[test]
+fn everything_the_tape_drive_can_say_is_drawable() {
+    // These landed with `frontend::drive` and they are library data rather than `main.rs`
+    // literals, which is half of why they live there: the three messages a person reads at the
+    // moment a press did nothing are the worst possible ones to be unreachable by this gate.
+    //
+    // `AT_THE_END` and `RAN_OUT` both name `F5`, and a hyphen is the character an author reaches
+    // for when writing a sentence with an aside in it — which is precisely how the em dash this
+    // file was written about got onto the screen three times.
+    let messages = [
+        drive::PLAYING,
+        drive::NO_TAPE,
+        drive::AT_THE_END,
+        drive::RAN_OUT,
+        drive::STOPPED,
+        drive::REWOUND,
+    ];
+    let mut checked = 0;
+    for message in messages {
+        assert_drawable("a tape-drive message", message);
+        // Vacuously drawable is this file's own recurring failure: `assert_drawable` passes on an
+        // empty string, so a constant emptied by a bad edit would satisfy the loop by saying
+        // nothing at all — which is the silence the whole module exists to remove.
+        assert!(
+            !message.is_empty(),
+            "a tape-drive message with nothing to say"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, messages.len(), "the loop and the list disagree");
 }
 
 #[test]
