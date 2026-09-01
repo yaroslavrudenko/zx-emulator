@@ -50,9 +50,11 @@
 //! graded less than they appeared to.
 //!
 //! > **This said *"caught five gates"* and the figure had no source.** `docs/STATUS.md` — the
-//! > document that number was resting on — records **no such count**: verified on 2026-09-01 by
-//! > `grep -n -iE 'occasion|graded less|worst form' docs/STATUS.md`, which matches nothing at
-//! > all. The one place that document does count this family is
+//! > document that number was resting on — recorded **no such count**: verified on 2026-09-01,
+//! > before that document was corrected, by
+//! > `grep -n -iE 'occasion|graded less|worst form' docs/STATUS.md`, which matched nothing at
+//! > all. It matches now because the correction lives there too. The one place that document
+//! > does count this family is
 //! > *A gate that nothing runs, for the third time — and the form got worse*, which names
 //! > **three** instances and counts something narrower than this sentence claimed — see
 //! > [`frontend`](crate)'s own header, where the whole correction is set out. The mechanism is

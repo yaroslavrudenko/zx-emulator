@@ -28,6 +28,50 @@ been labelled as such; nothing in them changed.
 > cheaper than a surface with no record at all, which is what `spectrum` had between `2157331` and
 > this entry.
 
+> **Widened again on 2026-09-01, to `crates/frontend`, and the reason the question came up is
+> instructive.** `docs/M8.md` noticed that this file's opening line names `crates/z80` and
+> `crates/spectrum` and that **`crates/frontend` is in neither list**, so M8's public additions
+> would have had no home here — and it declined to settle it, on the ground that *"the same
+> widening decision was taken deliberately once and should be taken deliberately again."* That was
+> the right call and this is that second deliberate taking.
+>
+> **What forced it was not M8 but M7.** Extending `zx-shot` to photograph the 128 changed
+> `frontend::media::start`'s **signature**, and with it the meaning of an existing command line:
+> `zx a.rom b.rom` used to mean *"the last ROM wins"* and now means *"a 128, editor first"*. **A
+> reinterpreted argument is the quiet kind of breaking change** — no signature a compiler can
+> object to for the person typing it — which is precisely the category this file exists to make
+> loud. A crate whose surface can break a user's habit without breaking their build needs a record
+> more than one that cannot, not less.
+>
+> The argument against widening is the one the M5 entry already answered: the alternative
+> "elsewhere" is `crates/frontend/src/lib.rs`'s gated / not-gated tables, and those are an
+> **evidence** register, not an API register. Pointing a reader asking *"did this break?"* at a
+> table answering *"is this tested?"* is the same conflation rejected above.
+
+## Unreleased — M7 · `crates/frontend` — the shell learned there are two machines
+
+### Changed — and one of these can break a command line without breaking a build
+
+- **`media::start`** now takes `&[&[u8]]` rather than `&[u8]`, and **the count of ROM images is
+  what names the machine**: one is a 48K, two are a 128 with the first paging in at reset. A
+  second constructor (`start_128`) was rejected — it would put the decision *"which machine is
+  this"* in every caller, before any of them had looked at what the user named.
+- **`media::Error::RomCount { given }`** added. `Error` is `#[non_exhaustive]`, so this is not
+  breaking.
+- **`zx` and `zx-shot` accumulate `--rom` rather than overriding.** This is the behaviour change
+  above, seen from the command line: a repeated `--rom` used to be a correction and is now an
+  addition, and a third is an error rather than a silently dropped file.
+- **`zx-shot --settle N`** added — frames run after the last key. The default suits a line of
+  BASIC and not a ROM re-page: selecting *48 BASIC* from the 128 menu photographs as a black
+  rectangle at the default, because the machine is genuinely mid-clear.
+
+### Not changed, and recorded so it is not proposed as a tidy-up
+
+- **`crates/frontend`'s `unsafe_code = "forbid"` stays.** `docs/M8.md` Decision 4 left the choice
+  open; it is taken there. The wasm download glue goes in a small crate of its own rather than
+  relaxing this crate's posture — `forbid` is not `deny`, and a crate that takes files from
+  strangers keeps the structural guarantee.
+
 ## Unreleased — M6 · `crates/spectrum` — the applier and the tape
 
 ### Added — `pub mod snapshot`

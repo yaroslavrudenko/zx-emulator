@@ -9,6 +9,22 @@ milestones, and once by `tests/frame_boundary.rs` and `tests/block_interrupt.rs`
 properties of the **machine** that nothing had ever driven. **Then M6 merged** (`0d3e7ef`), and its
 own eight open rows were added on the same date — see the M6 section, immediately below.
 
+> **M7's memory half boots, and `crates/frontend` enters this register for the first time.**
+> Added 2026-09-01. The 128 pages through `0x7FFD`, carries both ROMs, contends per bank, has the
+> shadow screen, and `Timing` is a value rather than a constant. **Verified here by running it, not
+> by relay:** `zx-shot`, extended in the same pass to build a 128 through the same public API a
+> consumer uses, photographs the menu with all five entries drawn; three `CAPS SHIFT`+`6` presses
+> through the real keymap move the highlight to *48 BASIC*; and selecting it reaches
+> `© 1982 Sinclair Research Ltd`. **The year changing is what makes that a claim about which ROM is
+> executing** rather than about something being drawn — `128-0.rom` carries *1986* and `128-1.rom`
+> carries *1982*, checked by offset in the committed bytes. Both 128 ROMs were gitignored and are
+> now named in `.gitignore`, with their sizes, SHA-1s, CRC-32s and SHA-256s recorded in
+> `testdata/README.md` **from the committed bytes rather than transcribed**. M7's own write-up is
+> its milestone's to make; this note exists so the register is not last to hear again.
+>
+> The `crates/frontend` rows are in [the authoritative register](#open--the-authoritative-register)
+> and the reason they were missing for six milestones is in the note above them.
+
 > **M6 merged before this document said anything about it, which is the defect this document is
 > named after.** `STATUS.md` records that *"a milestone is not done until it has written to the
 > register"*, having watched commit `2157331` ship the whole M5 machine while touching no file under
@@ -1664,8 +1680,12 @@ pushed. M5 produced the third instance and the most complete one.
 > closed set, and this document has never claimed one.
 >
 > **The phrase everybody quotes is not this document's.** *"The worst form so far"* is
-> [`MACHINE.md`](MACHINE.md)`:132`'s. `grep -n -i worst docs/STATUS.md` matches **nothing**, on
-> 2026-09-01. Four files attribute it here.
+> [`MACHINE.md`](MACHINE.md)`:132`'s. On 2026-09-01, **before this note existed**,
+> `grep -n -i worst docs/STATUS.md` matched **nothing**; it now matches only this note and the
+> ones like it, which is stated that way because otherwise the sentence falsifies itself the
+> moment it is written down. Four files attribute the phrase here. The way to re-check it is
+> `grep -n -i worst docs/STATUS.md` and to read what it returns rather than counting it — every
+> live hit should be a correction *about* the phrase, and none should be this document using it.
 >
 > **So the rule for anyone citing this:** the count is **three**, it counts *gates that nothing
 > ran*, and if the sentence you are writing says *"graded less than it appeared to"* then it is

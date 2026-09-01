@@ -272,6 +272,39 @@ lower portion of the address bus"*. `Registers::refresh_address` composes all si
 one bit**. Nothing here depends on that bit, but a claim that `IR` is proven wholesale would
 be one bit too strong.
 
+### `R` on the bus: **pre**-increment during M1, **post**-increment after it
+
+A different question from *which* register is on the bus, the one most likely to produce a wrong
+"fix", and one this repository currently states only half of.
+
+- **During T3–T4 of M1** the bus carries `{I, R}` with **`R` as it was before this fetch's
+  increment**. **Measured**, at die level: floooh's run of the visual6502 Z80 netlist shows `AB` =
+  `2203` held across `3/0 … 4/0` while the `R` register itself steps `03 → 04` at `3/1`
+  ([the netlist write-up][floooh-m1]). Independently **observed** in `redcode/Z80`, whose
+  `z80_refresh_address()` returns `(r - 1) & 127 | (r7 & 128)` — it must subtract one to recover
+  the address of the M1 in progress, which is correct only if the hardware drove the pre-increment
+  value.
+- **During the internal cycles *after* M1** it is the **post**-increment value. **Proven by the
+  corpus**: `c7` starts at `R`=`0x00`, runs one M1, and records `4 MC 0001`; `ed57` starts at
+  `R`=`0x17`, runs two M1 cycles (`ED` then `57`), and records `8 MC 1e19` = `0x17 + 2`.
+
+[floooh-m1]: https://floooh.github.io/2021/12/06/z80-instruction-timing.html
+
+**This core implements the second and never faces the first**, because it drives `PC` through M1.
+`Cpu::fetch_opcode` calls `increment_r()` before its ticks precisely so the internal cycles that
+follow get the post-increment value, and `bus_timing.rs` gates that with `REFRESH_ADDRESS` =
+`0x4006` after an initial `R` of `0x05`.
+
+> **`crates/z80/src/lib.rs`'s `fetch_opcode` doc-comment states this as one rule and it is two.** It
+> reads *"the refresh address the Z80 drives during **and after** M1 carries the post-increment
+> value"* — right for *after*, wrong for *during*. That is the same conflation as the
+> `ARCHITECTURE.md` sentence corrected in this pass, in a third place: a claim about the fetch's
+> own T3–T4 fused with a claim about the cycles that follow it. **Anyone making M1
+> hardware-accurate must read `refresh_address()` before `increment_r()` for the fetch's own two
+> T-states and after it for everything downstream** — one function needing both values. That file
+> is not this one's to change;
+> the defect is recorded here because this is where the hardware rule lives.
+
 Two further things the manual settles, both of which matter more than they look:
 
 - **`RD` is not asserted during T3–T4.** The refresh is an `MREQ`-only cycle. A machine that decides
@@ -280,16 +313,39 @@ Two further things the manual settles, both of which matter more than they look:
 - **`/WAIT` is sampled at T2 and at each `TW`, and nowhere else**: *"During T2 and every subsequent
   automatic WAIT state (TW), the CPU samples the WAIT line with the falling edge of the clock. If
   the WAIT line is active at this time, another WAIT state is entered during the following
-  cycle."* Wait states are inserted **between T2 and T3 — before the refresh address exists**. A
-  Spectrum charges contention by holding `/WAIT`, so **the address driven during T3–T4 of an M1 can
-  never lengthen that M1**, whatever it is. Contention priced once per machine cycle, at the address
-  the cycle opens on, is not a simplification of M1; for M1 it is all the hardware can do.
+  cycle."* Wait states are inserted **between T2 and T3 — before the refresh address exists**. So on
+  any machine that contends by asserting `/WAIT`, the M1 refresh half cannot lengthen its own cycle.
+
+> **Do not extend that last point to the Spectrum without naming the mechanism — the sources
+> disagree, and an earlier revision of this section asserted the wrong one.** It said *"a Spectrum
+> charges contention by holding `/WAIT`"*. The Sinclair Wiki's *ZX Spectrum 16K/48K* page says the
+> opposite: *"the ZX Spectrum uses a memory contention scheme based on stopping the Z80's clock,
+> rather than using the Z80's `WAIT` signal"* — and a stopped clock freezes the CPU wherever it
+> stands, T3 and T4 included, which is the case the `/WAIT` rule would have excluded. Chris Smith's
+> gate-level ULA reverse engineering is the primary source that settles it and is not in hand;
+> `zxdesign.info` refused connection again on 2026-09-01, as it did throughout M7, and
+> `web.archive.org` is unreachable from this environment.
+>
+> **The conclusion is unaffected and is better sourced than the mechanism was.** Contention is
+> applied at **T1 of a machine cycle and nowhere else** — the Sinclair Wiki's contention page
+> (*"this happens on the first tstate (T1) of any instruction fetch, memory read or memory write
+> operation"*, **observed**), the community opcode-timing table, which writes every fetch as `pc:4`
+> with no `ir` term (**observed**), and the snow effect, which is the **measured** half: `I` in
+> `0x40..=0x7F` corrupts the display while, per World of Spectrum's 48K reference, *"the Spectrum
+> won't crash, and program will continue to run normally"*. The refresh address demonstrably
+> reaches the memory system and demonstrably does not change the instruction's timing.
+>
+> **Where the refresh address *does* change timing on a 48K is the internal cycles after the
+> fetch**, not the fetch — the `ir:1` terms in the community table. Those are MREQ-inactive
+> T-states that the Ferranti ULA contends and the Amstrad gate array does not, which is why
+> `INC dd` is `pc:4,ir:1 ×2` on a 48K and a flat `pc:6` on a +2A/+3. This core models the 48K
+> behaviour, and `contention_magnitude.rs` gates it.
 
 **What this core does, and why the difference is inert.** `Cpu::fetch_opcode` drives `PC` for all
 four T-states — it diverges from the hardware on T3–T4 and matches it on T1–T2. Nothing can see it:
 the FUSE corpus names T=0 of every fetch and no interior T-state in any of its 1335 vectors; `Ula`
-discards `Bus::tick`'s address inside an open machine cycle; and the paragraph above says the
-hardware cannot charge for it either. Verified by mutation rather than argued — driving
+discards `Bus::tick`'s address inside an open machine cycle; and the hardware, per the block above,
+applies contention only at T1 of a cycle. Verified by mutation rather than argued — driving
 `PC, PC, IR, IR` leaves 290/290, 1045/1045 and all 68 rows of the hardware timing oracle unmoved.
 The full account, the mutation table and the disposition are on `compare_contention` in
 `crates/z80/tests/common/report.rs`.

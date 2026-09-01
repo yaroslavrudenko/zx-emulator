@@ -36,10 +36,13 @@
 //! > than the number.
 //! >
 //! > **What `docs/STATUS.md` actually records, established from that file and not from the
-//! > brief that produced the error.** On 2026-09-01,
+//! > brief that produced the error.** On 2026-09-01, **before that document was corrected**,
 //! > `grep -n -iE 'occasion|graded less|worst form|frontend' docs/STATUS.md` matched **nothing**
-//! > — the document contains neither the phrase this sentence attributed to it nor either
-//! > integer. The **one** counted enumeration of this family in it is the section
+//! > — it contained neither the phrase this sentence attributed to it, nor either integer, nor
+//! > any mention of this crate. (It matches today, because the correction is written there too;
+//! > re-checking means reading the hits rather than counting them, and every one should be a
+//! > note *about* the defect.) The **one** counted enumeration of this family in it is the
+//! > section
 //! > *A gate that nothing runs, for the third time — and the form got worse*, which names its
 //! > three instances outright: the M3 `zexdoc` job (*"The gate runs nowhere unless CI runs
 //! > it"*), the CI workflow that could not be pushed (*"verified locally and enforced
