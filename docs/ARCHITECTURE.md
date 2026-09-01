@@ -33,6 +33,9 @@ pub trait Bus {
     fn in_port(&mut self, port: u16) -> u8;
     fn out_port(&mut self, port: u16, val: u8);
 
+    /// The opcode byte of an M1 cycle. Defaulted, so implementing it is optional.
+    fn fetch(&mut self, addr: u16) -> u8 { self.read(addr) }
+
     /// One T-state elapses with `addr` on the bus. Called once per T-state, never batched.
     fn tick(&mut self, addr: u16);
 }
@@ -40,7 +43,21 @@ pub trait Bus {
 pub struct Cpu<B: Bus> { /* ... */ }
 ```
 
-Two properties, and the first revision of this document got both wrong. They were corrected
+Six methods. **`fetch` is the newest and the only defaulted one**, and it exists because M1 is the
+one machine cycle whose *length* the call stream does not disclose: a write is three T-states and a
+port access is four, but a read is three for an operand and **four** for an opcode fetch. Routed
+through one method, `LD A,B` and the read-modify half of `INC (HL)` emit byte-identical streams
+while owing different amounts of contention. `MACHINE.md` argued at M4 that this did not matter and
+was wrong; the full account of the argument and its falsification lives there, and only there.
+
+**It is defaulted because that makes it non-breaking by construction, and that was checked rather
+than asserted.** `crates/spectrum/src/ula.rs` is byte-identical to its state at the M5 commit while
+`crates/z80/src/bus.rs` gained the method, and `Ula` still contains no `fn fetch` — so the crate
+compiled *and* passed on the default, unmodified: `cargo test -p spectrum` reported **98 passed, 0
+failed** across the lib and five integration binaries when `fetch` landed. The cost of the default
+is that the machine keeps paying the residual until it opts in — see `MACHINE.md`.
+
+Two further properties, and the first revision of this document got both wrong. They were corrected
 after a review checked the signature against the corpus rather than against the prose.
 
 **One call per T-state, never a batch.** Spectrum contention is a function of `t mod 8`, so
@@ -58,6 +75,13 @@ for the internal cycles of `ADD HL,ss`, `INC ss`, `JR`, `DJNZ`, `CALL`, `PUSH` a
 CPU owns it. On a 48K, program code normally lives in contended RAM `0x4000–0x7FFF`, so `IR`
 points into contended memory for most of a game's runtime — this is the difference between
 multicolour demos working and tearing.
+
+That last claim — that the internal cycles ride `IR` rather than `PC` — was an argument until M5
+and is now a **measurement**: driving a real `Cpu<Ula>`, `ADD HL,BC` at `0x4000` costs **17
+T-states at contention phase 0 and 11 at phase 7**, and those two numbers match a hand computation
+only if all seven internal cycles are addressed by `IR`. Taken by the cold review of commit
+`2157331`; **not independently reproduced in this pass**, and the person to reproduce it is whoever
+next has a `Cpu<Ula>` positioned at a chosen frame phase.
 
 Generic over `B`, never `Box<dyn Bus>` — monomorphised, no indirect call on the hot path.
 `read`/`write` carry `#[inline]`; cross-crate inlining does not happen otherwise. Both
@@ -194,6 +218,13 @@ Everything in this section is a measurement or an assembly inspection, not an es
 Host: Apple M3 Max, rustc 1.98.0, `[profile.release]` as shipped. Re-run after M2 — it
 quadruples the opcode count on exactly the paths measured here.
 
+> **That instruction was not carried out, and two rows below decayed exactly where it said they
+> would.** The re-runs happened at M5, three milestones late, and both stale rows were falsified at
+> M2 — the milestone the sentence named. An instruction to re-measure that nothing enforces is the
+> same defect as a gate that nothing runs; the M5 re-runs below therefore ship with the **command
+> that produced them**, so the next person can re-run rather than re-derive. Rows measured at M5
+> are on the same host, rustc 1.98.0 (88d9e12ae 2026-08-18).
+
 | | Batched tick (before C1) | Per-T-state tick (shipped) |
 |---|---|---|
 | Throughput, flat 64K bus | 507× real-time | **329× real-time** |
@@ -207,8 +238,18 @@ benchmark is gated: so the next person can see what a change costs instead of gu
 
 | Other measurements | |
 |---|---|
-| Cost of `overflow-checks = true` | **5 %** on the core. One `cmp`/`b.hi` guarding the T-state accumulator — the only panic path in the whole `step` function |
+| Cost of `overflow-checks = true` | **5 %** on the core, measured at M1. **The clause that followed it is now false — see below.** |
 | Unproven bank index at M7 | **6.6 %**, avoidable for free by masking or a newtype |
+
+> **Correction to the `overflow-checks` row, found while re-measuring its neighbour.** The row used
+> to end *"One `cmp`/`b.hi` guarding the T-state accumulator — the only panic path in the whole
+> `step` function."* Both halves have expired. The accumulator is no longer the `u8` that sentence
+> described: `Cpu::t_states` is a `u32`, changed after the `u8`'s own safety comment turned into a
+> live panic on a legal run of `DD` prefixes — the incident `STATUS.md` records under
+> *comments rot at milestone boundaries*. And it is not the only panic path: the release build of
+> `Cpu<Ula>` carries **46** `panic_const_add_overflow` sites and **15** `panic_bounds_check` sites.
+> **The 5 % itself was not re-measured in this pass** and is still an M1 figure; re-running
+> `cargo bench -p z80` with and without `overflow-checks` is what would settle it.
 
 Design claims, each verified in the emitted assembly rather than assumed:
 
@@ -218,7 +259,68 @@ Design claims, each verified in the emitted assembly rather than assumed:
 | `#[inline]` makes cross-crate inlining happen | `Bus::read` compiles to **one instruction** inside `step`; no call to any bus method |
 | Decode lowers to a jump table, not a compare chain | Two real tables (119 + 64 entries); the `LD r,r'` and `ALU A,r` blocks need none — `ubfx` extracts the field directly |
 | The execute path allocates nothing | 0 allocation sites outside `#[cfg(test)]`; Rust has no escape analysis, so this is certain, not probabilistic |
-| Register indexing is in-range | `panic_bounds_check` count in `step`: **0**. The `// INVARIANT:` comments are facts the compiler proves |
+| Register indexing is in-range — **this claim is false** | **Falsified at M2, corrected at M5 — see below.** `panic_bounds_check` in `Cpu<Ula>`: **15**, not 0. The `// INVARIANT:` half survives: the checks are in the `[u8; 26]` register file, not in `decode.rs`'s tables |
+| Decision 5's bank masking is delivered, and free | **0** `panic_bounds_check` attributable to any `crates/spectrum/src` line in the release build of the crate — measured in the same run that produced the 15 above. The cold review of `2157331` reached the same 0 with a probe binary that forces `render`, `Frame::set`, `Memory::read`/`write`/`is_contended`, `Ula::tick` and `timing::delay` to be emitted rather than inlined |
+
+### The `panic_bounds_check` row was right when it was written, and wrong three milestones later
+
+The row used to read *"`panic_bounds_check` count in `step`: **0**. The `// INVARIANT:` comments
+are facts the compiler proves."* It is corrected here rather than edited, because the way it
+decayed is the point.
+
+**Re-measured, not adjusted by hand.** The number now depends on what the core is monomorphised
+over, so the measurement has to name its subject:
+
+```
+$ cargo rustc -p spectrum --release --lib -- --emit=asm -C debuginfo=2
+$ grep -c panic_bounds_check target/release/deps/spectrum-*.s
+15
+```
+
+All fifteen are in `z80` code instantiated for `Ula`, and the `.loc` records place them exactly:
+**7 at `registers.rs:148`** (`self.regs[index.0] = value`), **6 at `registers.rs:143`**
+(`self.regs[index.0]`) and 2 in `instructions.rs`. Zero are attributable to a `spectrum` source
+line, which is the separate row above: Decision 5's *"keep the bank index provably in range"* was
+carried out and costs nothing.
+
+**When it stopped being true is datable.** Each milestone merge was exported with `git archive` into
+a scratch tree, given an identical `examples/nullbus.rs` — a `Bus` implementation owning **no array
+of its own**, so every surviving check must be the z80's — and built the same way:
+
+```
+$ git archive <commit> | tar -x -C <scratch> && cp nullbus.rs <scratch>/crates/z80/examples/
+$ cargo rustc --release -p z80 --example nullbus -- --emit=asm -C debuginfo=2
+```
+
+Counting only the sites whose `.loc` lands in `crates/z80/src` (the rest are std's backtrace
+machinery, which the probe drags in and the core does not):
+
+| Tree | `panic_bounds_check` attributable to `crates/z80/src` |
+|---|---|
+| `be865f6` — M1 merge | **0** |
+| `c7d63cb` — M2 merge | **10** — 4 at `registers.rs:143`, 4 at `:148`, 2 in `instructions.rs` |
+| `e3b4c58` — M3 merge | 10, identical |
+| `0ecf59c` — M4 merge | 10, identical |
+| `2157331` — M5 | 10, identical |
+
+So the claim was **true when written and falsified at M2**, then survived three milestones
+unchallenged because nothing re-ran it. **This is *comments rot at milestone boundaries* recurring
+inside the file that named the lesson**, and it is not a mistake by the person who measured it:
+`registers.rs` is essentially unchanged since M1, so nothing in the row's own subject ever looked
+different.
+
+*Why* M2 broke it is **inferred, not measured** — the bisect dates the change to the prefix
+milestone and shows the index sites themselves untouched, which points at the decoder now producing
+a runtime operand field plus a `DD`/`FD` base where M1 had constants. Nobody has confirmed that by
+reading the two decoders side by side, and whoever wants the row *fixed* rather than merely correct
+will have to.
+
+Two cautions for whoever re-runs this. **The count is a property of the probe, not just of the
+core** — 10 against an array-free bus, 15 against `Ula`, and 11 in the cold review's own probe
+binary, because the three exercise different call sites. Report what your probe measured and say
+what it was. And **the original method was not recorded**, which is why "was it ever 0?" needed a
+bisect to answer instead of a re-run. A measurement without its command is not reproducible, and a
+number that cannot be re-run cannot be caught when it rots.
 
 The `spectrum` crate's contention arithmetic is the one cost worth watching — it is the
 largest term (−21.5 points of the M7 decomposition) and it is irreducible, because

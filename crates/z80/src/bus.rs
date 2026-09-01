@@ -21,19 +21,23 @@
 //! The nominal durations the core uses are the published Z80 machine-cycle lengths, each
 //! delivered as that many separate [`Bus::tick`] calls:
 //!
-//! | Machine cycle | T-states | Address driven |
-//! |---|---|---|
-//! | Opcode fetch (M1) | 4 | `PC` |
-//! | Memory read or write | 3 | the address transferred |
-//! | I/O port read or write | 4 | the port |
-//! | Internal operation | instruction-specific | `IR`, or the last address used |
+//! | Machine cycle | T-states | Address driven | Transfer method |
+//! |---|---|---|---|
+//! | Opcode fetch (M1) | 4 | `PC` | [`Bus::fetch`] |
+//! | Memory read or write | 3 | the address transferred | [`Bus::read`] / [`Bus::write`] |
+//! | I/O port read or write | 4 | the port | [`Bus::in_port`] / [`Bus::out_port`] |
+//! | Internal operation | instruction-specific | `IR`, or the last address used | none |
+//!
+//! That last column is what makes a cycle's *length* knowable from the call stream. Without
+//! it a three-T-state read followed by one internal cycle is indistinguishable from a
+//! four-T-state opcode fetch — see [`Bus::fetch`], which exists for exactly that reason.
 //!
 //! # Implementors should mark every method `#[inline]`
 //!
 //! [`crate::Cpu`] is generic over `B` and is never boxed, so these calls monomorphise —
 //! but LLVM will not inline across a crate boundary unless the callee is either marked
-//! `#[inline]` or reachable through LTO. Since `read` and `write` are the hottest calls
-//! in the emulator, the annotation is worth the two seconds it costs.
+//! `#[inline]` or reachable through LTO. Since `fetch`, `read` and `write` are the hottest
+//! calls in the emulator, the annotation is worth the two seconds it costs.
 
 /// Memory and I/O as seen by the Z80, plus the clock the CPU advances as it runs.
 ///
@@ -47,6 +51,42 @@ pub trait Bus {
     /// Called once per memory-read machine cycle, immediately before the matching
     /// [`Bus::tick`].
     fn read(&mut self, addr: u16) -> u8;
+
+    /// Read the opcode byte of an M1 cycle.
+    ///
+    /// Defaults to [`Bus::read`], so implementing it is optional and every existing
+    /// implementation keeps working unchanged.
+    ///
+    /// # Why it is a separate method
+    ///
+    /// M1 is the one machine cycle whose length cannot be inferred from the call stream. A
+    /// write is three T-states and a port access is four, but a read is three for an operand
+    /// and **four** for an opcode fetch. Routed through one method, `LD A,B` — a single
+    /// four-T-state M1 cycle — and the read-modify half of `INC (HL)` — a three-T-state read
+    /// then one internal cycle — emit byte-identical streams: one transfer callback followed
+    /// by four ticks at the same address. A contention model owes **one** stall for the first
+    /// and **two** for the second, and nothing in the stream says which it is looking at.
+    ///
+    /// # When it is called
+    ///
+    /// Once per M1 cycle that reads memory, which during [`crate::Cpu::step`] is also exactly
+    /// once per `R` increment — prefix bytes included, since `DD`, `FD`, `CB` and `ED` are
+    /// each their own M1 cycle with their own refresh.
+    ///
+    /// Three neighbours are deliberately **not** fetches:
+    ///
+    /// - a `DDCB`/`FDCB` instruction's displacement and opcode bytes, which the hardware
+    ///   takes with ordinary three-T-state memory reads — `R` advances twice across those
+    ///   four bytes, not four times;
+    /// - every operand, data and stack read, which is what [`Bus::read`] now means
+    ///   exclusively;
+    /// - an interrupt acknowledge, whose byte comes from the device on the data bus rather
+    ///   than from memory. That cycle refreshes `R` with no call here at all, and is the one
+    ///   place the fetch-per-refresh correspondence does not hold.
+    #[inline]
+    fn fetch(&mut self, addr: u16) -> u8 {
+        self.read(addr)
+    }
 
     /// Write one byte to the address space.
     ///

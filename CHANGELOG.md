@@ -4,6 +4,60 @@ Notable changes to the published surface of `crates/z80`. Milestones are recorde
 the first release, because the crate's API is being frozen decision by decision and the moment
 each one stopped being free is worth knowing.
 
+## Unreleased — `Bus::fetch`, the M1 opcode fetch
+
+### Added
+
+- **`Bus::fetch(&mut self, addr: u16) -> u8`**, defaulted to `Bus::read`. Non-breaking: every
+  existing implementation compiles and behaves identically without touching it, and `spectrum`
+  was left unmodified as the proof.
+
+  It exists because M1 is the one machine cycle whose **length** a machine cannot infer from
+  the call stream. A write is three T-states and a port access is four, but a read is three for
+  an operand and four for an opcode fetch — so `LD A,B` (one M1 cycle) and the read-modify half
+  of `INC (HL)` (a three-T-state read, then an internal cycle) emitted **byte-identical**
+  streams: one transfer callback followed by four ticks at the same address. A contention model
+  owes one stall for the first and two for the second, and nothing in the stream said which.
+
+  This is not a speculative addition. `crates/spectrum/src/machine_cycle.rs` reconstructs cycle
+  boundaries by deferring the fourth tick until a fifth discloses the shape, and its residual
+  error is exactly one contention point — 0 to 6 T-states — on the read-modify-write family
+  (`INC`/`DEC (HL)` and `(IX+d)`, the `CB` operations on memory, `EX (SP),HL`). That residual is
+  pinned by a test of its own. `fetch` removes the ambiguity at the source rather than
+  reconstructing it downstream.
+
+- **The rule, for implementors:** `fetch` is called once per M1 cycle that reads memory, which
+  during `step()` is also exactly once per `R` increment — prefix bytes included, since `DD`,
+  `FD`, `CB` and `ED` are each their own M1 cycle. Everything else stays on `read`: every
+  operand, data and stack access, and specifically the `DDCB`/`FDCB` displacement and opcode
+  bytes, which the hardware takes as ordinary three-T-state reads and which is why `R` advances
+  twice across that four-byte instruction rather than four times.
+
+### Two rulings this forced, both settled by what the hardware does to `R`
+
+- **A halted CPU's discarded byte is a `fetch`.** A halted Z80 has not stopped: it keeps issuing
+  M1 cycles and executing an internal `NOP`. The Z80 cannot refresh without an M1 cycle and this
+  cycle refreshes, so it is an M1 cycle — four T-states, address driven from `PC` — differing
+  from any other opcode fetch only in that the byte is thrown away.
+
+- **An interrupt acknowledge is *not* a `fetch`, and is the one exception to the rule above.** It
+  reads no memory: `/IORQ` replaces `/MREQ` and the device answers on the data bus, which in
+  mode 0 *is* the instruction and reaches the core as `interrupt`'s `data` argument. Calling
+  `fetch` there would name an address the machine would be entitled to contend and to serve from
+  its memory map. So an acknowledge refreshes `R` without fetching, and **fetch-per-refresh is
+  exact across `step()` and off by one for each accepted interrupt.** Anything reconstructing M1
+  cycles from the bus alone must add those itself.
+
+### Note for machine authors
+
+The correspondence above is also the gate. `crates/z80/tests/bus_timing.rs` asserts
+**one `Bus::fetch` call per `R` increment** across an un-prefixed instruction, a 300-byte prefix
+run, a `DDCB` form, an `ED` block instruction mid-repeat and `HALT`, with the interrupt exception
+tested rather than left as a footnote. `R` is independently graded by 290/290 and 1045/1045 FUSE
+vectors and by `zexall`, so the new method is anchored to something already proven rather than to
+a hand-count of call sites — and the check bites in both directions, since a fetch left on `read`
+drops one side of the equation while an operand read promoted to `fetch` inflates the other.
+
 ## Unreleased — M3, `zexdoc`
 
 ### The published surface did not change, and that is the result

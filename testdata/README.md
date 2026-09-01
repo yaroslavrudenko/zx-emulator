@@ -105,22 +105,124 @@ corpus at all.
 ### Making absence a failure
 
 Absence is a skip only when it has been declared, and the declaration is refused under CI —
-otherwise a conformance gate becomes a green tick that proves nothing. This applies to both
-corpora, through one shared decision point in `crates/z80/tests/common/vectors.rs`:
+otherwise a conformance gate becomes a green tick that proves nothing. This applies to **every**
+corpus in the workspace, through one shared decision point in `crates/testsupport`:
 
 | | |
 |---|---|
 | corpus present | it runs |
 | corpus absent | **the gate fails**, naming the fetch instructions |
-| corpus absent, `Z80_FUSE_ALLOW_MISSING=1` | the gate skips, printing why |
-| corpus absent, `Z80_FUSE_ALLOW_MISSING=1`, `CI` set | **refused** — the opt-out must never decide what a pipeline verifies |
-| `Z80_FUSE_REQUIRED` set at all | **refused** — it is obsolete, and a variable that is set but no longer read is how a CI author believes a guard is armed when it is not |
+| corpus absent, `ZX_CORPUS_ALLOW_MISSING=1` | the gate skips, printing why |
+| corpus absent, `ZX_CORPUS_ALLOW_MISSING=1`, `CI` set | **refused** — the opt-out must never decide what a pipeline verifies |
+| `Z80_FUSE_REQUIRED` set at all | **refused** — obsolete |
+| `Z80_FUSE_ALLOW_MISSING` set at all | **refused** — obsolete; see below |
 
-`Z80_FUSE_ALLOW_MISSING` is accepted as any of `1`/`true`/`yes`/`on`, case-insensitively;
+`ZX_CORPUS_ALLOW_MISSING` is accepted as any of `1`/`true`/`yes`/`on`, case-insensitively;
 anything unrecognised is an error rather than a silent `false`.
+
+#### Why the variable was renamed, and why the old name is an error
+
+It was `Z80_FUSE_ALLOW_MISSING`, which named one crate and one corpus while governing three.
+That understatement is not cosmetic: a developer who sets a variable named for the FUSE
+corpus, in order to work without the FUSE corpus, was **also disarming the `zex` gate and
+now the Spectrum ROM gate**, silently. The name had to say what it turns off.
+
+Setting either old spelling is a hard error rather than a no-op, for the reason
+`docs/STATUS.md` already records about `Z80_FUSE_REQUIRED` — *a guard that exists solely in a
+file nobody runs*. A stale CI configuration exporting the old name must fail loudly on the
+first run, not quietly disarm every gate while looking armed.
+
+A per-corpus opt-out would be better still — disarming FUSE should not disarm the ROM — and
+is deliberately **not** implemented here: it multiplies the number of variables a stale
+configuration can get wrong, and the `CI` refusal already covers the case that matters.
 
 ### Licensing
 
 The `zex` exercisers are Frank Cringle's `zexlax`/`zexall` work, redistributed widely under
 permissive terms. As with the FUSE vectors they are fetched rather than committed, so this
 repository redistributes nothing.
+
+---
+
+## `testdata/roms/` — the Sinclair ROMs
+
+**This is the one directory here that is committed.** The rule at the top of this file —
+nothing in `testdata/` is in the repository — has one exception, and `.gitignore` names it:
+Amstrad has explicitly permitted redistributing the Sinclair ROMs with emulators, so
+`48.rom` may live here. Game images may not; the user supplies their own.
+
+`48.rom` is the 48K's single 16 KB ROM: Sinclair BASIC, the editor, the character set at
+`0x3D00`, and the interrupt handler the 50 Hz frame interrupt vectors into. It is the **M5**
+gate — a machine that boots it to `© 1982 Sinclair Research Ltd` has a working memory map
+and a working screen.
+
+| | |
+|---|---|
+| Size | 16384 bytes |
+| SHA-1 | `5ea7c2b824672e914525d1d5c419d71b84a426a2` |
+| CRC-32 | `ddee531f` |
+
+### Provenance
+
+Fetched from two independent mirrors and compared byte for byte, because a ROM is the one
+corpus here whose contents nothing else validates — the FUSE and `zex` harnesses check the
+structure of what they load, and a subtly wrong ROM would simply fail to boot with no clue
+why.
+
+```sh
+mkdir -p testdata/roms
+curl -fSL -o testdata/roms/48.rom \
+  "https://sourceforge.net/p/fuse-emulator/fuse/ci/master/tree/roms/48.rom?format=raw"
+
+# The second mirror the committed copy was checked against:
+#   https://raw.githubusercontent.com/archtaurus/RetroPieBIOS/master/BIOS/48.rom
+shasum -a 1 testdata/roms/48.rom   # 5ea7c2b824672e914525d1d5c419d71b84a426a2
+```
+
+### Making absence a failure
+
+The same rule as every other corpus, through the same environment variable — there is one
+convention here, not one per corpus:
+
+| | |
+|---|---|
+| present | it runs |
+| absent | **the gate fails**, naming the fetch instructions |
+| absent, `ZX_CORPUS_ALLOW_MISSING=1` | the gate skips, printing why |
+| absent, `ZX_CORPUS_ALLOW_MISSING=1`, `CI` set | **refused** |
+
+> **This table used to be fiction, and it is worth recording why.** It described the rule
+> above while **no code implemented it for this corpus**: nothing in `crates/spectrum`
+> referenced either variable, because nothing in `crates/spectrum` read the ROM. The boot gate
+> was an *example*, and `cargo test` builds an example without ever calling its `main` — so
+> deleting `48.rom` left the suite green at 72 passed and the test count unchanged. Prose
+> asserting a protection the code does not provide is the exact defect class `docs/STATUS.md`
+> catalogues, and it had been introduced in the document whose job is to describe the guard.
+>
+> Both halves are now real: `crates/spectrum/tests/boot.rs` is a `#[test]`, and it reaches the
+> ROM through the shared policy in `crates/testsupport`.
+
+Absence should not happen, since the file is committed — which is exactly why the guard
+matters. A committed corpus that a sparse checkout or a stray `rm` removes produces the
+same green-and-verifying-nothing run that `docs/STATUS.md` records the FUSE gate producing,
+and "it is committed, so it is there" is the kind of reasoning that stops people looking.
+
+### Running the gate
+
+```sh
+cargo test -p spectrum --test boot
+```
+
+That is the gate. It asserts the copyright message appears **and the frame it appears on**,
+which is the number that discriminates: deleting contention entirely still reaches the
+message, on frame 85 instead of 87.
+
+The example prints the same run with the screen as text and a real-time multiple, and is a
+demonstration rather than a check:
+
+```sh
+cargo run --release -p spectrum --example boot -- testdata/roms/48.rom
+```
+
+Prints the screen as text, the CPU state, the frame the copyright message first appeared
+on, and the emulated-to-real-time ratio; exits non-zero if the message never appeared.

@@ -11,8 +11,16 @@
 //!
 //! The general shape, worth keeping past M1: **a corpus-dependent gate needs a
 //! corpus-independent floor for the properties that would otherwise vanish on a clean
-//! checkout.** These tests use only [`Machine`] and its `TestBus`, so they run everywhere,
-//! unconditionally.
+//! checkout.** These tests use only [`Machine`] and its `TestBus`, or the `M1Counter` bus
+//! defined at the foot of this file, so they run everywhere, unconditionally.
+//!
+//! # Two questions, two buses
+//!
+//! The tests above ask *which address* the CPU drives during each T-state, and [`Machine`]
+//! answers it. The tests below ask *which kind of machine cycle* a transfer opened —
+//! specifically whether it was an M1 opcode fetch — which `TestBus` cannot answer, because
+//! it takes the default `Bus::fetch` and so sees fetches and reads as the same call. That
+//! second question arrived with `Bus::fetch` itself and is checked against `R`.
 //!
 //! # These are stronger than the vectors they back up
 //!
@@ -28,6 +36,7 @@ mod common;
 use common::flags;
 use common::machine::Machine;
 use common::vectors::{MemoryBlock, Registers, Setup, State};
+use z80::{Cpu, CpuState, InterruptMode};
 
 /// Deliberately not `0x0000`, so a core that defaults an address to zero is caught.
 const PROGRAM_START: u16 = 0x0100;
@@ -281,6 +290,196 @@ fn lddr_matches_ldir_cycle_for_cycle() {
 }
 
 // ---------------------------------------------------------------------------
+// M1 opcode fetches, counted against `R`
+//
+// `Bus::fetch` splits the M1 opcode fetch out of `Bus::read` so a machine can tell a
+// four-T-state fetch from a three-T-state read followed by an internal cycle. Verifying
+// that split by counting call sites by eye is exactly the kind of evidence this project
+// keeps catching itself accepting, so it is verified against an oracle instead:
+//
+//     within one `step()`, the number of `Bus::fetch` calls equals the number of `R`
+//     increments.
+//
+// `R` is graded independently and heavily — 290/290 un-prefixed and 1045/1045 prefixed FUSE
+// vectors, plus `zexall` — so this anchors the new method to something already proven. It
+// also bites in both directions: a fetch left on `read` drops one side of the equation, and
+// an operand read promoted to `fetch` inflates the other.
+//
+// The one exception is an interrupt acknowledge, which refreshes without fetching because
+// its byte comes from the device rather than from memory. It gets its own test rather than
+// a footnote.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unprefixed_instruction_fetches_its_opcode_and_reads_its_operands() {
+    // `NOP` is the floor: one M1 cycle and no memory cycle of any other kind.
+    let nop = tally(&[0x00], started(), 1);
+    assert_eq!(
+        (1, 0),
+        (nop.fetches, nop.reads),
+        "NOP is one fetch and nothing else",
+    );
+    assert_refresh_tracks_fetches(&nop, "NOP");
+
+    // `LD BC,nn` puts both kinds in one instruction: the M1 cycle, then two three-T-state
+    // operand reads that must stay on `read`. If the split were wrong in the obvious
+    // direction — everything through `fetch` — this is the case that says so.
+    let load = tally(&[0x01, 0x34, 0x12], started(), 1);
+    assert_eq!(
+        (1, 2),
+        (load.fetches, load.reads),
+        "LD BC,nn is one fetch and two operand reads",
+    );
+    assert_refresh_tracks_fetches(&load, "LD BC,nn");
+}
+
+#[test]
+fn every_prefix_in_a_long_run_is_its_own_m1_fetch() {
+    // The same shape as `lib.rs`'s `a_long_prefix_run_does_not_overflow_the_t_state_count`,
+    // asked a different question. That test pins T-states, `PC` and `R` against a byte-wide
+    // accumulator overflowing on a legal instruction stream; this one pins that all 301 M1
+    // cycles reached `Bus::fetch`, and that not one of them arrived as a read.
+    const PREFIX_RUN: usize = 300;
+    let mut program = vec![0xDD; PREFIX_RUN];
+    program.push(0x00); // the NOP the run finally prefixes
+
+    // Every byte of this program is its own M1 cycle — which is the claim under test, so it
+    // is derived from the program rather than restated as a second literal.
+    let m1_cycles = u32::try_from(program.len()).expect("301 fits in a u32");
+    let run = tally(&program, started(), 1);
+
+    assert_eq!(
+        (m1_cycles, 0),
+        (run.fetches, run.reads),
+        "300 prefixes and the NOP they prefix are 301 M1 fetches and no read at all",
+    );
+    assert_refresh_tracks_fetches(&run, "a 300-prefix run");
+    assert_eq!(
+        45, run.refresh.1,
+        "301 increments of a seven-bit counter from zero",
+    );
+}
+
+#[test]
+fn the_indexed_cb_displacement_and_opcode_are_reads_not_fetches() {
+    // `DD CB d 06` is `RLC (IX+d)`: four bytes, of which only the first two are M1 cycles.
+    // The displacement and the operation byte arrive as ordinary three-T-state memory reads,
+    // which is why `R` advances **twice** across a four-byte instruction rather than four
+    // times. Promoting either of them to `fetch` would refresh twice too often, and would
+    // also tell a contention model to charge them as four-T-state cycles.
+    let state = CpuState {
+        ix: INDEX_BASE,
+        ..started()
+    };
+    let indexed = tally(&[0xDD, 0xCB, 0x02, 0x06], state, 1);
+
+    assert_eq!(2, indexed.fetches, "only DD and CB are M1 cycles");
+    assert_eq!(
+        3, indexed.reads,
+        "the displacement, the operation byte, and (IX+d) itself",
+    );
+    assert_refresh_tracks_fetches(&indexed, "RLC (IX+d)");
+    assert_eq!(
+        2, indexed.refresh.1,
+        "R advances twice across the four bytes, not four times",
+    );
+}
+
+#[test]
+fn a_repeating_block_instruction_refetches_its_own_opcode_each_pass() {
+    // `LDIR` repeats by rewinding `PC` two bytes and returning, one `step()` per iteration,
+    // so every pass is a fresh `ED B0` — two M1 cycles, and `R` advancing by two. That is
+    // what keeps a 64 KB copy interruptible, and therefore what lets it coexist with a
+    // 50 Hz frame interrupt; here it is visible as two passes costing four fetches.
+    let copying = CpuState {
+        hl: BLOCK_SOURCE,
+        de: BLOCK_DESTINATION,
+        bc: 2,
+        ..started()
+    };
+
+    let first = tally(&[0xED, 0xB0], copying, 1);
+    assert_eq!(2, first.fetches, "ED and B0 are each their own M1 cycle");
+    assert_eq!(1, first.reads, "and the copy reads one byte from (HL)");
+    assert_refresh_tracks_fetches(&first, "LDIR, mid-repeat");
+    assert_eq!(
+        PROGRAM_START, first.pc,
+        "PC is rewound onto the instruction, which is what makes the next pass re-fetch it",
+    );
+
+    let both = tally(&[0xED, 0xB0], copying, 2);
+    assert_eq!(
+        4, both.fetches,
+        "the second pass re-fetches the same two bytes"
+    );
+    assert_refresh_tracks_fetches(&both, "LDIR, two passes");
+    assert_eq!(4, both.refresh.1, "R advances by two per iteration");
+}
+
+#[test]
+fn a_halted_cpu_issues_a_real_m1_fetch_every_cycle() {
+    // The ruling this change had to make, and `R` is what settles it. A halted Z80 has not
+    // stopped: it keeps issuing M1 cycles and executing an internal NOP. The Z80 has no way
+    // to refresh without an M1 cycle, and a halted cycle refreshes — so it *is* an M1 cycle,
+    // differing from any other opcode fetch only in that the byte is discarded. Calling it a
+    // read would ask a contention model to charge three T-states plus an internal cycle for
+    // what the hardware spends as one four-T-state fetch.
+    //
+    // Three steps: the `HALT` itself, then two halted cycles. `PC` never leaves the opcode,
+    // so all three fetch the same address.
+    let halting = tally(&[0x76], started(), 3);
+
+    assert_eq!(
+        3, halting.fetches,
+        "the HALT and the two halted cycles are three M1 cycles",
+    );
+    assert_eq!(0, halting.reads, "a halted CPU reads nothing");
+    assert_refresh_tracks_fetches(&halting, "HALT");
+    assert_eq!(
+        PROGRAM_START, halting.pc,
+        "and PC stays on the HALT opcode throughout",
+    );
+}
+
+#[test]
+fn an_interrupt_acknowledge_refreshes_without_fetching() {
+    // The one exception, tested rather than left as a footnote. An acknowledge is an M1
+    // cycle — it refreshes `R` — but it reads no memory: the Z80 asserts `/IORQ` in place of
+    // `/MREQ` and the device answers on the data bus, which reaches this core as
+    // `interrupt`'s argument rather than through the `Bus`. Reporting it as a fetch would
+    // name an address the machine would be entitled to contend and to serve from its memory
+    // map, so the correct call count here is zero.
+    //
+    // The consequence for a machine: fetch-per-refresh is exact across `step()`, and off by
+    // one for each accepted interrupt. Anything reconstructing M1 cycles from the bus alone
+    // must add those itself.
+    let mut cpu = Cpu::new(M1Counter::new(&[0x00]));
+    cpu.set_state(CpuState {
+        iff1: true,
+        im: InterruptMode::Mode1,
+        ..started()
+    });
+
+    let t_states = cpu.interrupt(FLOATING_BUS_BYTE);
+
+    assert_eq!(
+        13, t_states,
+        "a seven-T-state acknowledge and a six-T-state push"
+    );
+    assert_eq!(0, cpu.bus().fetches, "nothing was fetched");
+    assert_eq!(
+        0,
+        cpu.bus().reads,
+        "and nothing read either: mode 1's vector is a constant",
+    );
+    assert_eq!(
+        1,
+        cpu.state().r,
+        "yet R advanced, because the acknowledge is still an M1 cycle",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -361,4 +560,147 @@ fn run(bytes: &[u8], registers: Registers) -> Vec<u16> {
         "the core faulted instead of executing {bytes:02x?}",
     );
     machine.tick_addresses().to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures for the M1-fetch tests
+// ---------------------------------------------------------------------------
+
+/// The index register's base, chosen to collide with no program, stack or block address.
+const INDEX_BASE: u16 = 0x7000;
+
+/// What a Spectrum's undriven data bus reads as, which is also `RST 38h`.
+const FLOATING_BUS_BYTE: u8 = 0xFF;
+
+/// `R` counts in its low seven bits; bit 7 keeps whatever `LD R,A` last put there.
+const REFRESH_COUNTER: u8 = 0x7F;
+/// Which is why it wraps after this many M1 cycles rather than after 256.
+const REFRESH_PERIOD: u32 = 128;
+
+/// A bus that counts M1 opcode fetches apart from every other memory read.
+///
+/// `common::machine::TestBus` cannot answer that question, and not by oversight: it takes
+/// the default `Bus::fetch`, which forwards to `read`, so the two arrive there
+/// indistinguishably — the very ambiguity the method exists to remove. Telling them apart
+/// needs a bus that overrides it, and this one does that and nothing else.
+struct M1Counter {
+    memory: Vec<u8>,
+    /// `Bus::fetch` calls — M1 opcode fetches.
+    fetches: u32,
+    /// `Bus::read` calls — operand, data and stack reads, and after this change nothing
+    /// else.
+    reads: u32,
+}
+
+impl M1Counter {
+    /// 64K of RAM with `program` loaded at [`PROGRAM_START`].
+    fn new(program: &[u8]) -> Self {
+        let mut memory = vec![0; 0x1_0000];
+        let start = usize::from(PROGRAM_START);
+        memory[start..start + program.len()].copy_from_slice(program);
+        Self {
+            memory,
+            fetches: 0,
+            reads: 0,
+        }
+    }
+}
+
+impl z80::Bus for M1Counter {
+    fn read(&mut self, addr: u16) -> u8 {
+        self.reads += 1;
+        self.memory[usize::from(addr)]
+    }
+
+    /// Deliberately not `self.read(addr)`: that is the default body this override replaces,
+    /// and delegating to it would count every fetch on the read side as well.
+    fn fetch(&mut self, addr: u16) -> u8 {
+        self.fetches += 1;
+        self.memory[usize::from(addr)]
+    }
+
+    fn write(&mut self, addr: u16, val: u8) {
+        self.memory[usize::from(addr)] = val;
+    }
+
+    fn in_port(&mut self, _port: u16) -> u8 {
+        FLOATING_BUS_BYTE
+    }
+
+    fn out_port(&mut self, _port: u16, _val: u8) {}
+
+    fn tick(&mut self, _addr: u16) {}
+}
+
+/// What a run of `step()`s did, split by machine-cycle kind.
+struct Tally {
+    fetches: u32,
+    reads: u32,
+    /// `R` before the run, and after it.
+    refresh: (u8, u8),
+    /// `PC` after the run.
+    pc: u16,
+}
+
+impl Tally {
+    /// `R` as it would stand if every M1 fetch — and nothing else — had refreshed it.
+    ///
+    /// This is the oracle, not a restatement of the code under test: the arithmetic is the
+    /// documented behaviour of the refresh register, and the only input taken from the run
+    /// is the number of `Bus::fetch` calls.
+    fn refresh_implied_by_fetches(&self) -> u8 {
+        let (before, _) = self.refresh;
+        let counted = u8::try_from(self.fetches % REFRESH_PERIOD)
+            .expect("a remainder below 128 fits in a u8");
+        (before & !REFRESH_COUNTER) | (before.wrapping_add(counted) & REFRESH_COUNTER)
+    }
+}
+
+/// The invariant: one `R` increment per M1 fetch, and no other source of either.
+#[track_caller]
+fn assert_refresh_tracks_fetches(tally: &Tally, case: &str) {
+    assert_eq!(
+        tally.refresh_implied_by_fetches(),
+        tally.refresh.1,
+        "{case}: {} fetches, so R must have gone {:#04X} -> {:#04X}",
+        tally.fetches,
+        tally.refresh.0,
+        tally.refresh_implied_by_fetches(),
+    );
+}
+
+/// The state the M1-fetch tests start from: `PC` at [`PROGRAM_START`], a usable stack, and
+/// `R` at zero so an advance reads as a count.
+fn started() -> CpuState {
+    CpuState {
+        pc: PROGRAM_START,
+        sp: STACK_TOP,
+        af: 0,
+        ..CpuState::default()
+    }
+}
+
+/// Execute `steps` instructions from `state` and report the fetch/read split.
+fn tally(program: &[u8], state: CpuState, steps: usize) -> Tally {
+    let mut cpu = Cpu::new(M1Counter::new(program));
+    cpu.set_state(state);
+    let before = cpu.state().r;
+
+    for _ in 0..steps {
+        cpu.step();
+    }
+
+    // As in `run` above: a faulted core still produces counts, and a short one could
+    // coincidentally match a short expectation.
+    assert_eq!(
+        None,
+        cpu.fault(),
+        "the core faulted instead of executing {program:02x?}",
+    );
+    Tally {
+        fetches: cpu.bus().fetches,
+        reads: cpu.bus().reads,
+        refresh: (before, cpu.state().r),
+        pc: cpu.state().pc,
+    }
 }

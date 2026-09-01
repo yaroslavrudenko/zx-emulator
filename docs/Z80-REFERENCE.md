@@ -98,7 +98,7 @@ shapes worth internalising:
 
 | Cycle | T-states | When |
 |---|---|---|
-| M1 opcode fetch | 4 | every instruction; also increments `R` |
+| M1 opcode fetch | 4 | every instruction; also increments `R`. **Not every M1 cycle reads memory** — see *Which M1 cycles read memory*, under the `R` register |
 | Memory read | 3 | operand or data fetch |
 | Memory write | 3 | data store |
 | IO read/write | 4 | `IN` / `OUT` |
@@ -181,7 +181,7 @@ interrupt.
 | `IFF2` | shadow copy; `RETN` restores `IFF1` from it |
 | `EI` | **the interrupt is not accepted until after the instruction following `EI`** |
 | `DI` | clears both immediately |
-| `HALT` | executes internal NOPs; `PC` stays on the `HALT` until an interrupt arrives |
+| `HALT` | executes internal NOPs; `PC` stays on the `HALT` until an interrupt arrives. Each of those cycles is a **full M1 cycle** — it refreshes, so it fetches; the byte is discarded, not un-read |
 | `IM 0` | executes an instruction placed on the bus (on the Spectrum, effectively `RST 38h`) |
 | `IM 1` | `RST 38h` |
 | `IM 2` | vector at `(I << 8) \| bus_value`; on the Spectrum the bus floats to `0xFF` |
@@ -192,10 +192,49 @@ without taking an interrupt in between.
 
 ## `R` register
 
-Incremented on **every M1 opcode fetch**, including each prefix byte. Only the low 7 bits
+Incremented on **every M1 cycle**, including each prefix byte. Only the low 7 bits
 count; bit 7 keeps whatever was last written by `LD R,A`. Games use it as a cheap random
 source and some protection schemes check it, so an emulator that ignores it will run most
 software and fail a few titles strangely.
+
+### Which M1 cycles read memory, and why `R` and the opcode fetch are not the same count
+
+`R` counts M1 cycles. It does **not** count opcode fetches, and the two part company because two M1
+cycles are not ordinary reads of the program stream. Both cases are decided by asking what the
+hardware puts on which bus, not by what is convenient to implement.
+
+**A halted CPU's discarded byte *is* a fetch.** A halted Z80 has not stopped: it keeps issuing M1
+cycles and refreshing memory, executing an internal `NOP` each time, with `PC` parked on the `HALT`
+opcode. **`R` settles it — the Z80 has no way to refresh without an M1 cycle, and this cycle
+refreshes.** So it is an M1 cycle in full: four T-states, `/M1` asserted, the address driven from
+`PC`, differing from any other opcode fetch only in that the core throws the byte away. Calling it
+an ordinary read would tell a contention model to charge a three-T-state read plus an internal cycle
+for what the hardware spends as one four-T-state fetch.
+
+**An interrupt acknowledge is *not* a fetch.** It reads no memory. The Z80 asserts `/M1` together
+with **`/IORQ` in place of `/MREQ`**, and the interrupting device answers on the data bus; in mode 0
+that byte *is* the instruction, and it arrives from the device rather than through the address
+space at all. What the address bus carries is `IR` — the refresh address, not an address to fetch
+from — so reporting a memory cycle here would invite the machine to contend it and to serve it from
+its own memory map, both of which would be fiction. Modes 1 and 2 read no instruction byte at all,
+and mode 2's two vector-table lookups are ordinary memory reads.
+
+**So the tempting invariant — one opcode fetch per `R` increment — is true only with its scope
+stated.** Exactly:
+
+> `R` increments **once per M1 cycle**. An opcode fetch happens once per M1 cycle **that reads
+> memory**. The interrupt acknowledge is the only M1 cycle that is neither.
+
+The correspondence is therefore **exact across `step()`** — where a frame loop spends effectively
+all of its time — and **off by one per accepted interrupt or NMI**. Nothing about the hardware
+changed between those two sentences; only the universal phrasing was wrong.
+
+**How that was found matters as much as the rule: by trying to test the invariant rather than by
+asserting it.** `crates/z80/tests/bus_timing.rs` carries
+`an_interrupt_acknowledge_refreshes_without_fetching` for exactly this reason. An acknowledge that
+started routing through `Bus::fetch` would read as a tidy-up — one more M1 cycle brought into line
+with the rest — and would silently charge a memory cycle the hardware never performs. The exception
+now has a failing case of its own, so it cannot quietly become a bug.
 
 ## Check the trace before writing the handler
 
