@@ -203,9 +203,21 @@ impl Attribute {
 ///
 /// `line` is a pixel line, 0–191, and `column` a character column, 0–31. Both are masked,
 /// so an out-of-range argument aliases within the display file rather than escaping it.
+///
+/// The line is reduced modulo [`DISPLAY_HEIGHT`] rather than masked, and that is not a
+/// stylistic choice. The line's two high bits select one of *three* thirds and the fourth
+/// combination does not exist, so there is no mask that both leaves every valid line alone
+/// and folds the invalid quarter inside: `line & 0xBF` looks right, and silently maps line
+/// 64 — the first line of the second third — to line 0.
+///
+/// Without the reduction, `pixel_address(0, 192)` returned `0x5800`, the attribute file, and
+/// 2048 of the 8192 `(column, line)` pairs escaped the display file entirely while this
+/// comment claimed they could not. A `debug_assert!` would be the wrong fix: this is called
+/// 6144 times a frame, and adding a panic path to a rendering primitive is a larger change
+/// than making the documented masking true.
 #[must_use]
 pub const fn pixel_address(column: u8, line: u8) -> u16 {
-    let line = line as u16;
+    let line = line as u16 % DISPLAY_HEIGHT as u16;
     let third = (line & 0xC0) << 5;
     let pixel_row = (line & 0x07) << 8;
     let character_row = (line & 0x38) << 2;
@@ -218,6 +230,88 @@ pub const fn pixel_address(column: u8, line: u8) -> u16 {
 #[must_use]
 pub const fn attribute_address(column: u8, row: u8) -> u16 {
     ATTRIBUTE_FILE | ((row as u16 & 0x1F) << 5) | (column as u16 & 0x1F)
+}
+
+/// Where the ROM's character set starts — the glyph for character 32, a space.
+///
+/// The `CHARS` system variable holds `0x3C00`, which is this base *minus* 256: the font has
+/// no glyphs below code 32. Fixed here rather than read from `CHARS`, so that reading the
+/// screen back does not depend on a system variable having been initialised — and so that it
+/// reports what the ROM's own font draws even for a program that has repointed `CHARS`.
+const FONT: u16 = 0x3D00;
+
+/// Bytes in one glyph.
+const GLYPH_BYTES: u16 = 8;
+
+/// The lowest character code the ROM's font covers.
+const FIRST_CHARACTER: u8 = 32;
+
+/// The highest character code the ROM's font covers.
+const LAST_CHARACTER: u8 = 127;
+
+/// The display file read back as [`DISPLAY_ROWS`] lines of [`DISPLAY_COLUMNS`] characters.
+///
+/// Each cell's eight bitmap bytes are matched against the glyphs of the character set **in
+/// `memory` itself**, so the expected bitmaps come from the machine under test rather than
+/// from a font table written here. That is the whole point: a subtly wrong screen address
+/// layout produces cells that match no glyph, and those read as `?` rather than quietly
+/// resolving to a plausible letter. An all-clear cell reads as a space.
+///
+/// This is a debugging and gating view of the screen, not a rendering path — [`render`] is
+/// what draws pixels. It exists as crate API because the boot example and the boot gate both
+/// need it and an example cannot share code with a test.
+#[must_use]
+pub fn read_text(memory: &Memory) -> Vec<String> {
+    // The font is read once rather than per cell: the same 96 glyphs were previously
+    // re-fetched for every one of the 768 cells, which is 590,000 memory reads per call.
+    let font: Vec<(char, [u8; GLYPH_BYTES as usize])> = (FIRST_CHARACTER..=LAST_CHARACTER)
+        .map(|code| (decode(code), glyph(memory, code)))
+        .collect();
+
+    (0..DISPLAY_ROWS)
+        .map(|row| {
+            (0..DISPLAY_COLUMNS)
+                .map(|column| {
+                    let cell = read_cell(memory, column, row);
+                    if cell == [0; GLYPH_BYTES as usize] {
+                        return ' ';
+                    }
+                    font.iter()
+                        .find(|(_, bitmap)| *bitmap == cell)
+                        .map_or('?', |(character, _)| *character)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The eight bitmap bytes of one character cell.
+fn read_cell(memory: &Memory, column: usize, row: usize) -> [u8; GLYPH_BYTES as usize] {
+    let mut cell = [0; GLYPH_BYTES as usize];
+    for (line, byte) in cell.iter_mut().enumerate() {
+        let pixel_line = (row * CELL + line) as u8;
+        *byte = memory.read(pixel_address(column as u8, pixel_line));
+    }
+    cell
+}
+
+/// The ROM's own glyph for `code`.
+fn glyph(memory: &Memory, code: u8) -> [u8; GLYPH_BYTES as usize] {
+    let base = FONT + u16::from(code.saturating_sub(FIRST_CHARACTER)) * GLYPH_BYTES;
+    let mut bytes = [0; GLYPH_BYTES as usize];
+    for (offset, byte) in bytes.iter_mut().enumerate() {
+        *byte = memory.read(base + offset as u16);
+    }
+    bytes
+}
+
+/// The ZX character set is ASCII except for its last two printable codes.
+const fn decode(code: u8) -> char {
+    match code {
+        0x60 => '\u{a3}', // POUND SIGN
+        0x7F => '\u{a9}', // COPYRIGHT SIGN
+        other => other as char,
+    }
 }
 
 /// A rendered frame: [`FRAME_WIDTH`] × [`FRAME_HEIGHT`] colour indices, row-major.
@@ -358,6 +452,24 @@ mod tests {
             0x57FF,
             "the last byte of the bitmap"
         );
+    }
+
+    #[test]
+    fn no_argument_at_all_escapes_the_display_file() {
+        // The doc comment claimed both arguments were masked. `column` was; `line` was not,
+        // and `pixel_address(0, 192)` returned 0x5800 — the attribute file. 2048 of these
+        // 8192 pairs escaped, so this is exhaustive rather than a sample: the failure was a
+        // whole quarter of the input space, and a sample that happened to stay under 192
+        // would have agreed with the comment.
+        for line in 0..=u8::MAX {
+            for column in 0..=u8::MAX {
+                let address = pixel_address(column, line);
+                assert!(
+                    (DISPLAY_FILE..ATTRIBUTE_FILE).contains(&address),
+                    "pixel_address({column}, {line}) = {address:#06X}, outside the display file"
+                );
+            }
+        }
     }
 
     #[test]

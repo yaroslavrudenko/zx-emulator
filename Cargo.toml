@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/z80", "crates/spectrum", "crates/frontend"]
+members = ["crates/z80", "crates/spectrum", "crates/frontend", "crates/testsupport"]
 
 [workspace.package]
 edition = "2024"
@@ -12,6 +12,8 @@ repository = "https://github.com/yaroslavrudenko/zx-emulator"
 [workspace.dependencies]
 z80 = { path = "crates/z80" }
 spectrum = { path = "crates/spectrum" }
+# Test support only, and never published: the corpus-absence policy every gate shares.
+testsupport = { path = "crates/testsupport" }
 
 # `default-features = false` keeps `thiserror` on `core::error::Error`, which is what
 # lets `crates/z80` be `#![no_std]`.

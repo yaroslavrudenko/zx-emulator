@@ -13,6 +13,7 @@ thiserror.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 divan.workspace = true
+testsupport.workspace = true
 
 [[bench]]
 name = "step"

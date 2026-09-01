@@ -34,7 +34,15 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+/// The corpus-absence policy, re-exported so every call site here reads unchanged.
+///
+/// It used to be defined in this file, which put it inside one crate's integration-test
+/// tree — reachable from `crates/z80/tests/` and from nowhere else, while `crates/spectrum`
+/// needs the identical rule for the Sinclair ROM. It now lives in `crates/testsupport`, and
+/// these re-exports are what keep this module the single name every FUSE gate reaches for.
+pub use testsupport::{reject_obsolete_env, skip_absent_corpus, testdata_dir};
 
 /// File name of the initial-state half of the corpus.
 pub const SETUP_FILE: &str = "tests.in";
@@ -394,19 +402,8 @@ impl Vector {
 // Loading
 // ---------------------------------------------------------------------------
 
-/// `<workspace>/testdata` — the root every fetched-on-demand corpus lives under.
-///
-/// One computation of the workspace-relative path, so the FUSE vectors and the `zex`
-/// binaries cannot end up disagreeing about where `testdata` is.
-pub fn testdata_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("testdata")
-}
-
 /// The directory the corpus is expected in: `<workspace>/testdata/fuse`.
-pub fn corpus_dir() -> PathBuf {
+pub fn corpus_dir() -> std::path::PathBuf {
     testdata_dir().join("fuse")
 }
 
@@ -437,52 +434,12 @@ pub fn load_corpus(dir: &Path) -> Result<Option<Vec<Vector>>, ParseError> {
     pair(setups, expectations).map(Some)
 }
 
-/// The **deliberate opt-out** for a checkout that has no corpus.
-///
-/// The default is that the corpus is required. It used to be the other way around, and
-/// that was a hole: with `testdata/fuse` moved aside, `cargo test` exited 0 with the same
-/// 87 tests and zero failures, because libtest captures stdout on success and the skip
-/// notice was a `println!`. Five tests verified nothing and the test count did not even
-/// change. Absence has to move the pass/fail surface, not a captured line of text.
-pub const ALLOW_MISSING_CORPUS_ENV: &str = "Z80_FUSE_ALLOW_MISSING";
-
-/// The previous, inverted spelling of the flag above.
-///
-/// It is now obsolete, and being *set* is a hard error rather than a no-op. A variable
-/// that a CI file still sets and the code silently ignores is precisely the failure this
-/// whole module is meant to catch — so the migration refuses to be silent about itself.
-const OBSOLETE_REQUIRE_ENV: &str = "Z80_FUSE_REQUIRED";
-
 /// The lower bound on un-prefixed vectors, shared by every test that loads the corpus.
 ///
 /// A floor rather than an exact count: it catches a truncated or half-downloaded corpus
 /// without breaking when the corpus is re-fetched at a different revision. The observed
 /// count is 290.
 pub const MIN_M1_VECTORS: usize = 250;
-
-/// Parse a boolean environment variable, refusing anything ambiguous.
-///
-/// Only `"1"` used to be honoured, which meant `true`, `TRUE`, `yes` and `on` all disarmed
-/// the flag silently — and `true` is the natural YAML spelling, exactly how an unquoted
-/// boolean is serialised into the environment. A variable that is set but unrecognised is a
-/// configuration error, never a silent `false`.
-fn boolean_env(name: &str) -> bool {
-    let raw = match std::env::var(name) {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => return false,
-        Err(std::env::VarError::NotUnicode(value)) => {
-            panic!("{name} is set to a non-Unicode value ({value:?}); expected a boolean")
-        }
-    };
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        other => panic!(
-            "{name}={other:?} is not a recognised boolean. Use one of \
-             1/true/yes/on or 0/false/no/off (case-insensitive)."
-        ),
-    }
-}
 
 /// The corpus, or `None` only when its absence has been explicitly declared.
 ///
@@ -492,7 +449,7 @@ fn boolean_env(name: &str) -> bool {
 /// * present and well-formed -> `Some(vectors)`
 /// * present and malformed   -> panic (a broken corpus is never acceptable)
 /// * absent                  -> **panic**, naming the fetch instructions
-/// * absent, with [`ALLOW_MISSING_CORPUS_ENV`] set -> `None`, and the caller skips
+/// * absent, with `testsupport::ALLOW_MISSING_CORPUS_ENV` set -> `None`, and the caller skips
 pub fn corpus_or_skip() -> Option<Vec<Vector>> {
     reject_obsolete_env();
 
@@ -504,57 +461,6 @@ pub fn corpus_or_skip() -> Option<Vec<Vector>> {
 
     skip_absent_corpus("the FUSE corpus", &dir);
     None
-}
-
-/// The obsolete variable is an error in **every** gate, not only the FUSE one.
-///
-/// Split out of [`corpus_or_skip`] when the `zex` gate arrived, so that a CI file which
-/// still sets it cannot be silently ignored by whichever gate happens not to check.
-pub fn reject_obsolete_env() {
-    assert!(
-        std::env::var_os(OBSOLETE_REQUIRE_ENV).is_none(),
-        "{OBSOLETE_REQUIRE_ENV} is obsolete and no longer read. The corpus is now required \
-         by default, so nothing needs to set it; to allow a run without the corpus, set \
-         {ALLOW_MISSING_CORPUS_ENV}=1 instead.",
-    );
-}
-
-/// The shared policy for "the corpus this gate needs is not there".
-///
-/// **Panics unless the absence has been explicitly declared**, and refuses the declaration
-/// under CI. `what` names the corpus in the failure message and `location` says where it
-/// was looked for; everything else is identical for every gate, which is the point — one
-/// implementation, so the FUSE gate and the `zex` gate cannot drift apart on the one
-/// question that decides whether a green run means anything.
-pub fn skip_absent_corpus(what: &str, location: &Path) {
-    assert!(
-        boolean_env(ALLOW_MISSING_CORPUS_ENV),
-        "{what} was not found in {}.\n\
-         It is gitignored and fetched on demand — see testdata/README.md.\n\
-         If you genuinely mean to run without it, set {ALLOW_MISSING_CORPUS_ENV}=1; that \
-         turns every corpus-backed assertion off, so it is refused under CI.",
-        location.display(),
-    );
-
-    // The opt-out is for humans on a fresh clone, and for nobody else.
-    //
-    // Without this it reproduces the original hole exactly: with the corpus absent and the
-    // flag set, the suite exits 0 with the full test count and the skip notice captured, so
-    // the run is indistinguishable from a verified one. The realistic route there is not a
-    // fork — it is somebody exporting the variable once to get a clean checkout building
-    // and never unsetting it, after which every local run looks green forever.
-    //
-    // `CI` is set by every major provider, so this is universally available; `var_os` is
-    // used rather than `var` so `CI=` (an interpolation that failed in a YAML `env:` block)
-    // still counts as set.
-    assert!(
-        std::env::var_os("CI").is_none(),
-        "{ALLOW_MISSING_CORPUS_ENV} is set and so is CI. The opt-out exists so a developer \
-         can work on a checkout without the corpus; it must never decide what a pipeline \
-         verifies. Fetch the corpus in CI — see testdata/README.md.",
-    );
-
-    println!("SKIPPING {what}: not present, and {ALLOW_MISSING_CORPUS_ENV} is set.");
 }
 
 /// Zip the two halves, insisting they describe the same vectors in the same order.

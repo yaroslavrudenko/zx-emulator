@@ -563,6 +563,7 @@ name = "spectrum"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "testsupport",
  "thiserror",
  "z80",
 ]
@@ -611,6 +612,10 @@ dependencies = [
  "rustix",
  "windows-sys",
 ]
+
+[[package]]
+name = "testsupport"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"
@@ -720,6 +725,7 @@ version = "0.1.0"
 dependencies = [
  "divan",
  "proptest",
+ "testsupport",
  "thiserror",
 ]
 

@@ -31,28 +31,54 @@
 //! # Verification, honestly
 //!
 //! M1–M4 had oracles: FUSE grades an instruction, `zexdoc` and `zexall` grade the
-//! processor. **Nothing grades a machine.** What is asserted here, and by what:
+//! processor. **Nothing grades a machine.**
+//!
+//! ## What the boot gate was measured to prove, which is much less than it looks
+//!
+//! This table used to end with "*All of it together* — **the boot gate**". That row was
+//! doing almost none of the work it claimed. Measured by mutation, each verified present in
+//! the file before its verdict was trusted:
+//!
+//! | Mutation | Boot gate |
+//! |---|---|
+//! | Screen address layout corrupted | **red** |
+//! | `/INT` never asserted | green |
+//! | Keyboard reports every key held | green |
+//! | ROM slot made writable | green |
+//! | Contention removed entirely | green — but the frame the message appears on moved 87 → 85 |
+//! | Contention phase off by one (14335 → 14334) | green, and the output is byte-identical |
+//!
+//! Two things follow. The gate graded the memory map and the screen and nothing else. And
+//! the one number that *did* discriminate — the frame the message first appeared on — was
+//! printed and never asserted, so it caught nothing. `tests/boot.rs` now asserts it.
+//!
+//! ## What is asserted, and by what
 //!
 //! | Property | Evidence |
 //! |---|---|
-//! | Memory map, slot indirection, ROM write-protection | unit tests in [`memory`] |
-//! | Screen address layout | unit tests in [`screen`], including the bijection over all 6144 bytes |
-//! | Keyboard matrix | unit tests in [`keyboard`], every key on its own half-row |
+//! | Memory map, slot indirection | unit tests in [`memory`] |
+//! | Screen address layout | unit tests in [`screen`], including the bijection over all 6144 bytes and that no `(column, line)` pair escapes the display file |
 //! | Frame length, interrupt window, contention pattern | unit tests in [`timing`] |
-//! | Machine-cycle reconstruction | unit tests in [`machine_cycle`] |
-//! | All of it together | **the boot gate**: the ROM reaching `© 1982 Sinclair Research Ltd` |
-//! | Contention *phase* — [`timing::FIRST_CONTENDED_T_STATE`] | **nothing** |
+//! | Machine-cycle boundaries — one charge per cycle, each internal cycle charged on its own | unit tests in [`ula`] over synthesised streams, and `tests/contention_magnitude.rs` through a real `Cpu<Ula>`. The Z80 cycle lengths [`ula`] holds duplicate `crates/z80`'s private ones; nothing compares the two sets, but a wrong length here moves a hand-derived figure there |
+//! | ROM write-protection | `tests/rom_write_protection.rs` — every address of the page, driven by the **slot map**, through all three write paths |
+//! | Keyboard matrix | `tests/keyboard_matrix.rs` — the full 40 key × 8 half-row cross product, against a membrane table written independently of [`keyboard`]'s own map, plus the two absolute anchors |
+//! | 50 Hz interrupt | `tests/frame_interrupt.rs` — the line, its window, acceptance against `IFF1` × position, `HALT` escape, and the real ROM's own `FRAMES` counter advancing once per frame |
+//! | Contention *magnitude* | `tests/contention_magnitude.rs` — the same instruction one bank apart, per phase and over a run, driven through a real `Cpu<Ula>` |
+//! | The whole machine | `tests/boot.rs` — the ROM reaching `© 1982 Sinclair Research Ltd`, **and the frame it does it on** |
+//! | Contention *phase* — [`timing::FIRST_CONTENDED_T_STATE`] | `tests/contention_phase.rs` pins it to the frame's structure. **No oracle.** The derivation is `64 x 224 - 1`; nothing measures it against hardware |
 //! | Floating bus | **nothing** — not modelled; see [`ula`] |
 //! | Progressive drawing: multicolour, border stripes | **nothing** — not modelled; see [`screen`] |
+//! | The 32 T-state interrupt window's *length* | **nothing** — pinned against drift, never measured |
+//! | I/O contention through a real `Cpu<Ula>` | **nothing** — [`ula`]'s unit tests synthesise the tick stream by hand |
+//! | Keyboard ghosting / rollover | **nothing** — not modelled |
 //!
-//! The last three rows are the point of this table. `docs/MACHINE.md` asks for what is
-//! *not* covered to be written down rather than inferred from the absence of a failing
+//! The rows reading **nothing** are the point of this table. `docs/MACHINE.md` asks for what
+//! is *not* covered to be written down rather than inferred from the absence of a failing
 //! test, and those are the answers.
 
 #![deny(missing_docs)]
 
 pub mod keyboard;
-pub mod machine_cycle;
 pub mod memory;
 pub mod screen;
 pub mod timing;

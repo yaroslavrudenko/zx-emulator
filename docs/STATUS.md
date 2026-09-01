@@ -3,7 +3,42 @@
 A living record of where the project actually is — what is proven, what is measured, what is
 open. Updated as work lands, not once at the start.
 
-**Last updated:** 2026-09-01, during M3.
+**Last updated:** 2026-09-01, during M5.
+
+> **The header said *"during M3"* while the document's top section was M4 and M5 had already
+> landed.** It is corrected here rather than silently bumped, because the gap is the symptom of a
+> real defect and not a typo: commit `2157331` shipped the whole M5 machine and **touched no file
+> under `docs/`**. Its findings — including four open questions — went into a commit message and a
+> crate doc comment instead. A commit message is not a register: it is never updated when an item
+> closes, so an item recorded there is invisible the moment it stops being true. `ARCHITECTURE.md`
+> already says the register lives here **and only here**; the corollary it did not spell out is that
+> a milestone is not done until it has written to the register.
+
+---
+
+## Milestone M5 — the 48K boots — **SECTION INCOMPLETE, DO NOT READ AS A VERDICT**
+
+> **This section is open.** The machine landed in commit `2157331` and the evidence that decides
+> what it proves is **still being produced**: five gates are being written, and a cold review of the
+> commit has returned REJECT with findings still in flight. What follows is the register of what M5
+> opened — nothing more. **The measurements, the coverage table and the verdict are not here yet**,
+> and their absence must not be read as their being favourable. A later pass writes them.
+
+What is settled: the 48K boots to `© 1982 Sinclair Research Ltd` on frame 87, matched against
+glyphs read from the ROM's own character set at `0x3D00` rather than a font table this crate wrote,
+and 200 frames of boot run at 96× real time.
+
+### What M5 opened — four items
+
+They are **not listed here.** There is one open register in this project and it is
+*[Open — the authoritative register](#open--the-authoritative-register)*, in the M1 section; a
+second table in the newest section is precisely the duplication that let two documents disagree
+about four facts in one session. The four items now live there, in one place, with their evidence:
+
+- `timing::FIRST_CONTENDED_T_STATE = 14335` has **no oracle**.
+- The read-modify-write contention residual — now closable, and not closed.
+- **Five mutations leave the boot gate green.**
+- **Nothing runs the boot gate.**
 
 ---
 
@@ -325,20 +360,40 @@ one handler; and `DJNZ` uses two different addresses in one instruction.
 
 ### Open — the authoritative register
 
-This table is the single source for what is open. `ARCHITECTURE.md` links here and does not
-duplicate it: the two were briefly kept in parallel and disagreed about four facts within one
-session, which is the same failure mode that let the `tick` contract survive unchallenged.
+This table is the single source for what is open, **across all milestones** — it sits in the M1
+section for historical reasons, not because it is scoped to M1. `ARCHITECTURE.md` links here and
+does not duplicate it: the two were briefly kept in parallel and disagreed about four facts within
+one session, which is the same failure mode that let the `tick` contract survive unchallenged. The
+M5 section above lists its four item *names* and defers here for their state, for the same reason.
 
 | Item | State | Settled by |
 |---|---|---|
-| `Q` latch — **rule implemented, latch lifecycle BROKEN** | `((q ^ f) \| a) & 0x28` has landed, but `begin_operation()` zeroes `q` before `SCF`/`CCF` read it, so the effective rule is `(f \| a) & 0x28`. **FUSE is red: 288/290.** The harness half is fixed (`q` loaded from `F`); the core half is not | A `q_prev` field carrying the previous instruction's latch — three lines, proven in scratch to restore 290/290 and 1045/1045. **Blocks M3.** `crates/z80/src` is owned elsewhere. See the M3 section |
+| **M5** — `timing::FIRST_CONTENDED_T_STATE = 14335` has **no oracle** | 14334 produces byte-identical output, so nothing in this repository currently distinguishes the two. Recorded as an open question rather than a settled constant | A known-timing test program that reports measured T-state counts — item 2 of `MACHINE.md`'s verification plan, and the only item there that is an oracle rather than an observation |
+| **M5** — read-modify-write contention residual | One contention point, 0–6 T-states, per instruction that performs exactly one internal cycle at the address it just read. Pinned by a test that asserts the loss rather than hiding it. **Now closable**: `Bus::fetch` has landed in the CPU | `Ula` implementing `fetch`. `crates/spectrum/src/ula.rs` still inherits the default, and its own test records that it should go red when that changes |
+| **M5** — five mutations leave the boot gate green | `/INT` never asserted; the keyboard reporting every key held; the ROM slot made writable; contention removed entirely; contention phase off by one (byte-identical output). Positive panic-probes confirm the keyboard read and the interrupt acceptance are *executed* — they are simply not *graded* | Five targeted gates, **in flight**. Until they land, the boot gate grades the memory map's read side and the screen, and nothing else |
+| **M5** — nothing runs the boot gate | It is `crates/spectrum/examples/boot.rs`; `cargo test` builds an example without calling `main`. Deleting the committed ROM left the suite at 72 passed | A real `#[test]`, **in flight**. See *A gate that nothing runs, for the third time* |
 | The flag latch has almost no instrument | Two FUSE vectors (`37_1`, `3f`) are the **only** gate that can see it. `zexdoc` masks the bits off; `zexall` passes against three different rules including a stuck-at-zero latch | A corpus with a flag-setter → no-flag instruction → `SCF` sequence. Neither existing corpus has one |
 | CI does not run the M3 gate | `.github/workflows/ci.yml` has the `zexdoc` job written, but `.github/` cannot be pushed from the session that wrote it — the token lacks `workflow` scope | Someone with `workflow` scope pushing it. Until then the gate is verified locally and enforced nowhere, which is the `Z80_FUSE_REQUIRED` defect again |
 | `WZ` / MEMPTR | Carried in `CpuState`, never written | M4, when `BIT n,(HL)` first makes it observable |
 | Resolved-target refactor | `read_operand`, `write_operand` and `tick_read_modify_delay` each recompute `pair(base)` independently. Free for `(HL)`; for `(IX+d)` the displacement must be fetched once and the addition charged once | **M2's opening move.** Needs a `Register(RegIndex) \| Memory(u16)` computed once and threaded |
-| `Cpu<B: Bus>` struct-level bound | Downstream types naming `Cpu<Ula>` must carry `where Ula: Bus`; the fields need no bound to be well-formed | Removable at any time — non-breaking, but touches every signature written meanwhile |
-| M1 fetch vs operand read | The machine cannot tell an M1 opcode fetch from an operand read; both arrive as `Bus::read` | Not blocking. Contention depends on address and `t mod 8`, both of which the machine has. A defaulted `fn fetch(&mut self, addr) -> u8 { self.read(addr) }` is non-breaking whenever a debugger or a precise floating-bus model wants it |
 | Contention within a cycle | Only cycle *starts* are pinned; nothing asserts the address holds constant across a cycle's remaining T-states. It does — but by implementation, not by gate | One assertion over `tick_addresses` between consecutive transfers, if it earns its place |
+
+**Not audited in this pass:** *resolved-target refactor*, *`WZ` / MEMPTR* and *contention within a
+cycle* were carried forward as written and were **not** re-checked against the crate. `WZ` in
+particular has passed the milestone its row names as its settling condition, so treat its state as
+unverified rather than current. Whoever next opens this register should re-derive all three; the
+`panic_bounds_check` correction in `ARCHITECTURE.md` is what an unaudited carry-forward costs.
+
+### Closed — items that left the register, and what closed each one
+
+An item leaves the Open table only into this one, with its evidence. A row that simply disappears
+is indistinguishable from a row nobody re-read.
+
+| Item | What it was | What closed it |
+|---|---|---|
+| **M1 fetch vs operand read** | *"Not blocking. Contention depends on address and `t mod 8`, both of which the machine has. A defaulted `fn fetch(&mut self, addr) -> u8 { self.read(addr) }` is non-breaking whenever a debugger or a precise floating-bus model wants it."* | **The reasoning was wrong and M5 measured it.** `LD A,B` and the read-modify half of `INC (HL)` emit byte-identical streams — `read(addr)` then four `tick(addr)` — while owing one contention point and two respectively, so address and phase are not sufficient however true it is that contention depends on them. `crates/spectrum/src/machine_cycle.rs` had to reconstruct the boundaries by deferral, at a residual of one contention point (0–6 T-states) on the read-modify-write family. `Bus::fetch` has since landed in `crates/z80/src/bus.rs`, defaulted, with every M1 opcode fetch routed through it. **The CPU half is closed; the machine half is not** — `Ula` still inherits the default, and the residual is the second row of the Open table above. Full account in [`MACHINE.md`](MACHINE.md); the two rulings it forced are in [`Z80-REFERENCE.md`](Z80-REFERENCE.md) |
+| **`Q` latch — latch lifecycle** | *"`((q ^ f) \| a) & 0x28` has landed, but `begin_operation()` zeroes `q` before `SCF`/`CCF` read it… **FUSE is red: 288/290**… **Blocks M3**."* | The `q_prev` fix landed in `crates/z80/src`: `begin_operation` now assigns `self.q_prev = self.q` before clearing, and both `SCF`/`CCF` call sites read `q_prev`. Re-measured here rather than inherited — `cargo test -p z80 --test fuse_vectors` reports **290 executed, 290 passed, 0 failed** and **1045 executed, 1045 passed, 0 failed**. The row had been red in the register through two merged milestones. **What it does *not* close** is the row above it: the rule is still graded by two FUSE vectors and nothing else |
+| **`Cpu<B: Bus>` struct-level bound** | *"Downstream types naming `Cpu<Ula>` must carry `where Ula: Bus`… Removable at any time."* | Removed. The declaration is `pub struct Cpu<B>` |
 
 ### Where the corpus is not an oracle
 
@@ -428,6 +483,17 @@ run.
 **So a doc-comment sweep is part of a milestone's definition of done**, alongside the gate sweep.
 Not a periodic tidy: a step, performed before the milestone is reported.
 
+> **A fourth instance, found at M5, and this one was in a *measurement*.** `ARCHITECTURE.md`'s
+> *Measured* section claimed register indexing was proven in range; it was true at M1 and falsified
+> at M2, and survived three further milestones. The numbers and the bisect live there and **only**
+> there. Two things generalise. First, the sweep must cover **measured rows, not only prose** — a
+> number reads as more durable than a sentence and is not. Second, that section carried an explicit
+> instruction to *"re-run after M2"*, naming the exact milestone that broke it, and nothing enforced
+> it. **An unenforced instruction to re-measure is the same defect as an unrun gate**, and it failed
+> the same way: silently, while looking green. The remedy adopted is the one already used for the
+> gates — every re-measured row now ships with the command that produced it, so re-running is
+> cheaper than re-deriving.
+
 ### Exhaustive on one axis can be weaker than a sample on another
 
 The harness's ALU test was a 256-case proptest; it was replaced with an exhaustive sweep of all
@@ -493,6 +559,57 @@ never the *bit pattern*.
 The general rule: **an algebraic argument is exactly as strong as its weakest premise**, and the
 premise here was a plausible claim about another program's internals, asserted rather than measured.
 Where a measurement is available, it outranks a proof about someone else's code.
+
+### A gate that nothing runs, for the third time — and the form got worse
+
+This document already records the pattern twice: *"The gate runs nowhere unless CI runs it"* for the
+M3 `zexdoc` job, and *"verified locally and enforced nowhere"* for the workflow that cannot be
+pushed. M5 produced the third instance and the most complete one.
+
+The boot gate — the thing `MACHINE.md` ranks **first** in its verification plan — is
+`crates/spectrum/examples/boot.rs`. **`cargo test` builds an example and never calls its `main`.**
+The cold review of commit `2157331` deleted the committed ROM and the suite stayed at 72 passed;
+there was no `crates/spectrum/tests/` directory at all.
+
+**The escalation is the finding.** The M3 gate was an `#[ignore]`d `#[test]` — invisible by default,
+but a test, reachable with `cargo test -- --ignored`, and discoverable by anyone listing the suite.
+An example is not a test in any form: no flag reaches it, no listing shows it as skipped, and its
+absence from a run leaves no trace. The earlier instances were gates that were *not scheduled*; this
+one was never a gate.
+
+It is also the same failure the harness review names as the most dangerous — *"the most dangerous
+defect was not a bug in a comparison, it was a comment"*. The commit message describes what the gate
+covers, in a table, measured by mutation. Every word of that is accurate about what the example
+*would* grade **if anything ran it**, and nothing in it says that nothing does.
+
+**Being written now, not fixed.** A real test is in flight in `crates/spectrum/tests/`. This entry
+stands until it lands, and the next docs pass closes it — the register does not get to record a fix
+before the fix exists.
+
+### An invariant that looked universal, and the test that found its scope
+
+`Bus::fetch` arrived with an obvious companion rule: **one `fetch` per `R` increment.** It is nearly
+true, it is the reason the method can be described in one line, and it is wrong as stated.
+
+`R` increments once per **M1 cycle**. `fetch` is called once per M1 cycle **that reads memory**. Two
+M1 cycles are unusual and only one of them breaks the correspondence. A halted CPU's cycle *does*
+read memory — it fetches the `HALT` opcode again and throws it away — so it keeps the count. An
+interrupt acknowledge asserts `/IORQ` instead of `/MREQ`, reads no memory at all, and therefore
+refreshes without fetching. The invariant is exact across `step()`, where a frame loop spends all of
+its time, and off by one per accepted interrupt or NMI.
+The hardware rules themselves are in [`Z80-REFERENCE.md`](Z80-REFERENCE.md), where hardware rules
+live.
+
+**The lesson is small and it is about method, not about the Z80.** The exception was not found by
+thinking harder about the rule. It was found by **trying to write its test** — at which point the
+acknowledge path had to be given a verdict and refused to fit. `bus_timing.rs`'s
+`an_interrupt_acknowledge_refreshes_without_fetching` now exists so the exception cannot quietly
+become a bug: routing the acknowledge through `fetch` would read as a tidy-up and would charge a
+memory cycle the hardware never performs.
+
+Stated generally, and it is the cheap half of every other lesson in this document: **an invariant
+asserted has no scope; an invariant tested acquires one.** The cost of finding out which is one
+test.
 
 ## How this project is verified
 

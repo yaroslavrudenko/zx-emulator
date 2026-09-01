@@ -622,6 +622,22 @@ impl<B: Bus> Cpu<B> {
     ///
     /// The Z80 drives no fetch address here — the device supplies the byte — so the bus
     /// carries the refresh address, as it does through the rest of any M1 cycle.
+    ///
+    /// # Why this M1 cycle calls neither [`Bus::fetch`] nor [`Bus::read`]
+    ///
+    /// It reads no memory. The Z80 asserts `/M1` together with `/IORQ` rather than `/MREQ`,
+    /// and the interrupting device answers on the data bus; in mode 0 that byte *is* the
+    /// instruction, which reaches this core as [`Cpu::interrupt`]'s `data` argument. There is
+    /// no address to fetch from — the value on the address bus is the refresh address, not a
+    /// program counter — so calling `fetch` here would report a memory cycle that never
+    /// happened, at an address the machine would be entitled to contend and to serve from
+    /// its own memory map.
+    ///
+    /// This is therefore the single exception to *one `fetch` per `R` increment*: an
+    /// acknowledge refreshes without fetching. The correspondence holds exactly over
+    /// [`Cpu::step`], which is where a machine's frame loop spends its time; `interrupt` and
+    /// `nmi` each add one refresh and no fetch. Modes 1 and 2 read no instruction byte at
+    /// all, and mode 2's two vector-table lookups are ordinary memory reads.
     fn acknowledge(&mut self, t_states: u8) {
         self.regs.increment_r();
         let refresh = self.regs.refresh_address();
@@ -651,9 +667,17 @@ impl<B: Bus> Cpu<B> {
     /// A halted Z80 has not stopped: it keeps issuing M1 cycles, refreshing memory as it
     /// goes, and executes an internal `NOP` each time. `PC` stays on the `HALT` opcode, so
     /// the byte fetched is that opcode and is deliberately discarded.
+    ///
+    /// The transfer is a [`Bus::fetch`], not a [`Bus::read`], and `R` settles it: the Z80
+    /// has no way to refresh without an M1 cycle, and this cycle refreshes. So it is an M1
+    /// cycle — four T-states, `/M1` asserted, the address driven from `PC` — and it differs
+    /// from any other opcode fetch only in that the core throws the byte away. Calling it a
+    /// read would tell a contention model to charge three T-states plus an internal cycle
+    /// for something the hardware spends as one four-T-state fetch, which is the exact
+    /// confusion [`Bus::fetch`] exists to end.
     fn halt_cycle(&mut self) {
         let address = self.regs.pc();
-        self.bus.read(address);
+        self.bus.fetch(address);
         self.regs.increment_r();
         self.internal_cycles(address, OPCODE_FETCH);
     }
@@ -724,10 +748,18 @@ impl<B: Bus> Cpu<B> {
     ///
     /// `R` is incremented before the cycle is charged because the refresh address the Z80
     /// drives during and after M1 carries the *post*-increment value.
+    ///
+    /// The transfer goes through [`Bus::fetch`] rather than [`Bus::read`] so the machine can
+    /// tell a four-T-state opcode fetch from a three-T-state read followed by an internal
+    /// cycle. This is the only route to that method, and every M1 cycle in the instruction
+    /// stream comes through here: the un-prefixed opcode, each `DD`/`FD`/`CB`/`ED` prefix
+    /// byte, and the opcode on the `CB` and `ED` pages. The `DDCB`/`FDCB` operand bytes do
+    /// **not** — they are memory reads, which is why `R` advances twice across those four
+    /// bytes and why they are fetched with [`Cpu::fetch_byte`].
     #[inline]
     fn fetch_opcode(&mut self) -> u8 {
         let address = self.regs.pc();
-        let opcode = self.bus.read(address);
+        let opcode = self.bus.fetch(address);
         self.regs.increment_r();
         self.internal_cycles(address, OPCODE_FETCH);
         self.regs.advance_pc();

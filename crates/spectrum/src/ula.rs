@@ -8,12 +8,20 @@
 //! # Where a T-state is charged
 //!
 //! `crates/z80` calls the transfer method **first** and then ticks that cycle's T-states,
-//! so when `read`/`write`/`in_port`/`out_port` runs, this clock stands at the *start* of
-//! the machine cycle making the access. That is where a stall belongs, so each transfer
-//! prices its own contention and then hands the cycle to [`MachineCycle`], which decides
-//! whether each following tick is covered by it or is a standalone internal cycle that
-//! contends on its own. The reasoning, and the one case the `Bus` contract cannot resolve,
-//! is in that module.
+//! so when `fetch`/`read`/`write`/`in_port`/`out_port` runs, this clock stands at the
+//! *start* of the machine cycle making the access. That is where a stall belongs: each
+//! transfer prices its own contention **once**, and the ticks that follow are that cycle's
+//! own T-states, already paid for. A tick arriving with no cycle outstanding is a standalone
+//! internal cycle, and contends on its own account at its own frame position.
+//!
+//! Telling those two apart is a matter of counting, because every cycle's length is known
+//! the moment it opens: an M1 fetch and a port access are four T-states, a memory read or
+//! write three. That the machine can recognise an M1 fetch **at all** is what [`Bus::fetch`]
+//! bought. Routed through one `read`, a four-T-state opcode fetch and a three-T-state read
+//! followed by one internal cycle emit byte-identical streams — same address, same order,
+//! same count — and this machine used to reconstruct the boundary by deferring a T-state and
+//! seeing whether a fifth arrived. That guess was wrong for the read-modify-write family,
+//! costing one contention point per execution; `docs/MACHINE.md` records the whole episode.
 //!
 //! # What is modelled and what is not
 //!
@@ -38,7 +46,6 @@
 use z80::Bus;
 
 use crate::keyboard::Keyboard;
-use crate::machine_cycle::{MachineCycle, TickCost};
 use crate::memory::Memory;
 use crate::screen::Colour;
 use crate::timing::{self, Clock};
@@ -66,13 +73,36 @@ const BORDER_MASK: u8 = 0x07;
 /// tape port M6 brings.
 const UNDRIVEN_INPUT_BITS: u8 = 0xA0;
 
+/// T-states an M1 opcode fetch occupies.
+///
+/// This and the two below are the published Z80 machine-cycle lengths, and they duplicate
+/// `crates/z80`'s own constants, which that crate keeps private. Nothing compares the two
+/// sets directly. What grades them is
+/// `tests/contention_magnitude.rs::real_instructions_are_stalled_by_the_pattern_at_each_cycle_they_open`,
+/// which runs real instructions through a real `Cpu<Ula>` against hand-derived totals — so a
+/// wrong length here moves a figure there rather than passing silently.
+const OPCODE_FETCH_CYCLE: u8 = 4;
+
+/// T-states a memory read or write cycle occupies.
+const MEMORY_CYCLE: u8 = 3;
+
+/// T-states an I/O port cycle occupies.
+const PORT_CYCLE: u8 = 4;
+
 /// The bus the CPU is wired to: memory, ports, the keyboard, and the frame clock.
 #[derive(Debug)]
 pub struct Ula {
     memory: Memory,
     keyboard: Keyboard,
     clock: Clock,
-    cycle: MachineCycle,
+    /// T-states of the machine cycle in progress whose contention is already charged.
+    ///
+    /// Set by whichever transfer opened the cycle and spent one per tick; a tick arriving
+    /// with it at zero is a standalone internal cycle. It tracks the **CPU's** stream, so a
+    /// caller driving this bus directly — a test reading a port, say — arms it without ever
+    /// spending it. That costs nothing to such a caller, who is reading a value rather than
+    /// measuring time, and the next transfer overwrites it.
+    covered_t_states: u8,
     border: Colour,
 }
 
@@ -84,7 +114,7 @@ impl Ula {
             memory,
             keyboard: Keyboard::new(),
             clock: Clock::new(),
-            cycle: MachineCycle::new(),
+            covered_t_states: 0,
             border: Colour::BLACK,
         }
     }
@@ -95,7 +125,7 @@ impl Ula {
     /// ROM's own start-up clears what it relies on.
     pub fn reset(&mut self) {
         self.clock = Clock::new();
-        self.cycle = MachineCycle::new();
+        self.covered_t_states = 0;
         self.border = Colour::BLACK;
     }
 
@@ -142,18 +172,9 @@ impl Ula {
     /// Charge the stall a contended access starting *now* at `address` would suffer.
     #[inline]
     fn contend(&mut self, address: u16) {
-        self.contend_at(address, self.clock.frame_t_state());
-    }
-
-    /// Charge the stall a contended access at `address` suffered at frame position `at`.
-    ///
-    /// `at` is in the past only for a T-state [`MachineCycle`] deferred, and only by that
-    /// T-state itself — which consumed no contention, so adding the stall now leaves the
-    /// clock exactly where inserting it at the time would have.
-    #[inline]
-    fn contend_at(&mut self, address: u16, at: u32) {
         if self.memory.is_contended(address) {
-            self.clock.advance(timing::delay(at));
+            self.clock
+                .advance(timing::delay(self.clock.frame_t_state()));
         }
     }
 
@@ -200,26 +221,37 @@ impl Ula {
         timing::delay(self.clock.ahead(offset))
     }
 
+    /// Open a memory machine cycle of `t_states`, charging its contention.
+    #[inline]
+    fn begin_memory_cycle(&mut self, address: u16, t_states: u8) {
+        self.contend(address);
+        self.covered_t_states = t_states;
+    }
+
     /// Open an I/O machine cycle, charging its contention.
     #[inline]
     fn begin_port_cycle(&mut self, port: u16) {
         self.clock.advance(self.port_delay(port));
-        self.cycle.open_port(port);
+        self.covered_t_states = PORT_CYCLE;
     }
 }
 
 impl Bus for Ula {
     #[inline]
+    fn fetch(&mut self, address: u16) -> u8 {
+        self.begin_memory_cycle(address, OPCODE_FETCH_CYCLE);
+        self.memory.read(address)
+    }
+
+    #[inline]
     fn read(&mut self, address: u16) -> u8 {
-        self.contend(address);
-        self.cycle.open_read(address);
+        self.begin_memory_cycle(address, MEMORY_CYCLE);
         self.memory.read(address)
     }
 
     #[inline]
     fn write(&mut self, address: u16, value: u8) {
-        self.contend(address);
-        self.cycle.open_write(address);
+        self.begin_memory_cycle(address, MEMORY_CYCLE);
         self.memory.write(address, value);
     }
 
@@ -243,13 +275,11 @@ impl Bus for Ula {
 
     #[inline]
     fn tick(&mut self, address: u16) {
-        match self.cycle.absorb(address, self.clock.frame_t_state()) {
-            TickCost::Covered | TickCost::Deferred => {}
-            TickCost::Internal => self.contend(address),
-            TickCost::Resolved(deferred_at) => {
-                self.contend_at(address, deferred_at);
-                self.contend(address);
-            }
+        match self.covered_t_states.checked_sub(1) {
+            // Inside an open cycle: its contention was charged when the cycle opened.
+            Some(remaining) => self.covered_t_states = remaining,
+            // Nothing open: a standalone internal cycle, contending on its own account.
+            None => self.contend(address),
         }
         self.clock.advance(1);
     }
@@ -315,20 +345,46 @@ mod tests {
 
     #[test]
     fn an_opcode_fetch_contends_once_and_not_four_times() {
-        // The whole reason MachineCycle exists. Four ticks at the fetch address are one
-        // machine cycle, not four internal ones.
+        // Four ticks at the fetch address are one machine cycle, not four internal ones.
         let start = FIRST_CONTENDED_T_STATE;
         let mut ula = at(start);
-        ula.read(CONTENDED);
+        ula.fetch(CONTENDED);
         for _ in 0..4 {
             ula.tick(CONTENDED);
         }
-        // The next event drops the deferred T-state.
-        ula.read(CONTENDED);
         assert_eq!(
             ula.clock.frame_t_state(),
-            start + 6 + 4 + 4,
-            "6 for the fetch's stall, its 4 T-states, then delay(+10)=4 for the next fetch"
+            start + 6 + 4,
+            "delay(+0)=6 for the fetch's stall, then its four T-states and nothing else"
+        );
+    }
+
+    #[test]
+    fn a_fetch_and_a_read_charge_the_same_tick_stream_differently() {
+        // What `Bus::fetch` bought, as the one assertion that could not be written before
+        // it existed. Both runs are a transfer followed by four ticks at one address —
+        // byte-identical streams. An M1 cycle is four T-states, so all four are covered; a
+        // memory read is three, so the fourth tick is an internal cycle and contends.
+        let start = FIRST_CONTENDED_T_STATE;
+
+        let mut fetched = at(start);
+        fetched.fetch(CONTENDED);
+        for _ in 0..4 {
+            fetched.tick(CONTENDED);
+        }
+        assert_eq!(fetched.clock.frame_t_state(), start + 6 + 4);
+
+        let mut read = at(start);
+        read.read(CONTENDED);
+        for _ in 0..4 {
+            read.tick(CONTENDED);
+        }
+        //   read   at +0 -> delay(0)=6, clock +6, three T-states -> +9
+        //   tick 4 at +9 -> internal, delay(9)=5, clock +14, +1 -> +15
+        assert_eq!(
+            read.clock.frame_t_state(),
+            start + 15,
+            "the read's fourth tick is an internal cycle and must be charged"
         );
     }
 
@@ -345,9 +401,8 @@ mod tests {
 
         // Priced by hand from the pattern, one stall at a time:
         //   read   at +0  -> 6, clock +6, three T-states -> +9
-        //   tick 4 at +9  -> deferred, clock +10
-        //   tick 5        -> resolves the deferred at +9: (9-0)%8=1 -> 5, clock +15
-        //                    then itself at +15: (15)%8=7 -> 0, clock +16
+        //   tick 4 at +9  -> (9)%8=1 -> 5, clock +14, +1 -> +15
+        //   tick 5 at +15 -> (15)%8=7 -> 0, +1 -> +16
         //   tick 6 at +16 -> 6, clock +22, +1 -> +23
         //   tick 7 at +23 -> (23)%8=7 -> 0, +1 -> +24
         //   tick 8 at +24 -> 6, +1 -> +31
@@ -360,7 +415,7 @@ mod tests {
         // internal cycles sit on the refresh address, which points into the ROM.
         let start = FIRST_CONTENDED_T_STATE;
         let mut ula = at(start);
-        ula.read(CONTENDED);
+        ula.fetch(CONTENDED);
         for _ in 0..4 {
             ula.tick(CONTENDED);
         }
@@ -387,38 +442,32 @@ mod tests {
     }
 
     #[test]
-    fn the_known_contention_loss_is_worth_exactly_one_stall() {
-        // `INC (HL)` on the screen: read, one internal cycle at the same address, write.
-        // That internal cycle is indistinguishable from an opcode fetch's fourth T-state,
-        // so its stall is dropped. This test pins the *size* of the error rather than
-        // blessing it — if `Bus` ever gains `fn fetch`, it should go to zero and this test
-        // should go red. See `machine_cycle` for why the two are indistinguishable.
+    fn the_read_modify_write_internal_cycle_is_charged() {
+        // The half of `INC (HL)` that this machine used to get wrong: a read, one internal
+        // cycle at the address just read, then the write-back. Under the deferral heuristic
+        // that internal cycle was indistinguishable from an opcode fetch's fourth T-state
+        // and its stall was dropped, which cost one contention point on every execution of
+        // the whole read-modify-write family. All three cycles must now be charged.
         let start = FIRST_CONTENDED_T_STATE;
         let mut ula = at(start);
         ula.read(CONTENDED);
-        for _ in 0..4 {
+        for _ in 0..3 {
             ula.tick(CONTENDED);
         }
-        // The observation here is deliberate: it happens with the fourth T-state still
-        // undecided, and must not later be contradicted by the clock moving backwards.
-        let observed = ula.clock.frame_t_state();
-        assert_eq!(observed, start + 6 + 4);
-
+        ula.tick(CONTENDED);
         ula.write(CONTENDED, 0);
         for _ in 0..3 {
             ula.tick(CONTENDED);
         }
-        assert!(
-            ula.clock.frame_t_state() >= observed,
-            "the clock must never move backwards when a deferred T-state is dropped"
-        );
-        //   read   at +0  -> 6, clock +6, three T-states -> +9
-        //   tick 4         -> deferred and then dropped, clock +10
-        //   write  at +10 -> (10)%8=2 -> 4, clock +14, three T-states -> +17
+        //   read     at +0  -> delay(0)=6, clock +6, three T-states -> +9
+        //   internal at +9  -> delay(9)=5, clock +14, one T-state   -> +15
+        //   write    at +15 -> delay(15)=0, three T-states          -> +18
         //
-        // A model that could see the internal cycle would charge delay(+9)=5 as well, so
-        // the whole error is the 5 T-states between this figure and start+22.
-        assert_eq!(ula.clock.frame_t_state(), start + 17);
+        // The heuristic reached +17 by dropping the stall at +9 and then charging the write
+        // four T-states early at +10, where the pattern happens to stall 4 — so the visible
+        // error was one T-state, not the five the missing stall suggests. Each stall shifts
+        // the ones after it, which is why a missing one cannot be added to the total.
+        assert_eq!(ula.clock.frame_t_state(), start + 18);
     }
 
     #[test]

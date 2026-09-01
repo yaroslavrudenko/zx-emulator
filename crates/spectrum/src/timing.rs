@@ -123,8 +123,13 @@ impl Clock {
     ///
     /// A loop rather than a single subtraction: nothing here bounds a caller's step to one
     /// frame, and a clock that silently ran a frame behind would be invisible.
+    ///
+    /// `pub(crate)` because it was a footgun as public API. [`Clock`] is `Copy` and the only
+    /// way out of the machine is [`crate::Ula::clock`], which returns it **by value** — so
+    /// `machine.ula().clock().advance(1000)` auto-refs the temporary, compiles clean under
+    /// `deny(warnings)`, and does nothing at all. Every real caller is in this crate.
     #[inline]
-    pub fn advance(&mut self, t_states: u32) {
+    pub(crate) fn advance(&mut self, t_states: u32) {
         self.frame_t_state += t_states;
         while self.frame_t_state >= T_STATES_PER_FRAME {
             self.frame_t_state -= T_STATES_PER_FRAME;
