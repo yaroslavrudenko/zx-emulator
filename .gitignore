@@ -76,3 +76,4 @@ testdata/**
 # where somebody types `git add -A`. This repository has already had unwanted files swept in
 # twice; a rule costs one line and the alternative costs a rewritten history.
 /.claude/
+snapshot-*.z80

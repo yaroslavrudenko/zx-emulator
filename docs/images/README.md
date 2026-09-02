@@ -675,7 +675,7 @@ stopped being evidence of anything.
 
 | | |
 |---|---|
-| Done | The owner ran the emulator in its own window and used the speed key's automatic rung — the **fifth** position of `F8`'s cycle, `1× → 4× → 16× → 64× → auto → 1×`, which [`crates/frontend/src/pacing.rs`](../../crates/frontend/src/pacing.rs)'s `Rung::Automatic` runs flat out while the drive turns and at real time the instant it stops |
+| Done | The owner ran the emulator in its own window and used the speed key's automatic rung — the **fifth** position of `F8`'s cycle, `1× → 4× → 16× → 64× → auto → 1×`, which [`crates/frontend/src/pacing.rs`](../../crates/frontend/src/pacing.rs)'s `Rung::Automatic` runs flat out while the machine is decoding a tape and at real time the instant it stops |
 | Observed | It works. That is the whole of the report, and it is the whole of what is recorded |
 | By | The owner, at his own keyboard, on his own machine |
 | Build | **Not recorded.** The branch stood at `318de03` with uncommitted work in the tree throughout the day, so what he ran cannot be named afterwards. That is this entry's weakness and it is stated rather than guessed at |

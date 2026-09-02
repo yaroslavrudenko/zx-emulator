@@ -1,4 +1,4 @@
-//! Running faster than a real Spectrum, and the four claims that has to survive.
+//! Running faster than a real Spectrum, and the five claims that has to survive.
 //!
 //! # What this grades
 //!
@@ -39,13 +39,32 @@
 //!    throughout. That sentence in section 3 — *"the moment the emulator would key an automatic
 //!    fast-load off"* — was a prediction when it was written, and section 5 is where it is cashed.
 //!
-//!    Its two discriminating cases are deliberately opposite. `automatic_runs_flat_out_only_while_
-//!    the_drive_is_turning` is the **trigger**: blind it so that automatic never speeds anything up
-//!    and the equivalence above stays perfectly green, because two identical machines are still
-//!    identical — so the assertion that has to exist is that automatic reached the frame count in
-//!    *far fewer ticks*. `a_flat_out_tick_stops_when_its_budget_is_spent` is the **bound**, because
-//!    a burst that never ended would not fail anything either; it would hang, and the window it
-//!    hangs is the one holding the keyboard.
+//!    Its two discriminating cases are deliberately opposite.
+//!    `automatic_runs_flat_out_only_while_the_machine_is_decoding` is the **trigger**: blind it so
+//!    that automatic never speeds anything up and the equivalence above stays perfectly green,
+//!    because two identical machines are still identical — so the assertion that has to exist is
+//!    that automatic reached the frame count in *far fewer ticks*.
+//!    `a_flat_out_tick_stops_when_its_budget_is_spent` is the **bound**, because a burst that
+//!    never ended would not fail anything either; it would hang, and the window it hangs is the
+//!    one holding the keyboard.
+//!
+//!    **Section 5's transition is not the one it used to be, and the change is the point.** The
+//!    trigger was the *motor*, and the cassette running out was therefore the moment automatic
+//!    keyed off. It is now the machine's `EAR` read rate, so the guest going quiet is — and
+//!    section 5's ROM never does. What crosses inside that run today is a drive stopping under a
+//!    guest that carries on reading, which is `LOAD ""` waiting for a tape and is exactly the
+//!    state the new signal exists to accelerate.
+//!
+//! 5. **That the order the two gestures arrive in does not matter**, which is section 6 and is
+//!    the claim the trigger was changed for. Pressing PLAY and *then* typing `LOAD ""` is what a
+//!    person does and is free on real hardware, because the ROM's leader is five seconds long.
+//!    Keyed off the motor it was not free at 90×: the leader went by in 0.055 s and the loader
+//!    found silence. So a fixture with **two** rates — a prompt's and a loader's, either side of
+//!    the threshold — is driven through both orders with the keyboard rebuilt once a *tick*, and
+//!    what is asserted is that the guest counted a cassette's worth of edges either way.
+//!
+//!    Section 7 asks the same question of the Sinclair ROM and a real cassette, which is where
+//!    the real idle rate, the real poll rate and a real wall clock are.
 //!
 //! # What it does not grade
 //!
@@ -61,7 +80,8 @@
 //!
 //! `crates/testsupport` exists because a gate backed by a corpus is a gate that might not run, and
 //! the claims under test need machines that *do something observable per frame* rather than
-//! Sinclair ones. So [`painting_rom`] and [`listening_rom`] are assembled below — the same move
+//! Sinclair ones. So [`painting_rom`], [`listening_rom`] and [`prompt_rom`] are assembled below —
+//! the same move
 //! `crates/frontend/gate-bundled.sh` makes, for the same reason — and so is the tape:
 //! [`spectrum::tape::Tape::new`] takes a pulse train directly, because `docs/M6.md` Decision 5
 //! makes that train *the* representation of a cassette rather than a detail of one, so a real
@@ -71,7 +91,7 @@
 use std::time::Duration;
 
 use frontend::keymap;
-use frontend::pacing::{FLAT_OUT_BUDGET, MAX_CATCH_UP, Pacer, RUNGS, Rung, Speed, Tick};
+use frontend::pacing::{EarMeter, FLAT_OUT_BUDGET, MAX_CATCH_UP, Pacer, RUNGS, Rung, Speed, Tick};
 use frontend::palette::{self, RGBA_BYTES};
 use spectrum::memory::PAGE_SIZE;
 use spectrum::tape::tap;
@@ -485,7 +505,7 @@ fn a_tape_that_never_moved_would_fail_this() {
 
     // Inserted and never started: the same cassette, the same ROM, the same frame count.
     let mut stopped = Spectrum::new(&rom).expect("a page-sized ROM");
-    stopped.insert_tape(Tape::new(pilot_tone(&stopped)));
+    stopped.insert_tape(Tape::new(pilot_tone(&stopped, TAPE_FRAMES)));
     stopped.run_frames(FRAMES);
 
     assert!(
@@ -501,11 +521,11 @@ fn a_tape_that_never_moved_would_fail_this() {
 // ---------------------------------------------------------------------------------------
 
 #[test]
-fn automatic_runs_flat_out_only_while_the_drive_is_turning() {
+fn automatic_runs_flat_out_only_while_the_machine_is_decoding() {
     // **The trigger, as a table over the whole cycle**, because the claim has two halves and only
-    // one of them is about automatic. The other half is that *nothing else reads the drive*: a
-    // person parked at 1× to watch the loading stripes must not be overtaken when they press
-    // PLAY, and a person at 64× must not be dropped to real time when the tape ends. That is what
+    // one of them is about automatic. The other half is that *nothing else reads the machine*: a
+    // person parked at 1× to watch the loading stripes must not be overtaken when a loader
+    // starts, and a person at 64× must not be dropped to real time when it finishes. That is what
     // makes a multiplier a thing somebody chose rather than something that happens to them, and
     // it is asserted here rather than argued in `Rung::this_tick`'s doc comment.
     for &rung in RUNGS {
@@ -515,7 +535,7 @@ fn automatic_runs_flat_out_only_while_the_drive_is_turning() {
                 assert_eq!(
                     rung.this_tick(true),
                     Tick::Paced(speed),
-                    "putting a cassette in moved a machine parked at {}x",
+                    "starting a load moved a machine parked at {}x",
                     speed.factor(),
                 );
             }
@@ -523,14 +543,14 @@ fn automatic_runs_flat_out_only_while_the_drive_is_turning() {
                 assert_eq!(
                     rung.this_tick(true),
                     Tick::FlatOut,
-                    "the automatic rung did not speed up for a turning drive, which is the whole \
-                     of what it is for",
+                    "the automatic rung did not speed up for a machine that is decoding a tape, \
+                     which is the whole of what it is for",
                 );
                 assert_eq!(
                     rung.this_tick(false),
                     Tick::Paced(Speed::REAL_TIME),
-                    "the automatic rung stayed flat out with the drive stopped, so a loaded game \
-                     would run at four thousand frames a second",
+                    "the automatic rung stayed flat out with nothing being decoded, so a loaded \
+                     game would run at four thousand frames a second",
                 );
             }
         }
@@ -539,10 +559,22 @@ fn automatic_runs_flat_out_only_while_the_drive_is_turning() {
     // And the readout's half, which is a different failure: a rung that works and cannot be seen
     // working is one a person reports as broken. `auto` and `auto (loading)` must be two strings,
     // and every fixed rung must add nothing at all.
+    //
+    // **`(loading)` now means what it says**, which it did not while it was written from the
+    // drive: it followed a turning motor, so it appeared over a cassette nobody was reading. It
+    // is derived from `Rung::this_tick` rather than from a condition of its own, so the two
+    // cannot disagree — the assertion below is that they are two strings, and this comment is
+    // why the argument they take is the one the pacing decision took.
     assert_ne!(
         Rung::Automatic.note(true),
         Rung::Automatic.note(false),
         "the bar reads the same whether or not the automatic rung is doing anything",
+    );
+    assert_eq!(
+        Rung::Automatic.note(false),
+        "",
+        "the bar says the automatic rung is doing something over a tick it asked to run paced, \
+         which is the drive-shaped lie one field along",
     );
     for speed in multipliers() {
         let rung = Rung::Fixed(speed);
@@ -617,8 +649,8 @@ fn a_tape_loaded_under_automatic_is_the_same_tape() {
     let paced_ticks = drive(&mut paced, &mut paced_pacer, FRAMES);
 
     let mut automatic = tape_machine(&rom);
-    let mut automatic_pacer = Pacer::new();
-    let automatic_ticks = drive_automatically(&mut automatic, &mut automatic_pacer, FRAMES);
+    let mut rung = Automatic::new(&automatic);
+    let automatic_ticks = drive_automatically(&mut automatic, &mut rung, FRAMES);
 
     assert_eq!(paced.frames(), FRAMES, "the real-time run did not finish");
     assert_eq!(
@@ -643,20 +675,26 @@ fn a_tape_loaded_under_automatic_is_the_same_tape() {
         "the two machines counted a different number of `EAR` highs off the same cassette",
     );
 
-    // **The transition, which is the half only this rung has.** The cassette is thirty frames of a
-    // forty-frame run, so an automatic machine must key itself back to real time partway and
-    // finish paced. Both halves have to be asserted: that the drive really did stop, and that the
-    // machine really did notice — the second is what the frame count above proves, since a machine
-    // still flat out would have overshot.
+    // **The transition, which is the half only this rung has — and the signal that keys it is no
+    // longer the drive, so what crosses inside this run is not what used to.** The cassette is
+    // still thirty frames of a forty-frame run, so the *tape* really does end partway. The
+    // *guest* does not stop: `listening_rom` reads the `EAR` line for ever, so the meter goes on
+    // reporting a machine that is decoding and the rung goes on asking for flat out.
+    //
+    // **That is the decision working, not failing.** A machine spinning on `IN A,(0xFE)` with an
+    // empty drive is `LOAD ""` waiting for a cassette — the state the motor could not see, and
+    // the exact state a person lands in when they press PLAY before typing. Accelerating it is
+    // the point; `a_cassette_played_before_the_loader_asks_is_still_there_when_it_does` is where
+    // that is graded on a machine that does eventually stop reading.
     assert!(
         !automatic.tape().is_playing(),
-        "the cassette was still playing at the end, so the run never reached the transition this \
-         test exists for",
+        "the cassette was still playing at the end, so the run never reached the moment the drive \
+         stops and the guest carries on, which is what this test compares across",
     );
-    assert_eq!(
-        Rung::Automatic.this_tick(automatic.tape().is_playing()),
-        Tick::Paced(Speed::REAL_TIME),
-        "the drive has stopped and the rung is still asking to run flat out",
+    assert!(
+        rung.ear.decoding(),
+        "the guest is still reading the `EAR` line every pass and the meter says it is not, so \
+         the two machines above were compared across a transition that did not happen",
     );
 
     // **And that automatic actually sped anything up**, which every assertion above would pass
@@ -673,7 +711,149 @@ fn a_tape_loaded_under_automatic_is_the_same_tape() {
 }
 
 // ---------------------------------------------------------------------------------------
-// 6. The measurement: a real cassette, end to end, on a real clock
+// 6. The key order: PLAY before `LOAD ""`, which is the order a person actually presses
+// ---------------------------------------------------------------------------------------
+
+/// Which order the two gestures arrive in.
+///
+/// Two names rather than a `bool`, because at the call site `ear_edges_in_order(true)` says
+/// nothing and this section exists precisely because the two orders are not interchangeable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    /// `LOAD ""`, then PLAY. What `docs/images/README.md` publishes.
+    TypeThenPlay,
+    /// PLAY, then `LOAD ""`. What a person reaches for first, and what cost the owner an evening.
+    PlayThenType,
+}
+
+/// Display ticks between the first gesture and the second.
+///
+/// A person reaching across for the other input, in the unit the window counts in: ten ticks is
+/// 200 ms of wall clock, which is brisk. At real time that is ten emulated frames against a
+/// [`LEADER_FRAMES`]-frame leader, so the pause spends a third of the grace a cassette gives and
+/// the documented order has room to spare. Under a fast-forward that should not have started it
+/// is ten **bursts** of [`FLAT_OUT_FRAMES`] frames, which is five times the whole leader — and
+/// that ratio, not the absolute numbers, is what this section is about.
+const REACHING_FOR_THE_OTHER_KEY: u64 = 10;
+
+/// Ticks the key is held down, which is the shape of a press rather than of a switch.
+const KEY_HELD: u64 = 3;
+
+/// Ticks each arm runs for: past both gestures and past the end of the cassette.
+const ORDER_TICKS: u64 = 40;
+
+/// Frames of pilot tone on the cassette this section uses.
+///
+/// A real ROM leader is five seconds — 250 frames — and this is a twentieth of it, because the
+/// only thing that has to be true of the number is that it outlasts
+/// [`REACHING_FOR_THE_OTHER_KEY`] ticks of real time and does **not** outlast the same number of
+/// bursts. Both are asserted below rather than eyeballed. A leader sized like the real one would
+/// grade the same claim and take twenty times as long about it.
+const LEADER_FRAMES: u64 = 30;
+
+const _: () = assert!(
+    LEADER_FRAMES > REACHING_FOR_THE_OTHER_KEY,
+    "the leader is shorter than the pause between the two gestures, so even the documented order \
+     would find a spent tape and neither arm below is discriminating"
+);
+
+const _: () = assert!(
+    LEADER_FRAMES < REACHING_FOR_THE_OTHER_KEY * FLAT_OUT_FRAMES,
+    "a fast-forward through the pause would not outlast the leader, so the cassette would survive \
+     the defect this section exists to catch and the test would pass on the code that had it"
+);
+
+/// The address [`prompt_rom`] counts `EAR` edges at: the top-left eight pixels.
+const TALLY: u16 = 0x4000;
+
+/// What [`prompt_rom`]'s tally saturates at, and therefore what a guest reading a real signal
+/// reaches.
+///
+/// [`LEADER_FRAMES`] of pilot tone carry about 32 edges a frame — nine hundred in all — so any
+/// arm that listens to any appreciable part of the leader reaches this, and the assertion is a
+/// clean equality rather than a threshold somebody would have to justify. A guest that finds a
+/// **spent** tape sees a line that never changes and reaches at most one.
+const TALLY_FULL: u8 = u8::MAX;
+
+/// The key this section presses, standing in for `LOAD ""`.
+///
+/// `J` is `LOAD` on a Spectrum's keyboard and is the first tap [`LOAD_SCRIPT`] makes, so the
+/// gesture graded here is the first half of the one the measurement below performs for real.
+const LOAD_KEY: &str = "J";
+
+/// Frames each rate below is measured over.
+///
+/// Long enough that the `LDIR` at the top of [`prompt_rom`] is out of the window and a whole
+/// number of idle iterations is in it, short enough to stay a *rate* rather than an average over
+/// a run.
+const OVER: u64 = 10;
+
+#[test]
+fn the_prompt_rom_idles_below_the_threshold_and_listens_above_it() {
+    // **The instrument's own calibration, and what the section below rests on.** Both arms of the
+    // key-order test are readings taken with one ROM, and a reading is worth nothing unless that
+    // ROM really does straddle the threshold `EarMeter` compares against. So the two rates are
+    // measured here, through the same meter the window uses, and asserted to land on opposite
+    // sides of it. If a future edit to the delay loop drifts the idle rate up past 64 a frame,
+    // this reddens here — where the cause is one screen away — instead of turning the key-order
+    // arms into two tests that agree because the machine never paced.
+    let mut machine = Spectrum::new(&prompt_rom()).expect("a page-sized ROM");
+    let mut ear = EarMeter::new(frame_t_states(&machine));
+
+    machine.run_frames(OVER);
+    ear.sample(machine.ear_reads(), machine.frames());
+    machine.run_frames(OVER);
+    ear.sample(machine.ear_reads(), machine.frames());
+    assert!(
+        !ear.decoding(),
+        "a machine sitting at its prompt reads the `EAR` line often enough to be taken for a \
+         loader, so `Rung::Automatic` would run flat out for ever and never pace anything",
+    );
+
+    let load_key = keymap::code_named(LOAD_KEY).expect("a key this emulator binds");
+    keymap::apply(|code| code == load_key, machine.keyboard_mut());
+    machine.run_frames(OVER);
+    ear.sample(machine.ear_reads(), machine.frames());
+    assert!(
+        ear.decoding(),
+        "a machine polling the `EAR` line every pass is not taken for a loader, so the trigger \
+         never fires and both arms below would pass by running everything at real time",
+    );
+}
+
+#[test]
+fn a_cassette_played_before_the_loader_asks_is_still_there_when_it_does() {
+    // **The owner's evening, as a gate.** He pressed PLAY and then typed `LOAD ""` — the order a
+    // person reaches for, and one that is free on real hardware because the leader is five
+    // seconds long. Keyed off the *motor*, `auto` spent those five seconds in 0.055 s: the tape
+    // ran off its end while he was still typing, and nothing on the bar could say so, because
+    // nothing about the drive was wrong.
+    //
+    // The tally is the assertion because it is the only thing that distinguishes *the guest read
+    // a cassette* from *a cassette went past*. `prompt_rom` counts the **edges** it sees on the
+    // line and saturates, so a spent tape — a level that never changes again — leaves it at
+    // nothing however far the drive wound, and a live pilot tone fills it. Nothing about frame
+    // counts or drive state can tell those two apart, which is exactly the confusion this whole
+    // change is about. Counting *highs* instead cannot tell them apart either, and `prompt_rom`
+    // records what that cost.
+    let documented = ear_edges_in_order(Order::TypeThenPlay);
+    let the_owners = ear_edges_in_order(Order::PlayThenType);
+
+    assert_eq!(
+        the_owners, TALLY_FULL,
+        "PLAY then `LOAD \"\"` left the guest {the_owners} edges to read: the cassette was wound \
+         off its end during the {REACHING_FOR_THE_OTHER_KEY} ticks it took to reach the keyboard, \
+         which is the defect this test exists for",
+    );
+    assert_eq!(
+        documented, TALLY_FULL,
+        "`LOAD \"\"` then PLAY read {documented} edges, so the fixture is broken rather than the \
+         order — the guest never listened, or the tape never played",
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// 7. The measurement: a real cassette, end to end, on a real clock
 // ---------------------------------------------------------------------------------------
 
 /// Frames the ROM is given before anything is typed at it. `zx-shot`'s own `DEFAULT_FRAMES`.
@@ -750,66 +930,169 @@ fn a_real_cassette_end_to_end_under_automatic() {
         return;
     };
 
-    let mut machine = Spectrum::new(&rom).expect("a 16 KB ROM");
-    machine.insert_tape(tap::parse(&cassette).expect("a .tap this crate can read"));
-    machine.run_frames(BOOT_FRAMES);
-    for tap in LOAD_SCRIPT {
-        type_at(&mut machine, tap, HOLD_FRAMES);
-    }
+    // **Both orders, because the order is the thing that broke.** Section 6 grades this claim on
+    // a fixture; this is the same claim against the Sinclair ROM, the real `KEY-SCAN` idle rate,
+    // the real `LD-BYTES` poll rate, the real five-second leader and a real wall clock — none of
+    // which a fixture can promise. The two lines it prints are what a person would have felt.
+    for order in [Order::TypeThenPlay, Order::PlayThenType] {
+        let run = a_real_cassette_in_order(order, &rom, &cassette);
+        let emulated = run.frames as f64 / 50.0;
+        println!(
+            "{order:?}: PLAY to the end of the cassette, under `auto`, headless:\n  \
+             {:.3} s of wall clock\n  \
+             {} frames = {emulated:.1} s of emulated time\n  \
+             {:.0}x real time, over {} ticks\n  \
+             {:.1} us per emulated frame\n  \
+             {} distinct colours on the screen {SETTLE_FRAMES} frames later",
+            run.wall,
+            run.frames,
+            emulated / run.wall,
+            run.ticks,
+            run.wall * 1e6 / run.frames as f64,
+            run.colours,
+        );
 
-    let at_play = machine.frames();
-    machine.tape_mut().play();
+        // A real *Manic Miner* cassette is about 9,500 frames. The floor is loose because the
+        // point is to catch a run that loaded nothing at all — an empty drive would leave this at
+        // zero and every number above it would be a division by it.
+        assert!(
+            run.frames > 1000,
+            "{order:?}: only {} frames of cassette played, so nothing above measured a tape load",
+            run.frames,
+        );
+        // **The assertion the whole change is for, and the one that used to fail.** Keyed off the
+        // drive, `Order::PlayThenType` reached this line with a boot screen: the leader had been
+        // spent at 90× while `LOAD ""` was still being typed, so the loader found silence and the
+        // machine sat at `©1982 Sinclair Research Ltd` for ever.
+        assert!(
+            run.colours >= COLOURS_OF_A_GAME,
+            "{order:?}: the screen carries {} colours, which is a boot screen or a blank frame — \
+             the cassette went past and nothing read it",
+            run.colours,
+        );
+        // The one timing assertion, and it is wide on purpose: this cassette is 190 seconds of
+        // emulated time, so a run anywhere near that is a rung that did not engage at all. Thirty
+        // seconds is unreachable by a working one and unmissable by a broken one.
+        assert!(
+            run.wall < 30.0,
+            "{order:?}: the cassette took {:.1} s, which is not a fast-forward — at real time it \
+             would be {emulated:.0} s",
+            run.wall,
+        );
+    }
+}
+
+/// What one run of a real cassette under [`Rung::Automatic`] came to.
+struct Loaded {
+    /// Wall clock from PLAY to the drive stopping.
+    wall: f64,
+    /// Frames of emulated time in that window.
+    frames: u64,
+    /// Display ticks in it.
+    ticks: u64,
+    /// Colours on the screen [`SETTLE_FRAMES`] later, which is how a game is told from a prompt.
+    colours: usize,
+}
+
+/// Ticks one [`LOAD_SCRIPT`] takes to type: every tap held, then released, for [`HOLD_FRAMES`].
+///
+/// Ticks rather than frames, and at real time they are the same thing — which is the point. A
+/// person's 200 ms is 200 ms whatever the machine is doing, so a harness that counted *frames*
+/// would type faster and faster as the machine ran faster and would never reproduce a person
+/// holding a key while a cassette went past at ninety times real time.
+const TYPING_TICKS: u64 = LOAD_SCRIPT.len() as u64 * 2 * HOLD_FRAMES;
+
+/// Wall clock after which a run is not a slow load, it is a hang.
+///
+/// A guard rather than a bound on anything real: the working figure is two seconds and the whole
+/// cassette at real time is 190, so a minute is unreachable either way and exists only so a
+/// broken decision fails this file rather than stopping it.
+const GIVE_UP: f64 = 60.0;
+
+/// Which tap of [`LOAD_SCRIPT`] is held on tick `tick` of a run whose typing began at
+/// `started_at`, or `None` on the ticks between taps and after the script.
+fn typing_at(tick: u64, started_at: u64) -> Option<usize> {
+    let step = tick.checked_sub(started_at)?;
+    if step >= TYPING_TICKS {
+        return None;
+    }
+    // Held for the first half of each tap's stride and released for the second, which is the
+    // two-phase press `zx-shot`'s own `press` performs and has to be: the ROM's editor misses a
+    // tap that is never released, and types it twice if it is held too long. `HOLD_FRAMES`
+    // carries both bounds.
+    let stride = 2 * HOLD_FRAMES;
+    (step % stride < HOLD_FRAMES).then(|| usize::try_from(step / stride).expect("four taps"))
+}
+
+/// Boot a real Sinclair ROM, make the two gestures in `order`, and time the load that follows.
+///
+/// Every tick goes through [`Automatic::tick`] — the rung's own decision, the real
+/// [`Pacer::run_flat_out`], a real clock — so what is timed is the thing that ships rather than a
+/// loop written to look like it. The window closes when the drive stops itself at the end of the
+/// train, which is the same moment the old measurement stopped at.
+///
+/// **The keyboard is rebuilt once a tick and the tape key is pressed on a tick**, because that is
+/// where the defect lived: at 90× a tick is a hundred and fifty emulated frames, so the gap
+/// between two gestures a person makes 200 ms apart is fifteen emulated *seconds* — three times
+/// the leader — and no per-frame harness can see that.
+fn a_real_cassette_in_order(order: Order, rom: &[u8], cassette: &[u8]) -> Loaded {
+    let mut machine = Spectrum::new(rom).expect("a 16 KB ROM");
+    machine.insert_tape(tap::parse(cassette).expect("a .tap this crate can read"));
+    machine.run_frames(BOOT_FRAMES);
+
+    // Resolved once rather than per tick: `keymap::code_named` formats every binding to compare
+    // it, and doing that inside a loop that runs ninety times a second is the redundant work
+    // `frontend::pacing`'s own header spends a paragraph on.
+    let script: Vec<Vec<_>> = LOAD_SCRIPT
+        .iter()
+        .map(|tap| {
+            tap.iter()
+                .map(|name| keymap::code_named(name).expect("a key this emulator binds"))
+                .collect()
+        })
+        .collect();
+    let (typed_at, played_at) = match order {
+        Order::TypeThenPlay => (1, 1 + TYPING_TICKS + REACHING_FOR_THE_OTHER_KEY),
+        Order::PlayThenType => (1 + REACHING_FOR_THE_OTHER_KEY, 1),
+    };
 
     let origin = std::time::Instant::now();
-    let clock = || origin.elapsed().as_secs_f64();
-    let mut pacer = Pacer::new();
-    let mut ticks = 0_u64;
-    // Through the rung's own decision every pass, so what is timed is the thing that ships rather
-    // than a loop written to look like it. It ends when the rung says so, which is the drive
-    // stopping itself at the end of the train.
-    while Rung::Automatic.this_tick(machine.tape().is_playing()) == Tick::FlatOut {
-        ticks += 1;
-        pacer.run_flat_out(clock, || machine.run_frame());
+    let mut clock = || origin.elapsed().as_secs_f64();
+    let mut rung = Automatic::new(&machine);
+    let (mut ticks, mut tick) = (0_u64, 0_u64);
+    let (mut wall_at_play, mut frames_at_play) = (0.0, 0);
+    let mut started = false;
+    while clock() < GIVE_UP {
+        tick += 1;
+        let held: &[_] = match typing_at(tick, typed_at) {
+            Some(tap) => &script[tap],
+            None => &[],
+        };
+        keymap::apply(|code| held.contains(&code), machine.keyboard_mut());
+        if tick == played_at {
+            machine.tape_mut().play();
+            started = machine.tape().is_playing();
+            wall_at_play = clock();
+            frames_at_play = machine.frames();
+        }
+        rung.tick(&mut machine, &mut clock, Spectrum::run_frame);
+        if started {
+            ticks += 1;
+            if !machine.tape().is_playing() {
+                break;
+            }
+        }
     }
-    let wall = origin.elapsed().as_secs_f64();
-    let frames = machine.frames() - at_play;
 
+    let wall = clock() - wall_at_play;
+    let frames = machine.frames() - frames_at_play;
     machine.run_frames(SETTLE_FRAMES);
-    let colours = distinct_colours(&screen(&machine));
-
-    let emulated = frames as f64 / 50.0;
-    println!(
-        "PLAY to the end of the cassette, under `auto`, headless:\n  \
-         {wall:.3} s of wall clock\n  \
-         {frames} frames = {emulated:.1} s of emulated time\n  \
-         {:.0}x real time, over {ticks} bursts of {:.0} ms\n  \
-         {:.1} us per emulated frame\n  \
-         {colours} distinct colours on the screen {SETTLE_FRAMES} frames later",
-        emulated / wall,
-        FLAT_OUT_BUDGET * 1000.0,
-        wall * 1e6 / frames as f64,
-    );
-
-    // A real *Manic Miner* cassette is about 9,500 frames. The floor is loose because the point is
-    // to catch a run that loaded nothing at all — an empty drive would leave this at zero and every
-    // number above it would be a division by it.
-    assert!(
-        frames > 1000,
-        "only {frames} frames of cassette played, so nothing above measured a tape load",
-    );
-    assert!(
-        colours >= COLOURS_OF_A_GAME,
-        "the screen carries {colours} colours, which is a boot screen or a blank frame — the wall \
-         clock above was measured against a machine that loaded nothing",
-    );
-    // The one timing assertion, and it is wide on purpose: this cassette is 190 seconds of
-    // emulated time, so a run anywhere near that is a rung that did not engage at all. Thirty
-    // seconds is unreachable by a working one and unmissable by a broken one.
-    assert!(
-        wall < 30.0,
-        "the cassette took {wall:.1} s, which is not a fast-forward — at real time it would be \
-         {emulated:.0} s",
-    );
+    Loaded {
+        wall,
+        frames,
+        ticks,
+        colours: distinct_colours(&screen(&machine)),
+    }
 }
 
 /// What producing one picture costs, which is the other half of [`FLAT_OUT_BUDGET`]'s derivation.
@@ -942,6 +1225,118 @@ fn listening_rom() -> Vec<u8> {
     rom
 }
 
+/// A 16 KB ROM that idles like a prompt and becomes a loader the moment a key goes down.
+///
+/// ```text
+/// 0000  21 00 58     LD HL,0x5800      ; the attribute file
+/// 0003  11 01 58     LD DE,0x5801
+/// 0006  01 FF 02     LD BC,767
+/// 0009  36 47        LD (HL),0x47      ; bright white ink on black paper
+/// 000B  ED B0        LDIR
+/// 000D  21 00 40     LD HL,0x4000      ; the tally
+/// 0010  0E 00        LD C,0            ; the level last seen on the line
+/// 0012  AF           XOR A             ; every half-row at once
+/// 0013  DB FE        IN A,(0xFE)
+/// 0015  E6 1F        AND 0x1F
+/// 0017  FE 1F        CP 0x1F           ; is any key down?
+/// 0019  20 0A        JR NZ,0x0025      ; then start listening, and never come back
+/// 001B  06 00        LD B,0
+/// 001D  10 FE        DJNZ -2           ; two full delay loops, which is what puts the idle
+/// 001F  06 00        LD B,0            ;   rate at about ten reads a frame instead of two
+/// 0021  10 FE        DJNZ -2           ;   thousand
+/// 0023  18 ED        JR 0x0012
+/// 0025  DB FE        IN A,(0xFE)       ; bit 6 is the tape
+/// 0027  E6 40        AND 0x40
+/// 0029  B9           CP C              ; the same level as last time?
+/// 002A  28 F9        JR Z,0x0025       ; then nothing has happened
+/// 002C  4F           LD C,A            ; an edge: remember the new level
+/// 002D  34           INC (HL)          ; and count it
+/// 002E  20 F5        JR NZ,0x0025
+/// 0030  35           DEC (HL)          ; saturating at 255 rather than wrapping
+/// 0031  18 F2        JR 0x0025
+/// ```
+///
+/// # Why a third ROM, when [`listening_rom`] already reads the line
+///
+/// Because that one reads it from its first instruction and never stops, which makes it a fine
+/// instrument for *"is this the same machine"* and a useless one for *"when does the trigger
+/// fire"*: a machine that is always decoding cannot demonstrate a decision that turns on and off.
+/// This one has the two states the signal exists to tell apart, and a person's keypress is what
+/// moves it between them — the same gesture, through the same [`keymap`], that the measurement
+/// below makes at a real Sinclair ROM.
+///
+/// The delay loops are the load-bearing part and are the reason this is not
+/// [`listening_rom`] with a keyboard check bolted on. A Spectrum at its BASIC prompt reads this
+/// port **eight** times a frame — the ROM's `KEY-SCAN` walks one half-row per interrupt — and a
+/// bare polling loop reads it two thousand times, so a fixture without the delay would idle above
+/// the threshold and the pacing decision would never be exercised in its *off* state.
+/// `the_prompt_rom_idles_below_the_threshold_and_listens_above_it` measures both rates rather
+/// than trusting this paragraph.
+///
+/// `XOR A` before the `IN` selects every half-row at once, so any key on the membrane answers.
+/// That is a wider question than a real ROM asks in one pass and it is deliberate: which key was
+/// pressed is not what is being graded, and a fixture that scanned row by row would be modelling
+/// `KEY-SCAN` rather than using it.
+///
+/// # It counts **edges**, and that correction is the whole reason the fixture is trustworthy
+///
+/// It counted *highs* first — `listening_rom`'s accumulation — and the mutation that should have
+/// reddened the key-order test sailed through it. The reason is a property of a spent cassette
+/// that no amount of reasoning about pacing would have surfaced: [`spectrum::tape::Tape`] flips
+/// the line at every half-period and stops, so a train with an odd number of pulses **parks the
+/// line high for ever**. A guest polling a dead tape then adds one on every pass, and *"the tape
+/// was read"* and *"the tape was gone before anybody listened"* produce the same non-zero number.
+///
+/// An edge count cannot be fooled that way, because a level that never changes yields none. It
+/// saturates at [`TALLY_FULL`] instead of wrapping, so *"hundreds of edges"* is a value a test
+/// can assert on rather than a residue mod 256 — and a dead line leaves at most the single edge
+/// of the first sample disagreeing with the initial `C`.
+fn prompt_rom() -> Vec<u8> {
+    const PROGRAM: [u8; 51] = [
+        0x21, 0x00, 0x58, 0x11, 0x01, 0x58, 0x01, 0xFF, 0x02, 0x36, 0x47, 0xED, 0xB0, 0x21, 0x00,
+        0x40, 0x0E, 0x00, 0xAF, 0xDB, 0xFE, 0xE6, 0x1F, 0xFE, 0x1F, 0x20, 0x0A, 0x06, 0x00, 0x10,
+        0xFE, 0x06, 0x00, 0x10, 0xFE, 0x18, 0xED, 0xDB, 0xFE, 0xE6, 0x40, 0xB9, 0x28, 0xF9, 0x4F,
+        0x34, 0x20, 0xF5, 0x35, 0x18, 0xF2,
+    ];
+    let mut rom = vec![0; PAGE_SIZE];
+    rom[..PROGRAM.len()].copy_from_slice(&PROGRAM);
+    rom
+}
+
+/// Press the two gestures in `order` under [`Rung::Automatic`], and say how many `EAR` edges the
+/// guest counted off the cassette, saturating at [`TALLY_FULL`].
+///
+/// The tick loop is the window's — [`Automatic::tick`] is the same three lines `src/main.rs`
+/// runs — and the keyboard is rebuilt **once a tick**, before the frames, exactly where the
+/// window rebuilds it. That placement is not a detail: a key held 150 ms is held thirteen
+/// emulated seconds at 90×, so a harness applying it once per *frame* would hold it for one
+/// frame of every hundred and would be grading a machine nobody runs.
+fn ear_edges_in_order(order: Order) -> u8 {
+    let mut machine = Spectrum::new(&prompt_rom()).expect("a page-sized ROM");
+    machine.insert_tape(Tape::new(pilot_tone(&machine, LEADER_FRAMES)));
+
+    // The two gestures, as the ticks they land on. Reading them out of the order rather than
+    // branching inside the loop keeps the loop identical for both arms, which is what makes the
+    // comparison about the order and not about two different harnesses.
+    let (typed_at, played_at) = match order {
+        Order::TypeThenPlay => (1, 1 + REACHING_FOR_THE_OTHER_KEY),
+        Order::PlayThenType => (1 + REACHING_FOR_THE_OTHER_KEY, 1),
+    };
+    let load_key = keymap::code_named(LOAD_KEY).expect("a key this emulator binds");
+
+    let mut rung = Automatic::new(&machine);
+    let mut clock = ticking_clock(FLAT_OUT_BUDGET / FLAT_OUT_FRAMES as f64);
+    for tick in 1..=ORDER_TICKS {
+        let held = (typed_at..typed_at + KEY_HELD).contains(&tick);
+        keymap::apply(|code| held && code == load_key, machine.keyboard_mut());
+        if tick == played_at {
+            machine.tape_mut().play();
+        }
+        rung.tick(&mut machine, &mut clock, Spectrum::run_frame);
+    }
+    machine.memory().read(TALLY)
+}
+
 /// Half-period of the ROM loader's pilot tone, in T-states.
 ///
 /// A real number rather than a convenient one: this is what a `.tap`'s leader is built from, so the
@@ -962,24 +1357,28 @@ const _: () = assert!(
     "the cassette must run out before the comparison, or the end of it is never graded"
 );
 
-/// A pilot tone lasting [`TAPE_FRAMES`] frames of whatever machine `machine` is.
+/// How long one frame of `machine` is, in T-states.
 ///
-/// The frame length is read off the machine rather than written down, the way `zx-shot`'s
-/// `tape_frames` reads it: a 128 runs 70,908 T-states to a 48K's 69,888, and a literal here would
-/// silently make this cassette a different length on the other model.
-fn pilot_tone(machine: &Spectrum) -> Vec<u32> {
-    let frame = u64::from(machine.ula().clock().timing().frame_t_states());
-    let pulses = frame * TAPE_FRAMES / u64::from(PILOT_HALF_PERIOD);
+/// Read off the machine rather than written down, the way `zx-shot`'s `tape_frames` reads it: a
+/// 128 runs 70,908 T-states to a 48K's 69,888, and a literal anywhere below would silently give
+/// one model the other's arithmetic. `frontend::pacing::EarMeter` takes it for the same reason.
+fn frame_t_states(machine: &Spectrum) -> u32 {
+    machine.ula().clock().timing().frame_t_states()
+}
+
+/// A pilot tone lasting `frames` frames of whatever machine `machine` is.
+fn pilot_tone(machine: &Spectrum, frames: u64) -> Vec<u32> {
+    let pulses = u64::from(frame_t_states(machine)) * frames / u64::from(PILOT_HALF_PERIOD);
     vec![
         PILOT_HALF_PERIOD;
-        usize::try_from(pulses).expect("thirty frames of pilot tone is a few hundred pulses")
+        usize::try_from(pulses).expect("a few dozen frames of pilot tone is a few hundred pulses")
     ]
 }
 
 /// A machine running [`listening_rom`] with [`pilot_tone`] in the drive and the motor **on**.
 fn tape_machine(rom: &[u8]) -> Spectrum {
     let mut machine = Spectrum::new(rom).expect("a page-sized ROM");
-    machine.insert_tape(Tape::new(pilot_tone(&machine)));
+    machine.insert_tape(Tape::new(pilot_tone(&machine, TAPE_FRAMES)));
     // Separately from the insert, because `media::insert` puts a tape in stopped and the window's
     // `F3` is what starts it — the same two steps in the same order the shell performs them.
     machine.tape_mut().play();
@@ -1043,27 +1442,69 @@ fn ticking_clock(step: f64) -> impl FnMut() -> f64 {
     }
 }
 
+/// `src/main.rs`'s tick loop for [`Rung::Automatic`], as much of it as a headless test can run.
+///
+/// The [`Pacer`] and the [`EarMeter`] are one value here because they are one mechanism there:
+/// the meter decides what the pacer does, every tick, and a test holding them apart could sample
+/// one without the other and grade a loop nobody runs. Three loops below drive ticks — a bounded
+/// one, a typing one and a measured one — and the tick itself is the same in all three, so it is
+/// written once.
+struct Automatic {
+    pacer: Pacer,
+    ear: EarMeter,
+}
+
+impl Automatic {
+    /// A loop about to run `machine`, whose frame length sets the meter's threshold.
+    fn new(machine: &Spectrum) -> Self {
+        Self {
+            pacer: Pacer::new(),
+            ear: EarMeter::new(frame_t_states(machine)),
+        }
+    }
+
+    /// One display tick: sample the machine, ask the rung, run whatever it asks for.
+    ///
+    /// The three lines `src/main.rs` runs, in the order it runs them — the meter is sampled
+    /// **before** the decision, so the rate describes frames that have actually happened rather
+    /// than the ones about to.
+    ///
+    /// `frame` takes the machine rather than closing over it because one caller declines to run
+    /// past a target frame and the others do not; see [`run_frame_unless_done`].
+    fn tick(
+        &mut self,
+        machine: &mut Spectrum,
+        clock: &mut impl FnMut() -> f64,
+        mut frame: impl FnMut(&mut Spectrum),
+    ) {
+        self.ear.sample(machine.ear_reads(), machine.frames());
+        match Rung::Automatic.this_tick(self.ear.decoding()) {
+            Tick::Paced(speed) => {
+                self.pacer.set_speed(speed);
+                for _ in 0..self.pacer.advance(TICK) {
+                    frame(machine);
+                }
+            }
+            Tick::FlatOut => {
+                self.pacer.run_flat_out(clock, || frame(machine));
+            }
+        }
+    }
+}
+
 /// Drive `machine` on [`Rung::Automatic`] until it has run `frames`, and say how many ticks it took.
 ///
 /// [`drive`]'s counterpart, and deliberately the same shape: a bounded tick loop, a `TICK` of
 /// display time each pass, and an early return the moment the target is reached. What differs is
 /// the one line that decides how many frames a tick runs — which is the whole of what this rung
 /// changes, and therefore the whole of what the comparison has to isolate.
-fn drive_automatically(machine: &mut Spectrum, pacer: &mut Pacer, frames: u64) -> u64 {
+fn drive_automatically(machine: &mut Spectrum, rung: &mut Automatic, frames: u64) -> u64 {
     let budget = frames + 1;
     let mut clock = ticking_clock(FLAT_OUT_BUDGET / FLAT_OUT_FRAMES as f64);
     for tick in 1..=budget {
-        match Rung::Automatic.this_tick(machine.tape().is_playing()) {
-            Tick::Paced(speed) => {
-                pacer.set_speed(speed);
-                for _ in 0..pacer.advance(TICK) {
-                    run_frame_unless_done(machine, frames);
-                }
-            }
-            Tick::FlatOut => {
-                pacer.run_flat_out(&mut clock, || run_frame_unless_done(machine, frames));
-            }
-        }
+        rung.tick(machine, &mut clock, |machine| {
+            run_frame_unless_done(machine, frames);
+        });
         if machine.frames() >= frames {
             return tick;
         }
@@ -1094,27 +1535,6 @@ fn screen(machine: &Spectrum) -> Box<[u8; RGBA_BYTES]> {
     let mut rgba = palette::buffer();
     palette::write_rgba(&frame, &mut rgba);
     rgba
-}
-
-/// Hold `tap`'s keys together for `hold` frames, then release them for the same, through the
-/// real keymap.
-///
-/// The same two-phase step `zx-shot`'s own `press` performs, and it has to be: a key re-applied
-/// between frames is what the window does, and collapsing it into one `apply` and a run of frames
-/// would be a different gesture. It is written again here rather than shared because that function
-/// is private to a binary and drives a `Recorder` this file has no use for — the shape is common,
-/// the couplings are not.
-fn type_at(machine: &mut Spectrum, tap: &[&str], hold: u64) {
-    let codes: Vec<_> = tap
-        .iter()
-        .map(|name| keymap::code_named(name).expect("a key this emulator binds"))
-        .collect();
-    for held in [true, false] {
-        for _ in 0..hold {
-            keymap::apply(|code| held && codes.contains(&code), machine.keyboard_mut());
-            machine.run_frame();
-        }
-    }
 }
 
 /// How many different colours a frame carries.

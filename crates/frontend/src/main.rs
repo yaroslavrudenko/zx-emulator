@@ -35,9 +35,13 @@
 //! above 1× and the reason is at the push site below.
 //!
 //! **`auto` is the last rung and is the one to press if the answer wanted is *"do not make me
-//! choose"*.** It runs flat out while the tape is moving and at real time the instant it stops,
-//! so a cassette goes as fast as this host can manage and the game arrives at the speed it was
-//! written for, with no second keypress and no number to get wrong. The readout says
+//! choose"*.** It runs flat out while the **machine is decoding a tape** and at real time the
+//! instant it stops, so a cassette goes as fast as this host can manage and the game arrives at
+//! the speed it was written for, with no second keypress and no number to get wrong. Reading the
+//! machine rather than the drive is what makes the order of the two gestures stop mattering:
+//! pressing PLAY *before* typing `LOAD ""` is what a person does, it is free on real hardware
+//! because the leader is five seconds long, and keyed off the motor it spent those five seconds
+//! in 0.055 s. The readout says
 //! `speed auto (loading)` while it is working and `speed auto` when it is not, because a machine
 //! running flat out and a machine with a broken clock look identical from outside.
 //! [`frontend::pacing::Rung::Automatic`] carries the whole argument.
@@ -64,7 +68,7 @@ use frontend::bundle;
 use frontend::drive;
 use frontend::keymap::Hotkey;
 use frontend::media;
-use frontend::pacing::{self, LossMeter, Pacer, RateMeter, Rung, Speed, Tick};
+use frontend::pacing::{self, EarMeter, LossMeter, Pacer, RateMeter, Rung, Speed, Tick};
 use frontend::viewport::Viewport;
 use frontend::{host, keymap, palette, viewport};
 use spectrum::screen::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -234,6 +238,11 @@ async fn main() {
     let mut pacer = Pacer::new();
     let mut meter = RateMeter::new(RATE_WINDOW, get_time());
     let mut loss = LossMeter::new(LOSS_WINDOW, get_time());
+    // The frame length comes off the machine rather than from a literal, for the reason
+    // `EarMeter::new` gives: a 128's frame is 1020 T-states longer and its threshold differs.
+    // Built once, here, because the model cannot change under a running window — `Spectrum::restore`
+    // refuses a snapshot of the other machine.
+    let mut ear = EarMeter::new(machine.ula().clock().timing().frame_t_states());
 
     // The machine's own clock decides its sample rate, and the two machines differ: 3,500,000
     // against 3,546,900 T-states a second.
@@ -285,11 +294,20 @@ async fn main() {
         // rather than a second copy: `Status` decides, `Pacer` obeys, and there is no third place
         // the two could drift apart in. `keymap::Hotkey` records what shadowing costs.
         //
-        // **The drive is asked here rather than remembered**, for the same reason. The tape stops
-        // itself when its train runs out, so a cached answer would keep `Rung::Automatic` running
-        // flat out past the end of a cassette — the exact bug `spectrum::tape::Tape::is_playing`
-        // was added to remove, and the reason it is an accessor rather than a flag over here.
-        let tick = pacing::RUNGS[status.speed].this_tick(machine.tape().is_playing());
+        // **The machine is asked here rather than remembered**, for the same reason. A guest
+        // stops reading the `EAR` line the moment its loader finishes, so a cached answer would
+        // keep `Rung::Automatic` running flat out into the game — which is the shape of the bug
+        // `spectrum::tape::Tape::is_playing` was added to remove, one signal along.
+        //
+        // **This asked the drive, and the drive is not the machine.** `pacing::Rung::Automatic`
+        // carries what that cost: a turning motor with nobody listening is a cassette being spent
+        // at 90×, so pressing PLAY before typing `LOAD ""` — free on every real Spectrum, because
+        // the leader is five seconds long — burned the tape in 0.055 s. `EarMeter` reads how hard
+        // the machine is sampling the line instead, which covers the load *and* the wait before
+        // it, and is sampled before the decision rather than after so the rate describes frames
+        // that have actually run.
+        ear.sample(machine.ear_reads(), machine.frames());
+        let tick = pacing::RUNGS[status.speed].this_tick(ear.decoding());
         run_tick(tick, &mut machine, &mut pacer);
         // **Asked here, immediately after the frames that could have ended the tape.** Under
         // `Rung::Automatic` a three-minute cassette reaches its end in about two seconds, so a
@@ -375,7 +393,7 @@ async fn main() {
         }
 
         video.draw(&machine);
-        status.draw(&machine, pacer, meter, loss);
+        status.draw(&machine, pacer, meter, loss, ear);
         next_frame().await;
     }
 }
@@ -802,7 +820,14 @@ impl Status {
     /// figures are glanced at, the sentence is read once. Separating them is also what lets the
     /// colour mean something exact, because only the row carrying the pacing figures changes with
     /// it.
-    fn draw(&mut self, machine: &Spectrum, pacer: Pacer, meter: RateMeter, loss: LossMeter) {
+    fn draw(
+        &mut self,
+        machine: &Spectrum,
+        pacer: Pacer,
+        meter: RateMeter,
+        loss: LossMeter,
+        ear: EarMeter,
+    ) {
         // Drawn **before** the visibility check, and `F1` does not hide it. A build that
         // embeds a Sinclair ROM is a redistribution to whoever runs the binary, and Amstrad's
         // permission asks that "the program/manual" carry the acknowledgement — for a
@@ -849,16 +874,23 @@ impl Status {
         //
         // Infallible: writing to a `String` cannot fail. The `Result` is there for writers
         // that can, and is discarded here rather than handled.
+        //
+        // **`(loading)` is drawn from the same meter the frame loop paced by**, which is what
+        // makes the word true. It used to come from the drive, so it appeared over a turning
+        // cassette nobody was reading — the same lie `drive::Drive` was written to take out of
+        // the row above, one field along. The meter is passed in rather than re-read from the
+        // machine so that the label describes the tick that just ran rather than a fresh sample
+        // taken after it.
         let rung = pacing::RUNGS[self.speed];
-        let playing = machine.tape().is_playing();
+        let decoding = ear.decoding();
         let _ = write!(
             self.line,
             "{:.1} Hz   speed {rung}{}   dropped {}   frame {}   snd {}   arrows {}",
             meter.hz(),
-            rung.note(playing),
+            rung.note(decoding),
             pacer.dropped(),
             machine.frames(),
-            self.queue(rung.this_tick(playing)),
+            self.queue(rung.this_tick(decoding)),
             keymap::ARROW_SCHEMES[self.arrows].name,
         );
 

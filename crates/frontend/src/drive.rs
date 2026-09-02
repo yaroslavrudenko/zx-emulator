@@ -36,10 +36,22 @@
 //!
 //! [`Drive::ran_out`] reports that a tape **reached its end**. It does not report that the tape
 //! reached its end **unread**, which is the sentence the owner actually needed, because nothing on
-//! [`spectrum::Spectrum`]'s public surface says whether the machine was reading. The signal that
-//! would — the rate at which the machine samples the `EAR` bit — is named in this crate's report
-//! along with the measurement that picks it, and it is one field and one accessor away. Until it
-//! exists this module says the true smaller thing rather than guessing the larger one.
+//! [`spectrum::Spectrum`]'s public surface said whether the machine was reading.
+//!
+//! > **That prediction was cashed, and this module deliberately did not change.** The signal it
+//! > named — *"the rate at which the machine samples the `EAR` bit"* — is
+//! > [`spectrum::Spectrum::ear_reads`], and [`crate::pacing::EarMeter`] is the policy over it. It
+//! > went to the **pacing** decision, which is what was actually broken: `auto` was keyed off the
+//! > motor and spent a five-second leader in 0.055 s, so a tape could reach its end unread while
+//! > every message here was true.
+//! >
+//! > Wiring it into [`Drive::ran_out`] as well would buy a sharper sentence and cost this module
+//! > its one job. The strings here answer *what did the drive do*, from the drive, after a key —
+//! > and a rate is a property of the **machine** over a window, which is a second kind of input
+//! > with a second kind of failure. `crates/frontend/src/pacing.rs` already owns that window and
+//! > owns the threshold; a copy here would be the shadow this module's own [`Drive`] doc warns
+//! > about, in the file that warns about it. If *"ran out unread"* is ever wanted on the bar, it
+//! > should read one meter rather than grow a second.
 
 use spectrum::tape::Tape;
 

@@ -59,9 +59,18 @@
 //!
 //! Every rung above is a number somebody has to choose, and the owner's request was not for a
 //! number: *"I want the tape to load at once and not wait"*. [`Rung::Automatic`] is the answer —
-//! flat out while the drive is turning, real time when it is not — and it is a **fifth rung of
-//! the same key** rather than an override, so nobody watching a load is overtaken by it and one
-//! press still comes home.
+//! flat out while the machine is decoding a tape, real time when it is not — and it is a **fifth
+//! rung of the same key** rather than an override, so nobody watching a load is overtaken by it
+//! and one press still comes home.
+//!
+//! **That trigger was wrong once, in a way worth keeping written down.** It read the *motor*, and
+//! a turning motor is not a machine that is loading. Pressing PLAY before typing `LOAD ""` had
+//! always been free — the ROM's five-second pilot leader is five seconds of grace — and keying a
+//! 90× fast-forward off the drive spends that grace in **0.055 s**, so the cassette is gone two
+//! seconds later and the loader that eventually asks for it finds silence. It cost the owner an
+//! evening on 2026-09-01. [`EarMeter`] is the signal that replaced it: a rate rather than a
+//! state, read from the machine rather than from the drive, and true *before* anybody presses
+//! PLAY — which is the half no delay and no bigger leader could ever have reached.
 //!
 //! It needed a second mechanism rather than a bigger number, and the reason is the bullet
 //! directly above: a multiplier's cost per tick is `MAX_CATCH_UP × factor × the cost of a frame`,
@@ -249,12 +258,28 @@ impl Default for Speed {
 pub enum Rung {
     /// A fixed multiple of real time, whatever the machine is doing.
     Fixed(Speed),
-    /// Flat out while the tape is moving; real time when it is not.
+    /// Flat out while the machine is decoding a tape; real time when it is not.
     ///
-    /// The trigger is the **drive**, read every tick from [`spectrum::tape::Tape::is_playing`]
-    /// rather than shadowed — `crates/frontend/src/keymap.rs` records what a shadow copy costs,
-    /// and that accessor exists because of it. So the end of a cassette keys this off by itself:
-    /// the tape stops the motor when its train runs out, and the next tick is paced again.
+    /// # The trigger is the machine, and it used to be the drive
+    ///
+    /// It read [`spectrum::tape::Tape::is_playing`] — *the motor is turning* — which is a fact
+    /// about the **cassette player** and not about the **computer**, and the two come apart in
+    /// exactly the case a person reaches for first. Pressing PLAY and then typing `LOAD ""` had
+    /// always worked, because the leader is five seconds of pilot tone and typing takes two; at
+    /// 90× those five seconds are **0.055 s**, and the tape is off its end before the loader
+    /// exists. Nothing on the bar could say so either, because at that point nothing was wrong
+    /// with the drive.
+    ///
+    /// So the trigger is now [`EarMeter::decoding`]: how often the machine reads the `EAR` line,
+    /// against a threshold [`decoding_threshold`] derives from the frame length. That signal
+    /// covers the same ground as the motor and one strip more — **a loader waiting for a tape
+    /// reads the line hardest of all**, so the documented order accelerates from the first tick
+    /// rather than from the press, which is a thing no amount of delay could buy.
+    ///
+    /// It is still read every tick rather than shadowed, for the reason
+    /// `crates/frontend/src/keymap.rs` records about shadow copies, and the end of a cassette
+    /// still keys it off by itself — a beat later than the motor did, once the guest stops
+    /// asking rather than the moment the train runs out.
     Automatic,
 }
 
@@ -276,16 +301,21 @@ pub enum Tick {
 }
 
 impl Rung {
-    /// What this rung asks of the tick about to run, given whether the drive is turning.
+    /// What this rung asks of the tick about to run, given whether the machine is decoding a tape.
+    ///
+    /// `decoding` is [`EarMeter::decoding`]'s verdict — *the machine is reading the `EAR` line at
+    /// a rate only a loader reaches* — and **not** whether the drive is turning. Those are
+    /// different questions and this rung asks the second one badly; [`Rung::Automatic`] carries
+    /// what that cost.
     ///
     /// **A [`Rung::Fixed`] rung answers itself**, and that is the whole of why a multiplier stays
-    /// a thing somebody chose rather than something that happens to them: the tape is not
+    /// a thing somebody chose rather than something that happens to them: the machine is not
     /// consulted, so putting a cassette in cannot move a machine the person parked at 1×.
     #[must_use]
-    pub const fn this_tick(self, playing: bool) -> Tick {
+    pub const fn this_tick(self, decoding: bool) -> Tick {
         match self {
             Self::Fixed(speed) => Tick::Paced(speed),
-            Self::Automatic if playing => Tick::FlatOut,
+            Self::Automatic if decoding => Tick::FlatOut,
             Self::Automatic => Tick::Paced(Speed::REAL_TIME),
         }
     }
@@ -296,9 +326,16 @@ impl Rung {
     /// selected and this says whether it is currently doing anything. Both are drawn, because
     /// automatic with nothing to be automatic about is exactly the case a person would otherwise
     /// read as the feature being broken.
+    ///
+    /// **It became true when [`Rung::this_tick`]'s argument did, and that is worth naming.** The
+    /// word it draws is `loading`, and it used to be written from the motor — so it appeared over
+    /// a turning drive nobody was reading, which is the same lie `crate::drive` was written to
+    /// take out of the *tape* row one row up. It is derived from [`Rung::this_tick`] rather than
+    /// from its own condition, so the label cannot say `loading` about a tick that is not running
+    /// flat out however either is later changed.
     #[must_use]
-    pub const fn note(self, playing: bool) -> &'static str {
-        match self.this_tick(playing) {
+    pub const fn note(self, decoding: bool) -> &'static str {
+        match self.this_tick(decoding) {
             Tick::FlatOut => LOADING,
             Tick::Paced(_) => "",
         }
@@ -330,7 +367,8 @@ impl fmt::Display for Rung {
 /// person to reword the label would be making a semver change without noticing.
 const AUTOMATIC: &str = "auto";
 
-/// What the readout adds to [`AUTOMATIC`] while the drive is turning. See [`Rung::note`].
+/// What the readout adds to [`AUTOMATIC`] while the machine is decoding a tape. See
+/// [`Rung::note`].
 const LOADING: &str = " (loading)";
 
 /// The rungs the window cycles through, in the order it reaches them.
@@ -405,15 +443,18 @@ const LOADING: &str = " (loading)";
 /// The owner's words were *"I want the tape to load at once and not wait"*, and every multiplier
 /// in this table answers that with a number somebody has to pick — three presses to reach it, one
 /// to leave, and a figure that is right on the host it was measured on and wrong on every other.
-/// [`Rung::Automatic`] answers it with the machine instead: flat out while the drive is turning,
-/// real time when it is not, and no figure to be wrong. It is **last** in the cycle rather than
-/// first, so the table still opens at real time and `F8` still returns there in one press from
-/// wherever it stands.
+/// [`Rung::Automatic`] answers it with the machine instead: flat out while the machine is decoding
+/// a tape, real time when it is not, and no figure to be wrong. It is **last** in the cycle rather
+/// than first, so the table still opens at real time and `F8` still returns there in one press
+/// from wherever it stands.
 ///
 /// **Nothing above it is redundant.** A fixed rung is what somebody watching a load reaches for —
 /// 4× is a tape you can still see happening — and it is also the only thing to fall back on when
-/// the automatic rung's trigger is wrong for a particular tape, since a loader that stops the
-/// motor between blocks would have automatic paced during the gaps.
+/// the automatic rung's trigger is wrong for a particular tape. The gaps are where that shows:
+/// after a pilot is detected the ROM parks at `LD-WAIT` and reads the line **not at all** for
+/// about a second, so [`EarMeter`] correctly reports a machine that is not decoding and the tick
+/// is paced. See [`EarMeter`] for why that is the signal working and not chatter to be smoothed
+/// away.
 pub const RUNGS: &[Rung] = &[
     Rung::Fixed(Speed::REAL_TIME),
     // `expect` on a literal, inside a `const`: a zero written here does not panic at run time,
@@ -723,5 +764,137 @@ impl LossMeter {
     #[must_use]
     pub const fn keeping_up(self) -> bool {
         self.recent() < LOSS_ALARM
+    }
+}
+
+/// Half-period of the widest pulse a standard loader has to resolve, in T-states.
+///
+/// The ROM's pilot tone, which is the slowest edge a `.tap` ever asks a loader to see.
+/// `crates/spectrum/src/tape/tap.rs`'s `PILOT_PULSE` is where the figure comes from and it is
+/// written out again here rather than borrowed, because that constant is `pub(super)` — one
+/// crate away and two modules down — and widening a machine's public surface to hand a frontend
+/// a number the frontend can state for itself would be a semver change bought for nothing. Every
+/// test in this workspace that needs it writes it down too.
+const WIDEST_HALF_PERIOD: u64 = 2168;
+
+/// Reads of the `EAR` line per frame at or above which a machine counts as decoding a tape.
+///
+/// # Derived, not chosen, which is the only reason a number this load-bearing is allowed
+///
+/// A loader cannot see an edge it does not sample, so it must read the line at least **twice**
+/// inside the widest half-period it has to resolve. That is the floor, and it is arithmetic:
+/// `2 × frame_t_states / WIDEST_HALF_PERIOD`, which is **64** on a 48K's 69,888-T-state frame
+/// and **65** on a 128's 70,908. Reading the frame length off the machine rather than writing 64
+/// down is what stops one model quietly borrowing the other's arithmetic — the same move
+/// `crates/frontend/tests/speed_multiplier.rs`'s `pilot_tone` makes when it sizes a cassette.
+///
+/// # The margin, which is what makes it safe rather than merely principled
+///
+/// Measured on a 48K, per frame: an idle BASIC prompt reads the port **8** times — the ROM's
+/// `KEY-SCAN` walks one half-row per interrupt, so *"only a loader reads this port"* is simply
+/// false and was believed here until it was measured — a running loader reads it **682** times,
+/// and `LOAD ""` *waiting* for a cassette reads it **1122**. The two populations are 85 times
+/// apart and the threshold sits between them with eight times' clearance below and ten times'
+/// above, so nothing plausible is within an order of magnitude of it in either direction.
+const fn decoding_threshold(frame_t_states: u32) -> u64 {
+    2 * frame_t_states as u64 / WIDEST_HALF_PERIOD
+}
+
+/// Whether the machine is decoding a tape, from how hard it is reading the `EAR` line.
+///
+/// # Why a rate, and why it is measured here rather than answered by the machine
+///
+/// [`spectrum::Spectrum::ear_reads`] is a running total and nothing else — the machine owns the
+/// fact and this owns the policy, which is the split [`RateMeter`] and [`LossMeter`] already make
+/// against [`Pacer::ran`] and [`Pacer::dropped`]. What arrives here is two readings; what leaves
+/// is one verdict, and [`decoding_threshold`] is the whole of what turns one into the other.
+///
+/// The window is **one display tick**, because that is the granularity the decision is made at:
+/// [`Rung::this_tick`] is asked once a tick, so a rate averaged over anything longer would be
+/// answering about a moment that has passed. It is therefore the *previous* tick's rate, which is
+/// the same one-tick lag [`LossMeter`] carries and for the same reason — there is no other kind
+/// of measurement of something that has not happened yet.
+///
+/// # A tick that ran no frames is not evidence, and is not treated as any
+///
+/// [`Pacer::advance`] can owe zero frames, and a rate over zero frames is not a small rate — it
+/// is no reading at all. [`EarMeter::sample`] therefore returns without touching anything, and
+/// the verdict from the last tick that *did* run a frame stands. Dividing by the elapsed frames
+/// rather than by the elapsed ticks is the same choice: a flat-out tick runs a hundred frames and
+/// a paced one runs a single frame, and the number that means the same thing in both is per-frame.
+///
+/// # The quiet second between blocks, which is the signal being right
+///
+/// Once the ROM has detected a pilot it parks at `LD-WAIT` — `PC = 0x0574`, the post-pilot delay
+/// — and reads this port **zero** times per frame for about a second. So a real load is not one
+/// unbroken burst: it is bursts with a second of real time between them, and the readout says
+/// `auto` rather than `auto (loading)` while that second passes.
+///
+/// **That is correct and it is deliberately not smoothed.** The machine genuinely is not decoding
+/// anything there, and pacing it at real time costs about a second a block on a cassette whose
+/// blocks are tens of seconds each. Hysteresis — a hold-on window, a decaying average — would buy
+/// back that second and would do it by asserting a load is in progress when the measurement says
+/// otherwise, which is this module's own recurring defect: a readout answering a question nobody
+/// asked. If a future measurement shows the gaps dominating a real load, the fix is a stated
+/// reason and a number derived from that measurement, not a smoothing constant chosen to make the
+/// figure look better.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EarMeter {
+    /// Reads per frame at or above which this machine is decoding. See [`decoding_threshold`].
+    threshold: u64,
+    reads_at_open: u64,
+    frames_at_open: u64,
+    /// Reads per frame over the last tick that ran a frame.
+    rate: u64,
+}
+
+impl EarMeter {
+    /// A meter for a machine whose frame is `frame_t_states` long, having seen nothing yet.
+    ///
+    /// The frame length rather than a [`spectrum::Spectrum`], so this module keeps taking
+    /// numbers instead of machines and `tests/pacing_accounting.rs` can drive it with literals
+    /// the way it drives [`Pacer`]. A caller reads it from
+    /// `machine.ula().clock().timing().frame_t_states()`, which is where every other frame-length
+    /// consumer in this workspace reads it.
+    ///
+    /// A machine with no reads yet is a machine that is **not** decoding, which is what a
+    /// zero rate against any positive threshold already says — so there is no start-up case and
+    /// no special value. A frontend that opened at `Rung::Automatic` therefore starts paced,
+    /// which is the honest answer for a machine that has not run a frame.
+    #[must_use]
+    pub const fn new(frame_t_states: u32) -> Self {
+        Self {
+            threshold: decoding_threshold(frame_t_states),
+            reads_at_open: 0,
+            frames_at_open: 0,
+            rate: 0,
+        }
+    }
+
+    /// Offer [`spectrum::Spectrum::ear_reads`] and [`spectrum::Spectrum::frames`], both as
+    /// running totals; closes the window over the frames since the last call.
+    ///
+    /// Saturating on the way in for the same reason [`LossMeter::sample`] saturates: both
+    /// counters are documented monotonic, and a frontend that met one that was not should report
+    /// a machine doing nothing rather than abort — `overflow-checks` is on in this workspace's
+    /// release profile, so a plain subtraction here would be a panic in a shipped window.
+    pub const fn sample(&mut self, reads: u64, frames: u64) {
+        let ran = frames.saturating_sub(self.frames_at_open);
+        if ran == 0 {
+            return;
+        }
+        self.rate = reads.saturating_sub(self.reads_at_open) / ran;
+        self.reads_at_open = reads;
+        self.frames_at_open = frames;
+    }
+
+    /// Whether the machine was decoding a tape over the last tick that ran a frame.
+    ///
+    /// [`Rung::this_tick`]'s argument, and the one place [`decoding_threshold`]'s number is
+    /// applied — so a test can drive the rate either side of it and the shell has no second copy
+    /// of the comparison to drift from.
+    #[must_use]
+    pub const fn decoding(self) -> bool {
+        self.rate >= self.threshold
     }
 }

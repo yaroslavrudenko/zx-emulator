@@ -510,6 +510,46 @@ impl Spectrum {
         self.cpu.bus().dropped_samples()
     }
 
+    /// Times a guest has read the `EAR` line since power-on.
+    ///
+    /// # What this is for, since it is new public surface
+    ///
+    /// A frontend that wants to run a tape load faster than real time has to know when a load
+    /// is happening, and until now the only thing on this surface that came close was
+    /// [`tape::Tape::is_playing`] — *the motor is turning*. Those are different facts, and the
+    /// difference cost an owner an evening: pressing PLAY before typing `LOAD ""` used to be
+    /// free, because the ROM's five-second pilot leader is five seconds of grace, and a
+    /// frontend keying a 90× fast-forward off the **motor** spends that grace in 0.055 s. The
+    /// cassette is gone before the loader that wanted it exists.
+    ///
+    /// This is the fact that separates them, because it is a property of the **machine** and
+    /// not of the drive. Measured on a 48K, per frame: an idle BASIC prompt reads this port
+    /// **8** times — the ROM's `KEY-SCAN` walks one half-row per interrupt, so *"only a loader
+    /// reads it"* is simply false — a running loader reads it **682** times, and `LOAD ""`
+    /// *waiting* for a tape reads it **1122** times. A frontend can therefore tell a machine
+    /// that is decoding from one that is not, and — this is the half the motor cannot reach —
+    /// it can tell **before** anybody presses PLAY, because the waiting loader is already
+    /// reading at full rate.
+    ///
+    /// # Why a count and not a `bool`, and not a decision
+    ///
+    /// The threshold between those rates is a **policy**, and it belongs to whoever is paying
+    /// for it. `crates/frontend`'s [`pacing`](../frontend/pacing/index.html) derives one from
+    /// the frame length and this crate's widest standard pulse; a different caller wanting a
+    /// different question — *is anything listening at all*, say — asks it of the same number
+    /// without this crate having guessed which question it would be. A `bool` here would be
+    /// this crate deciding on a caller's behalf, in a type that cannot carry the reasoning, and
+    /// would have to be re-litigated the first time somebody wanted the other answer.
+    ///
+    /// It is the split [`Spectrum::frames`] and [`Spectrum::dropped_samples`] already make: the
+    /// machine owns the fact, the frontend owns the policy. **Monotonic**, so a caller samples
+    /// it twice and subtracts; nothing resets it, including [`Spectrum::reset`] and
+    /// [`Spectrum::restore`] — see [`ula::Ula::ear_reads`].
+    #[must_use]
+    pub fn ear_reads(&self) -> u64 {
+        self.cpu.bus().ear_reads()
+    }
+
     /// This machine's whole state, as a value a snapshot format can encode.
     ///
     /// The CPU, the border, the frame position, the model and its paging port, and **every RAM
