@@ -22,123 +22,6 @@ every enemy on screen is where the game put it.
 
 ---
 
-## Three more games
-
-![Manic Miner running in the emulator: the Central Cavern, a black cave framed by yellow brick walls and red platforms, with Miner Willy in yellow standing on a green conveyor at the centre. The cavern's name is on a yellow strip below it, then the AIR meter and the score, all inside the machine's own red border.](docs/images/central-cavern.png)
-
-**_Manic Miner_, playing, on a 48K, and it got there the long way.** `LOAD ""` typed through the
-same keymap table the window presses, then the tape played, then the ROM's own `LD-BYTES` read all
-six blocks off it — about three minutes of emulated time. **Nothing was pressed afterwards, and
-nothing could have been:** `zx-shot` presses every key *before* it starts the tape. This is one
-stop on the game's own attract loop, which tours the caverns while the title screen waits for an
-`ENTER` that never came.
-
-![The Cybernoid II loading screen: a green cavern floor under a black sky, crowded on both sides by magenta and red alien creatures, a blue-white orb burning at the top, and a large ship in the centre firing white beams past a small wreck in flames — framed by a border of tightly alternating blue and yellow horizontal stripes.](docs/images/cybernoid-ii.png)
-
-**_Cybernoid II_, half-arrived.** This screen was on the tape *as a screen*: one block carrying no
-header and exactly **6,912** bytes — 6,144 of pixels and 768 of colour, which is what a Spectrum
-has. The border is still striped because the other **40,191** bytes have not landed yet. Those
-stripes are the ROM's loader toggling the border as it decodes each bit, so they come out like
-this only if the border is modelled *below* frame resolution; written once per frame it would be a
-flat rectangle.
-
-![The Exolon loading screen: a close-up of an armoured spaceman against a flat yellow sky, in white and grey armour with red and green panels, a red sun flaring at the left and the word ROCK scrawled across the helmet — framed by a border of tightly alternating red and cyan horizontal stripes.](docs/images/exolon.png)
-
-**_Exolon_, whose picture was never on the tape.** Its three files are 125 bytes of BASIC and two
-blocks of code, for addresses 27000 and 28000 — nothing 6,912 bytes long, nothing aimed at the
-display file. **The picture is painted by code**, and 100 frames earlier it can be caught
-half-drawn with a *black* border, which is the tell: the ROM's loader never leaves the border
-alone. Here it is finished and the border is red and cyan — the ROM listening for the next block's
-pilot tone, which is a different part of `LD-BYTES` from the blue and yellow above.
-
-![Exolon being played: a black starfield carrying a green planet, a large red one and a small magenta one, a white and cyan lander hanging above a green pillared arch at the left, an armoured figure in white standing beneath the arch on a yellow tiled ledge, a green gun emplacement to the right of centre with a small shot in the air beside it and a yellow rock formation behind it, a band of red and magenta rubble below the ledge, and the game's own status line across the bottom reading AMMO 99, GRENADES 10, POINTS 000000, LIVES 6, ZONES 000.](docs/images/exolon-playing.png)
-
-**_Exolon_, started — by a key pressed the better part of four minutes after the tape began.** Every
-`--keys` tap happens *before* PLAY, so nothing here could reach a game that arrives that much later;
-`--keys-after` presses once the tape has run out instead. It does not count frames to know when —
-**it asks the tape.** `Tape::pulses` half-periods are T-states, their sum is the cassette end to end, and dividing
-by the machine's own frame length gives the wait: 10,653 frames here, against a tape that ran out at
-10,953. Then `Space;Space;Key1` — dismiss, advance, `1 START GAME`. **`LIVES 6` is the honest
-detail:** nobody is at the keyboard, so the hero stands under that gun and dies about every four
-seconds, and `6` is where the counter had reached 800 frames after `1`.
-
-![Cybernoid II being played: a chamber walled in red and yellow alien masonry with cyan and green blocky platforms inside it, a white ship in flight at the upper left trailing yellow, two white round-headed guardians standing on a yellow platform below it, a large magenta pod at the lower right, and a cyan status panel across the top carrying a lives count, the scores 000025 and 000000, BOMBS 20, an hourglass and a bar meter.](docs/images/cybernoid-ii-playing.png)
-
-**_Cybernoid II_, the same three taps, and the evidence is the scoreboard.** `000025`, up from
-zero — a still of a title screen and a still of a running game are hard to tell apart, and a score
-that has moved is the difference. The sequence is uniform because what it walks is uniform: a Hewson
-loading screen and a Hewson title screen each consume one key, and only the third is a choice.
-`Key1;Key1;Key1` starts both games too, which is what identifies the first two as *advance* rather
-than as *select* — so neither picture required knowing anything about either game in advance.
-
-> **No game is distributed by this repository** — `testdata/**` is `.gitignore`d and no game file in
-> `testdata/games/` is committed. *Manic Miner* is Matthew Smith's, published by Bug-Byte Software
-> Ltd in 1983; *Cybernoid*, *Cybernoid II* and *Exolon* are Raffaele Cecco's, published by Hewson
-> Consultants Ltd in 1987 and 1988. **No permission covering these screenshots was found for any of
-> them.** For *Manic Miner*, two archives sharing one dataset contradict each other about this exact
-> file. For the three Hewson titles something better exists and is still not that: an archive
-> relays the publisher's *"no objection"* to **its own** downloads, which is not a permission for
-> screenshots taken by somebody else. [`docs/images/README.md`](docs/images/README.md) states all of
-> it in full, with the quotations, and separates it from the 128 menu below — which *is* covered, by
-> Amstrad's quoted ROM permission.
-
----
-
-## The other machine, and the three minutes before a game appears
-
-The 128 first, then the tape a game arrives on, then what arrived — which is the order they have
-to happen in. All three are `zx-shot` output at scale 2, whole frames, nothing added.
-
-![The 128's boot menu: a white panel on a grey field, the word 128 above a rainbow stripe of red, yellow, green and cyan, the five entries Tape Loader, 128 BASIC, Calculator, 48 BASIC and Tape Tester with the first highlighted, and the 1986 Sinclair Research copyright below.](docs/images/128-menu.png)
-
-**The 128's own boot menu, unassisted.** The number of `--rom` arguments is what names the
-machine — two make a 128, editor ROM first — so this needed no `--model` flag and no key at all.
-The rainbow is the machine's signature and it is drawn by the ROM, not by anything here.
-
-![Manic Miner mid-load: a black screen carrying the word MANIC in chunky letters of red, yellow, green, cyan and magenta, framed by a border of tightly alternating blue and yellow horizontal stripes.](docs/images/tape-loading.png)
-
-**Three thousand frames into the tape.** Two things are worth naming. The stripes are the ROM's
-`LD-BYTES` toggling the border as it decodes each bit, so they come out right only if the border
-is modelled *below* frame resolution — written once per frame it would be a flat rectangle. And
-`MANIC` is not a bitmap: it is 256 bytes loaded straight into the attribute file at `0x5900`,
-which is why the letters are 8 × 8 blocks of flat colour.
-
-![The Manic Miner title screen: a cyan sky with a yellow sunrise, a tree, a green hillside, a house and a red car, above a red banner reading MANIC MINER starring Miner Willy and PRESS ENTER TO START, above a drawn piano keyboard, with the Bug-Byte 1983 copyright scrolling below it.](docs/images/title.png)
-
-**What the tape produced.** The same four keys, 7,750 frames later. The cavern above is one stop
-on the attract loop this screen starts when the `ENTER` it is asking for does not arrive — and it
-cannot arrive, because `zx-shot` presses every `--keys` tap *before* it starts the tape. **That
-ordering was also the limitation, and it named its own remedy.** *Exolon* and *Cybernoid II* have
-no attract loop to photograph, so for as long as every key landed before PLAY they could be shown
-arriving and not playing; [`docs/images/README.md`](docs/images/README.md) recorded that as a
-missing flag rather than a defect, and `--keys-after` is that flag. The two frames above are what
-it bought, taken the same day. That page keeps the prediction standing rather than deleting it —
-together with the two games that were tried and left out, and why a picture nobody can regenerate
-would not have been worth having.
-
----
-
-Not a port. Not a translation of an existing emulator. The CPU is implemented from the Z80
-hardware specification and from our own architecture; correctness is then proven against
-public conformance suites rather than against somebody else's source.
-
-**The bar:** the emulator is not "done" until `zexall` passes — including the undocumented
-flag behaviour that most emulators quietly skip.
-
-> **What that green proves is narrower than the sentence reads, and this repository measured the
-> gap rather than assuming it.** `zexall` reports 67/67 (M4), and it genuinely **is** sensitive to
-> the undocumented `F3`/`F5` bits — forcing them to a constant `0` or `0x28` fails it, while a
-> control mutation of a *documented* bit fails both exercisers, which is what proves the group is
-> executed rather than skipped. But `zexall` **cannot decide the rule behind those bits**: the same
-> 67/67 has been observed under three different implementations, including one whose flag latch was
-> stuck at zero. Two FUSE vectors are the only gate in this project that can see that latch at all.
->
-> So the bar is necessary and not sufficient, and the tempting one-line summary — *"`zexall`
-> passes, so the undocumented flags are right"* — is true of the first claim and false of the
-> second. [`docs/STATUS.md`](docs/STATUS.md) holds the coverage table that keeps them apart.
-
----
-
 ## Why this project
 
 Emulating a Z80 is a rare kind of engineering problem: the correct answer is not a matter
@@ -146,159 +29,6 @@ of opinion. `zexall` either prints `OK` for all 67 tests or it does not. That ma
 honest way to exercise the parts of Rust that matter — exhaustive `match` over an
 instruction set, types that make an invalid state unrepresentable, and property tests over
 arithmetic — with an external oracle instead of self-assessment.
-
----
-
-## Status
-
-| Milestone | Goal | Gate | State |
-|---|---|---|---|
-| M1 | Registers, flags, un-prefixed opcodes | FUSE vectors green for un-prefixed | **290/290** — merged |
-| M2 | `CB` / `ED` / `DD` / `FD` prefixes | FUSE vectors green in full | **1045/1045** — merged |
-| M3 | Documented behaviour | `zexdoc` passes | **67/67 first run** — merged |
-| M4 | Undocumented flags | **`zexall` passes** — CPU complete | **67/67**, made a gate with its limits stated — merged |
-| **M5** | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | the machine boots, **on frame 87**, and **the gate work landed**: `crates/spectrum/tests/boot.rs` is a real `#[test]` that runs the ROM under `cargo test` and asserts the frame, alongside the other integration gates in that directory. Of the five mutations, **four were already red and one survived**. **Contention is no longer ungraded either**: `crates/spectrum/tests/timing_oracle.rs` grades the model against **70 rows measured on real Spectrums, 0 disagreeing**. See [`docs/STATUS.md`](docs/STATUS.md) for what M5's green does and does not mean, and [`docs/MACHINE.md`](docs/MACHINE.md) for the oracle's scope, which is narrower than the sentence sounds |
-| **M6** | Snapshots (`.z80` / `.sna`) and tape (`.tap`) | **T1 + T2 + T3** — *not* "a real game runs" | **merged.** A program written here, stored as a `.tap`, loaded by the real ROM's own `LD-BYTES` through the `EAR` bit, and executed — computing a value asserted to appear **nowhere in its own bytes**, so that *"the data arrived"* and *"it ran"* are separate claims. Design in [`docs/M6.md`](docs/M6.md); what it opened and closed is in [`docs/STATUS.md`](docs/STATUS.md) |
-| M7 | 128: paging, second ROM, AY-3-8912, **the beeper**, per-bank contention | **T1 + T2 + T3** — *not* "128-only software runs" | design in [`docs/M7.md`](docs/M7.md). **All five parts have landed**, each with its own gate among `crates/spectrum/tests/m7_*.rs`. **The memory half boots:** the 128 reaches its own `© 1986` copyright, draws all five menu entries, the highlight moves under `CAPS SHIFT`+`6`, and selecting *48 BASIC* reaches the `© 1982` message through ROM page 1 — the year changing is what makes that a claim about which ROM is executing. **The sound half is a device rather than a plan:** `crates/spectrum/src/ay.rs` is the AY-3-8912, reached from a guest's own `OUT`/`IN` in `m7_ay_ports.rs` and followed into the sample stream by `m7_ay_stream.rs`, and the beeper is bit 4 of a `0xFE` write, graded by value against a T-state derivation in `m7_beeper.rs`. What none of that settles is whether it **sounds** right — nobody has listened, and *What this is like at the moment* below says so first |
-| M8 | WASM build | **T1 + T2 + T3** — a *build* gate, and ~~"playable from a URL"~~ cannot be one | **the browser build runs.** `wasm32-unknown-unknown` links, and on 2026-09-01 a served page booted the 48K to `© 1982 Sinclair Research Ltd` at **50.3 Hz, 0 dropped**, built a **128** from the query string alone, saved a `.z80` through a `Blob`, and restored it from a file dropped back onto the page. Each observation is recorded with its provenance in [`web/README.md`](web/README.md). Also landed: `crates/page` (the whole `unsafe` surface of this workspace, five blocks — `EXPECTED_BLOCKS` in `crates/page/tests/unsafe_inventory.rs`), a `bundled` feature that compiles a ROM and a game into one artefact, and drag-and-drop on both targets. Design in [`docs/M8.md`](docs/M8.md) |
-
-> **Two corrections to the rows above, both made 2026-09-01 rather than left to be inferred from
-> the design documents.**
->
-> **The beeper joined M7 and left M8.** `docs/M6.md` had assigned *Sound — the speaker bit of a
-> `0xFE` write* to M8, and `docs/M7.md` said in three places that M8 owned the audio device and
-> the beeper with it. **The AY is a 128 device and the beeper is a ULA feature, so both are the
-> machine's** — decoded by the same `Ula::out_port` that already takes the border out of the same
-> byte — and `crates/spectrum` is where the machine is modelled. **What M8 owns is routing audio
-> the machine already produces to a browser's audio device**: the mix, the resampling, the device.
-> Four rows were corrected with the originals struck; `docs/M8.md` Decision 9 carries the ruling.
->
-> **M8's gate is a build gate and the row's *"playable from a URL"* cannot be one.** *Playable* is
-> not a property of an artefact — it is a property of a browser rendering a canvas, a GPU
-> compositing it, a keyboard delivering keys and a person forming an opinion — so no corpus and no
-> licence makes it automatable. This is the **third** milestone row corrected this way, and the
-> reason differs from M6's and M7's: theirs were unautomatable because a corpus could not be
-> committed, which another repository could fix, and M8's is unautomatable structurally.
-
-> **Correction — the M5 row said *"the gate work is unfinished: five mutations leave it green and
-> nothing yet runs it"*, and the repository falsifies both halves.** It is corrected loudly rather
-> than quietly bumped, because how it survived is worth more than the row.
->
-> *"Nothing yet runs it"* was already false when it was written. `crates/spectrum/tests/boot.rs` is
-> a committed `#[test]`, landed with the M5 gates; `docs/STATUS.md` closes the item in as many
-> words — *"nothing runs the boot gate — `crates/spectrum/tests/boot.rs` runs it."*
->
-> *"Five mutations leave it green"* was never a verdict about a run that happened. Those mutations
-> were graded against `crates/spectrum/examples/boot.rs`, which `cargo test` **builds and never
-> calls**. Re-measured against the pre-gate lib target, **four of the five were already red** — 5,
-> 7, 1 and 13 failing unit tests inside `src` — and **one survived**, the contention-phase
-> off-by-one.
->
-> **The propagation is the finding.** The pass that fixed the figure gives a whole section to *"a
-> derived figure repeated across documents acquires authority it never earned"*, and states that
-> the wrong number had spread into three documents. `docs/STATUS.md` and `docs/MACHINE.md` each
-> carry a correction of it. This file did not — the repository's front door, and the only document
-> a newcomer reads first. **The section diagnosing the propagation missed a copy of the thing
-> propagating, and the copy it missed was the most-read one.**
->
-> The rule that follows is cheap and absolute: *a correction is not landed until you have grepped
-> for every other copy of what you corrected.* Every fact in these documents costs seconds to
-> sweep across `docs/`, `README.md`, `CHANGELOG.md` and `testdata/`.
->
-> > **Correction — this paragraph said the sweep *"did not come back clean"* and named
-> > `docs/MACHINE.md:358` as still asserting *"five mutations left it green"*. Both halves are
-> > false, and the second was pointed at the wrong line.** Re-swept 2026-09-01:
-> > `grep -rn "five mutations" docs/ README.md` puts `MACHINE.md`'s only two hits at **`:616`**,
-> > which states *"four of five mutations were already red"*, and **`:628`**, which is the block
-> > retracting the old wording. `docs/MACHINE.md:358` is prose introducing the timing oracle and
-> > has nothing to do with mutations. **The file this note was holding open had already closed
-> > it** — so the note outlived the defect it named. That is the same failure one turn later: a
-> > correction can go stale exactly as a claim can, and it is the harder one to catch, because it
-> > wears the costume of a fix.
->
-> **The row above deliberately carries no gate count**, and that is not vagueness — it is the same
-> lesson applied one step earlier. That integer moved repeatedly on 2026-09-01 while this was
-> being written — `docs/MACHINE.md` records the trail — so any number here would have been stale
-> before the sentence containing it was, which is this exact defect for the third time.
-> **Count the directory: the command below is the answer, and no integer written beside it can be.**
->
-> ```sh
-> ls -1 crates/spectrum/tests/*.rs | wc -l
-> ```
->
-> > **This is where that rule was broken by the paragraph teaching it.** The text above used to
-> > carry the integers the command had returned that morning, plus a count of how many were
-> > committed, and then asserted that *"`docs/MACHINE.md`'s milestone table says seven gates …
-> > and is the number to check first."* Every one of those was stale within the day, and the
-> > `seven gates` claim was already false when written — a nested note three lines below it said
-> > so, so this file contradicted itself on screen and sent the reader to the wrong document.
-> > `MACHINE.md`'s M5 row carries the command, not an answer. `grep -rn "seven gates" docs/`
-> > now finds the live copies in **`docs/STATUS.md`**, in its M5 headings; those are that file's
-> > to correct and are named here so they cannot go quiet.
-
-> **Correction — the M6 and M7 rows said *"a real game runs"* and *"128-only software runs"*, and
-> both name tier T4.** M6 has since merged; the row is corrected rather than quietly widened.
->
-> [`docs/M6.md`](docs/M6.md) Decision 8 splits the milestone's evidence into four tiers: **T1**
-> proven and corpus-free (the round trips, the truncation sweep, the codec property tests, the
-> hand-transcribed vectors), **T2** measured (the real ROM's `LD-BYTES` loading a synthetic tape
-> through the `EAR` bit), **T3** measured (a program *we wrote*, loaded from tape by the ROM and
-> executed), and **T4** *observed* — a real game, a file of ours opening in somebody else's
-> emulator. **The gate is T1 + T2 + T3.** T4 cannot be automated in a repository that may not carry
-> games, and a milestone gated on it would be a gate that runs nowhere — which
-> [`docs/STATUS.md`](docs/STATUS.md) records this project shipping three times already.
->
-> **The residue is not absorbed:** T4 is the only tier that grades a turbo **game** or a program
-> written by somebody who did not know how this emulator works, and it runs nowhere. It was written
-> here as the only tier grading a turbo *loader*, and that half has since been shrunk rather than
-> removed: `crates/spectrum/tests/tzx_turbo_load.rs` grades the loader, and it commits precisely
-> because this repository wrote both the tape and the loader that reads it. What cannot be
-> committed is the game. That is a row in the register, not a footnote here.
->
-> `docs/MACHINE.md` and `docs/ARCHITECTURE.md` carry the same table; both are corrected. This file
-> was the copy that was missed the last time a milestone row was corrected, which is why it is
-> checked first now.
-
----
-
-## Layout
-
-```
-crates/z80/         Z80 CPU core. No memory, no I/O, no allocation.
-crates/spectrum/    The machine: paged memory, ULA, contention, keyboard, screen, timing,
-                    sound (the beeper and the AY-3-8912), snapshots (`.z80`/`.sna`) and tape
-                    (`.tap`/`.tzx`). This line lists the crate's remit, not its contents.
-crates/frontend/    macroquad frontend: the `zx` window, and `zx-shot`, which photographs a
-                    machine headlessly. Portable to `wasm32` — no `cfg(target)` anywhere, and
-                    `tests/portability.rs` asserts that rather than leaving it to habit. ~~"but
-                    that build has not been run"~~ — it has, and the page boots; see web/ below.
-crates/page/        The browser page's half of the frontend's host seam: the query string and
-                    the download. The **only** crate in this workspace that is not
-                    `unsafe_code = "forbid"`, and its entire unsafe surface is five blocks, two
-                    extern blocks and one attribute — a count `tests/unsafe_inventory.rs` asserts
-                    as EXPECTED_BLOCKS, EXPECTED_EXTERN_BLOCKS and EXPECTED_UNSAFE_ATTRIBUTES.
-web/                index.html, the vendored macroquad JS bundle, and the two scripts that
-                    build and gate the browser build. `sh web/build.sh` assembles target/web/.
-crates/testsupport/ The corpus-absence policy every gate shares. Test-only, never published.
-docs/               Architecture, the machine design, the M6, M7 and M8 designs, the Z80
-                    reference, the status register.
-testdata/           Conformance suites, fetched locally. The Sinclair 48K ROM is the one
-                    exception and is committed.
-```
-
-The CPU core does not own memory. That single decision shapes everything else: the machine
-supplies a `Bus`, and the CPU reports every access as it happens — which is what makes
-cycle-accurate contention possible. It landed at M5.
-
-> **Reporting every access proved necessary and *not* sufficient, and M5 measured that.** The
-> reasoning on record was that contention depends only on the address and the phase within the
-> frame, both of which the machine already has. It does not follow: `LD A,B` and the read-modify
-> half of `INC (HL)` emit **byte-identical** call streams — `read(addr)` then four `tick(addr)` —
-> while owing one contention point and two. `crates/spectrum` first reconstructed the machine-cycle
-> boundaries by deferral, in a 312-line file, at a residual it had to pin rather than fix. A
-> defaulted `Bus::fetch` was added so each cycle discloses itself as it opens, and that file is
-> deleted. The account is in [`docs/STATUS.md`](docs/STATUS.md) and
-> [`docs/MACHINE.md`](docs/MACHINE.md).
 
 ---
 
@@ -669,6 +399,276 @@ with the same test count. `ZX_CORPUS_ALLOW_MISSING=1` is the considered opt-out,
 >   back `200` over HTTP — the page, the module, both 128 ROMs, the page script and the audio
 >   worklet. Nothing here rendered it; `web/README.md` records the runs that did, and is equally
 >   careful that none of them establishes *playable*.
+
+---
+
+## Three more games
+
+![Manic Miner running in the emulator: the Central Cavern, a black cave framed by yellow brick walls and red platforms, with Miner Willy in yellow standing on a green conveyor at the centre. The cavern's name is on a yellow strip below it, then the AIR meter and the score, all inside the machine's own red border.](docs/images/central-cavern.png)
+
+**_Manic Miner_, playing, on a 48K, and it got there the long way.** `LOAD ""` typed through the
+same keymap table the window presses, then the tape played, then the ROM's own `LD-BYTES` read all
+six blocks off it — about three minutes of emulated time. **Nothing was pressed afterwards, and
+nothing could have been:** `zx-shot` presses every key *before* it starts the tape. This is one
+stop on the game's own attract loop, which tours the caverns while the title screen waits for an
+`ENTER` that never came.
+
+![The Cybernoid II loading screen: a green cavern floor under a black sky, crowded on both sides by magenta and red alien creatures, a blue-white orb burning at the top, and a large ship in the centre firing white beams past a small wreck in flames — framed by a border of tightly alternating blue and yellow horizontal stripes.](docs/images/cybernoid-ii.png)
+
+**_Cybernoid II_, half-arrived.** This screen was on the tape *as a screen*: one block carrying no
+header and exactly **6,912** bytes — 6,144 of pixels and 768 of colour, which is what a Spectrum
+has. The border is still striped because the other **40,191** bytes have not landed yet. Those
+stripes are the ROM's loader toggling the border as it decodes each bit, so they come out like
+this only if the border is modelled *below* frame resolution; written once per frame it would be a
+flat rectangle.
+
+![The Exolon loading screen: a close-up of an armoured spaceman against a flat yellow sky, in white and grey armour with red and green panels, a red sun flaring at the left and the word ROCK scrawled across the helmet — framed by a border of tightly alternating red and cyan horizontal stripes.](docs/images/exolon.png)
+
+**_Exolon_, whose picture was never on the tape.** Its three files are 125 bytes of BASIC and two
+blocks of code, for addresses 27000 and 28000 — nothing 6,912 bytes long, nothing aimed at the
+display file. **The picture is painted by code**, and 100 frames earlier it can be caught
+half-drawn with a *black* border, which is the tell: the ROM's loader never leaves the border
+alone. Here it is finished and the border is red and cyan — the ROM listening for the next block's
+pilot tone, which is a different part of `LD-BYTES` from the blue and yellow above.
+
+![Exolon being played: a black starfield carrying a green planet, a large red one and a small magenta one, a white and cyan lander hanging above a green pillared arch at the left, an armoured figure in white standing beneath the arch on a yellow tiled ledge, a green gun emplacement to the right of centre with a small shot in the air beside it and a yellow rock formation behind it, a band of red and magenta rubble below the ledge, and the game's own status line across the bottom reading AMMO 99, GRENADES 10, POINTS 000000, LIVES 6, ZONES 000.](docs/images/exolon-playing.png)
+
+**_Exolon_, started — by a key pressed the better part of four minutes after the tape began.** Every
+`--keys` tap happens *before* PLAY, so nothing here could reach a game that arrives that much later;
+`--keys-after` presses once the tape has run out instead. It does not count frames to know when —
+**it asks the tape.** `Tape::pulses` half-periods are T-states, their sum is the cassette end to end, and dividing
+by the machine's own frame length gives the wait: 10,653 frames here, against a tape that ran out at
+10,953. Then `Space;Space;Key1` — dismiss, advance, `1 START GAME`. **`LIVES 6` is the honest
+detail:** nobody is at the keyboard, so the hero stands under that gun and dies about every four
+seconds, and `6` is where the counter had reached 800 frames after `1`.
+
+![Cybernoid II being played: a chamber walled in red and yellow alien masonry with cyan and green blocky platforms inside it, a white ship in flight at the upper left trailing yellow, two white round-headed guardians standing on a yellow platform below it, a large magenta pod at the lower right, and a cyan status panel across the top carrying a lives count, the scores 000025 and 000000, BOMBS 20, an hourglass and a bar meter.](docs/images/cybernoid-ii-playing.png)
+
+**_Cybernoid II_, the same three taps, and the evidence is the scoreboard.** `000025`, up from
+zero — a still of a title screen and a still of a running game are hard to tell apart, and a score
+that has moved is the difference. The sequence is uniform because what it walks is uniform: a Hewson
+loading screen and a Hewson title screen each consume one key, and only the third is a choice.
+`Key1;Key1;Key1` starts both games too, which is what identifies the first two as *advance* rather
+than as *select* — so neither picture required knowing anything about either game in advance.
+
+> **No game is distributed by this repository** — `testdata/**` is `.gitignore`d and no game file in
+> `testdata/games/` is committed. *Manic Miner* is Matthew Smith's, published by Bug-Byte Software
+> Ltd in 1983; *Cybernoid*, *Cybernoid II* and *Exolon* are Raffaele Cecco's, published by Hewson
+> Consultants Ltd in 1987 and 1988. **No permission covering these screenshots was found for any of
+> them.** For *Manic Miner*, two archives sharing one dataset contradict each other about this exact
+> file. For the three Hewson titles something better exists and is still not that: an archive
+> relays the publisher's *"no objection"* to **its own** downloads, which is not a permission for
+> screenshots taken by somebody else. [`docs/images/README.md`](docs/images/README.md) states all of
+> it in full, with the quotations, and separates it from the 128 menu below — which *is* covered, by
+> Amstrad's quoted ROM permission.
+
+---
+
+## The other machine, and the three minutes before a game appears
+
+The 128 first, then the tape a game arrives on, then what arrived — which is the order they have
+to happen in. All three are `zx-shot` output at scale 2, whole frames, nothing added.
+
+![The 128's boot menu: a white panel on a grey field, the word 128 above a rainbow stripe of red, yellow, green and cyan, the five entries Tape Loader, 128 BASIC, Calculator, 48 BASIC and Tape Tester with the first highlighted, and the 1986 Sinclair Research copyright below.](docs/images/128-menu.png)
+
+**The 128's own boot menu, unassisted.** The number of `--rom` arguments is what names the
+machine — two make a 128, editor ROM first — so this needed no `--model` flag and no key at all.
+The rainbow is the machine's signature and it is drawn by the ROM, not by anything here.
+
+![Manic Miner mid-load: a black screen carrying the word MANIC in chunky letters of red, yellow, green, cyan and magenta, framed by a border of tightly alternating blue and yellow horizontal stripes.](docs/images/tape-loading.png)
+
+**Three thousand frames into the tape.** Two things are worth naming. The stripes are the ROM's
+`LD-BYTES` toggling the border as it decodes each bit, so they come out right only if the border
+is modelled *below* frame resolution — written once per frame it would be a flat rectangle. And
+`MANIC` is not a bitmap: it is 256 bytes loaded straight into the attribute file at `0x5900`,
+which is why the letters are 8 × 8 blocks of flat colour.
+
+![The Manic Miner title screen: a cyan sky with a yellow sunrise, a tree, a green hillside, a house and a red car, above a red banner reading MANIC MINER starring Miner Willy and PRESS ENTER TO START, above a drawn piano keyboard, with the Bug-Byte 1983 copyright scrolling below it.](docs/images/title.png)
+
+**What the tape produced.** The same four keys, 7,750 frames later. The cavern above is one stop
+on the attract loop this screen starts when the `ENTER` it is asking for does not arrive — and it
+cannot arrive, because `zx-shot` presses every `--keys` tap *before* it starts the tape. **That
+ordering was also the limitation, and it named its own remedy.** *Exolon* and *Cybernoid II* have
+no attract loop to photograph, so for as long as every key landed before PLAY they could be shown
+arriving and not playing; [`docs/images/README.md`](docs/images/README.md) recorded that as a
+missing flag rather than a defect, and `--keys-after` is that flag. The two frames above are what
+it bought, taken the same day. That page keeps the prediction standing rather than deleting it —
+together with the two games that were tried and left out, and why a picture nobody can regenerate
+would not have been worth having.
+
+---
+
+Not a port. Not a translation of an existing emulator. The CPU is implemented from the Z80
+hardware specification and from our own architecture; correctness is then proven against
+public conformance suites rather than against somebody else's source.
+
+**The bar:** the emulator is not "done" until `zexall` passes — including the undocumented
+flag behaviour that most emulators quietly skip.
+
+> **What that green proves is narrower than the sentence reads, and this repository measured the
+> gap rather than assuming it.** `zexall` reports 67/67 (M4), and it genuinely **is** sensitive to
+> the undocumented `F3`/`F5` bits — forcing them to a constant `0` or `0x28` fails it, while a
+> control mutation of a *documented* bit fails both exercisers, which is what proves the group is
+> executed rather than skipped. But `zexall` **cannot decide the rule behind those bits**: the same
+> 67/67 has been observed under three different implementations, including one whose flag latch was
+> stuck at zero. Two FUSE vectors are the only gate in this project that can see that latch at all.
+>
+> So the bar is necessary and not sufficient, and the tempting one-line summary — *"`zexall`
+> passes, so the undocumented flags are right"* — is true of the first claim and false of the
+> second. [`docs/STATUS.md`](docs/STATUS.md) holds the coverage table that keeps them apart.
+
+---
+
+## Status
+
+| Milestone | Goal | Gate | State |
+|---|---|---|---|
+| M1 | Registers, flags, un-prefixed opcodes | FUSE vectors green for un-prefixed | **290/290** — merged |
+| M2 | `CB` / `ED` / `DD` / `FD` prefixes | FUSE vectors green in full | **1045/1045** — merged |
+| M3 | Documented behaviour | `zexdoc` passes | **67/67 first run** — merged |
+| M4 | Undocumented flags | **`zexall` passes** — CPU complete | **67/67**, made a gate with its limits stated — merged |
+| **M5** | Spectrum 48K: memory map, ULA, keyboard, 50 Hz interrupt | boots to `© 1982 Sinclair Research Ltd` | the machine boots, **on frame 87**, and **the gate work landed**: `crates/spectrum/tests/boot.rs` is a real `#[test]` that runs the ROM under `cargo test` and asserts the frame, alongside the other integration gates in that directory. Of the five mutations, **four were already red and one survived**. **Contention is no longer ungraded either**: `crates/spectrum/tests/timing_oracle.rs` grades the model against **70 rows measured on real Spectrums, 0 disagreeing**. See [`docs/STATUS.md`](docs/STATUS.md) for what M5's green does and does not mean, and [`docs/MACHINE.md`](docs/MACHINE.md) for the oracle's scope, which is narrower than the sentence sounds |
+| **M6** | Snapshots (`.z80` / `.sna`) and tape (`.tap`) | **T1 + T2 + T3** — *not* "a real game runs" | **merged.** A program written here, stored as a `.tap`, loaded by the real ROM's own `LD-BYTES` through the `EAR` bit, and executed — computing a value asserted to appear **nowhere in its own bytes**, so that *"the data arrived"* and *"it ran"* are separate claims. Design in [`docs/M6.md`](docs/M6.md); what it opened and closed is in [`docs/STATUS.md`](docs/STATUS.md) |
+| M7 | 128: paging, second ROM, AY-3-8912, **the beeper**, per-bank contention | **T1 + T2 + T3** — *not* "128-only software runs" | design in [`docs/M7.md`](docs/M7.md). **All five parts have landed**, each with its own gate among `crates/spectrum/tests/m7_*.rs`. **The memory half boots:** the 128 reaches its own `© 1986` copyright, draws all five menu entries, the highlight moves under `CAPS SHIFT`+`6`, and selecting *48 BASIC* reaches the `© 1982` message through ROM page 1 — the year changing is what makes that a claim about which ROM is executing. **The sound half is a device rather than a plan:** `crates/spectrum/src/ay.rs` is the AY-3-8912, reached from a guest's own `OUT`/`IN` in `m7_ay_ports.rs` and followed into the sample stream by `m7_ay_stream.rs`, and the beeper is bit 4 of a `0xFE` write, graded by value against a T-state derivation in `m7_beeper.rs`. What none of that settles is whether it **sounds** right — nobody has listened, and *What this is like at the moment* below says so first |
+| M8 | WASM build | **T1 + T2 + T3** — a *build* gate, and ~~"playable from a URL"~~ cannot be one | **the browser build runs.** `wasm32-unknown-unknown` links, and on 2026-09-01 a served page booted the 48K to `© 1982 Sinclair Research Ltd` at **50.3 Hz, 0 dropped**, built a **128** from the query string alone, saved a `.z80` through a `Blob`, and restored it from a file dropped back onto the page. Each observation is recorded with its provenance in [`web/README.md`](web/README.md). Also landed: `crates/page` (the whole `unsafe` surface of this workspace, five blocks — `EXPECTED_BLOCKS` in `crates/page/tests/unsafe_inventory.rs`), a `bundled` feature that compiles a ROM and a game into one artefact, and drag-and-drop on both targets. Design in [`docs/M8.md`](docs/M8.md) |
+
+> **Two corrections to the rows above, both made 2026-09-01 rather than left to be inferred from
+> the design documents.**
+>
+> **The beeper joined M7 and left M8.** `docs/M6.md` had assigned *Sound — the speaker bit of a
+> `0xFE` write* to M8, and `docs/M7.md` said in three places that M8 owned the audio device and
+> the beeper with it. **The AY is a 128 device and the beeper is a ULA feature, so both are the
+> machine's** — decoded by the same `Ula::out_port` that already takes the border out of the same
+> byte — and `crates/spectrum` is where the machine is modelled. **What M8 owns is routing audio
+> the machine already produces to a browser's audio device**: the mix, the resampling, the device.
+> Four rows were corrected with the originals struck; `docs/M8.md` Decision 9 carries the ruling.
+>
+> **M8's gate is a build gate and the row's *"playable from a URL"* cannot be one.** *Playable* is
+> not a property of an artefact — it is a property of a browser rendering a canvas, a GPU
+> compositing it, a keyboard delivering keys and a person forming an opinion — so no corpus and no
+> licence makes it automatable. This is the **third** milestone row corrected this way, and the
+> reason differs from M6's and M7's: theirs were unautomatable because a corpus could not be
+> committed, which another repository could fix, and M8's is unautomatable structurally.
+
+> **Correction — the M5 row said *"the gate work is unfinished: five mutations leave it green and
+> nothing yet runs it"*, and the repository falsifies both halves.** It is corrected loudly rather
+> than quietly bumped, because how it survived is worth more than the row.
+>
+> *"Nothing yet runs it"* was already false when it was written. `crates/spectrum/tests/boot.rs` is
+> a committed `#[test]`, landed with the M5 gates; `docs/STATUS.md` closes the item in as many
+> words — *"nothing runs the boot gate — `crates/spectrum/tests/boot.rs` runs it."*
+>
+> *"Five mutations leave it green"* was never a verdict about a run that happened. Those mutations
+> were graded against `crates/spectrum/examples/boot.rs`, which `cargo test` **builds and never
+> calls**. Re-measured against the pre-gate lib target, **four of the five were already red** — 5,
+> 7, 1 and 13 failing unit tests inside `src` — and **one survived**, the contention-phase
+> off-by-one.
+>
+> **The propagation is the finding.** The pass that fixed the figure gives a whole section to *"a
+> derived figure repeated across documents acquires authority it never earned"*, and states that
+> the wrong number had spread into three documents. `docs/STATUS.md` and `docs/MACHINE.md` each
+> carry a correction of it. This file did not — the repository's front door, and the only document
+> a newcomer reads first. **The section diagnosing the propagation missed a copy of the thing
+> propagating, and the copy it missed was the most-read one.**
+>
+> The rule that follows is cheap and absolute: *a correction is not landed until you have grepped
+> for every other copy of what you corrected.* Every fact in these documents costs seconds to
+> sweep across `docs/`, `README.md`, `CHANGELOG.md` and `testdata/`.
+>
+> > **Correction — this paragraph said the sweep *"did not come back clean"* and named
+> > `docs/MACHINE.md:358` as still asserting *"five mutations left it green"*. Both halves are
+> > false, and the second was pointed at the wrong line.** Re-swept 2026-09-01:
+> > `grep -rn "five mutations" docs/ README.md` puts `MACHINE.md`'s only two hits at **`:616`**,
+> > which states *"four of five mutations were already red"*, and **`:628`**, which is the block
+> > retracting the old wording. `docs/MACHINE.md:358` is prose introducing the timing oracle and
+> > has nothing to do with mutations. **The file this note was holding open had already closed
+> > it** — so the note outlived the defect it named. That is the same failure one turn later: a
+> > correction can go stale exactly as a claim can, and it is the harder one to catch, because it
+> > wears the costume of a fix.
+>
+> **The row above deliberately carries no gate count**, and that is not vagueness — it is the same
+> lesson applied one step earlier. That integer moved repeatedly on 2026-09-01 while this was
+> being written — `docs/MACHINE.md` records the trail — so any number here would have been stale
+> before the sentence containing it was, which is this exact defect for the third time.
+> **Count the directory: the command below is the answer, and no integer written beside it can be.**
+>
+> ```sh
+> ls -1 crates/spectrum/tests/*.rs | wc -l
+> ```
+>
+> > **This is where that rule was broken by the paragraph teaching it.** The text above used to
+> > carry the integers the command had returned that morning, plus a count of how many were
+> > committed, and then asserted that *"`docs/MACHINE.md`'s milestone table says seven gates …
+> > and is the number to check first."* Every one of those was stale within the day, and the
+> > `seven gates` claim was already false when written — a nested note three lines below it said
+> > so, so this file contradicted itself on screen and sent the reader to the wrong document.
+> > `MACHINE.md`'s M5 row carries the command, not an answer. `grep -rn "seven gates" docs/`
+> > now finds the live copies in **`docs/STATUS.md`**, in its M5 headings; those are that file's
+> > to correct and are named here so they cannot go quiet.
+
+> **Correction — the M6 and M7 rows said *"a real game runs"* and *"128-only software runs"*, and
+> both name tier T4.** M6 has since merged; the row is corrected rather than quietly widened.
+>
+> [`docs/M6.md`](docs/M6.md) Decision 8 splits the milestone's evidence into four tiers: **T1**
+> proven and corpus-free (the round trips, the truncation sweep, the codec property tests, the
+> hand-transcribed vectors), **T2** measured (the real ROM's `LD-BYTES` loading a synthetic tape
+> through the `EAR` bit), **T3** measured (a program *we wrote*, loaded from tape by the ROM and
+> executed), and **T4** *observed* — a real game, a file of ours opening in somebody else's
+> emulator. **The gate is T1 + T2 + T3.** T4 cannot be automated in a repository that may not carry
+> games, and a milestone gated on it would be a gate that runs nowhere — which
+> [`docs/STATUS.md`](docs/STATUS.md) records this project shipping three times already.
+>
+> **The residue is not absorbed:** T4 is the only tier that grades a turbo **game** or a program
+> written by somebody who did not know how this emulator works, and it runs nowhere. It was written
+> here as the only tier grading a turbo *loader*, and that half has since been shrunk rather than
+> removed: `crates/spectrum/tests/tzx_turbo_load.rs` grades the loader, and it commits precisely
+> because this repository wrote both the tape and the loader that reads it. What cannot be
+> committed is the game. That is a row in the register, not a footnote here.
+>
+> `docs/MACHINE.md` and `docs/ARCHITECTURE.md` carry the same table; both are corrected. This file
+> was the copy that was missed the last time a milestone row was corrected, which is why it is
+> checked first now.
+
+---
+
+## Layout
+
+```
+crates/z80/         Z80 CPU core. No memory, no I/O, no allocation.
+crates/spectrum/    The machine: paged memory, ULA, contention, keyboard, screen, timing,
+                    sound (the beeper and the AY-3-8912), snapshots (`.z80`/`.sna`) and tape
+                    (`.tap`/`.tzx`). This line lists the crate's remit, not its contents.
+crates/frontend/    macroquad frontend: the `zx` window, and `zx-shot`, which photographs a
+                    machine headlessly. Portable to `wasm32` — no `cfg(target)` anywhere, and
+                    `tests/portability.rs` asserts that rather than leaving it to habit. ~~"but
+                    that build has not been run"~~ — it has, and the page boots; see web/ below.
+crates/page/        The browser page's half of the frontend's host seam: the query string and
+                    the download. The **only** crate in this workspace that is not
+                    `unsafe_code = "forbid"`, and its entire unsafe surface is five blocks, two
+                    extern blocks and one attribute — a count `tests/unsafe_inventory.rs` asserts
+                    as EXPECTED_BLOCKS, EXPECTED_EXTERN_BLOCKS and EXPECTED_UNSAFE_ATTRIBUTES.
+web/                index.html, the vendored macroquad JS bundle, and the two scripts that
+                    build and gate the browser build. `sh web/build.sh` assembles target/web/.
+crates/testsupport/ The corpus-absence policy every gate shares. Test-only, never published.
+docs/               Architecture, the machine design, the M6, M7 and M8 designs, the Z80
+                    reference, the status register.
+testdata/           Conformance suites, fetched locally. The Sinclair 48K ROM is the one
+                    exception and is committed.
+```
+
+The CPU core does not own memory. That single decision shapes everything else: the machine
+supplies a `Bus`, and the CPU reports every access as it happens — which is what makes
+cycle-accurate contention possible. It landed at M5.
+
+> **Reporting every access proved necessary and *not* sufficient, and M5 measured that.** The
+> reasoning on record was that contention depends only on the address and the phase within the
+> frame, both of which the machine already has. It does not follow: `LD A,B` and the read-modify
+> half of `INC (HL)` emit **byte-identical** call streams — `read(addr)` then four `tick(addr)` —
+> while owing one contention point and two. `crates/spectrum` first reconstructed the machine-cycle
+> boundaries by deferral, in a 312-line file, at a residual it had to pin rather than fix. A
+> defaulted `Bus::fetch` was added so each cycle discloses itself as it opens, and that file is
+> deleted. The account is in [`docs/STATUS.md`](docs/STATUS.md) and
+> [`docs/MACHINE.md`](docs/MACHINE.md).
 
 ---
 
