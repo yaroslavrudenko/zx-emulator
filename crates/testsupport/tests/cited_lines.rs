@@ -90,7 +90,7 @@
 //!
 //! A specimen carries a claim of its own — *this coordinate is broken* — and **that claim can
 //! go stale in the opposite direction from drift**. Observed live: `docs/STATUS.md` says
-//! *"`README.md:101` is still a blank line"*, and while these gates were being written an
+//! *"~~`README.md:101`~~ is still a blank line"*, and while these gates were being written an
 //! unrelated edit to `README.md` gave line 101 a sentence about `LD-BYTES`. The passage is now
 //! wrong, and the landing gate is **structurally blind to it** — its whole question is whether
 //! a cited line has content, and this one now does. It went from red to green by the target
