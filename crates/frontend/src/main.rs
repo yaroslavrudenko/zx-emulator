@@ -25,12 +25,26 @@
 //! | `F3` `F4` `F5` | tape play, stop, rewind |
 //! | `F6` | reset |
 //! | `F7` | what the arrow keys send — **starts on the setting for games**, and `F7` reaches the BASIC cursor keys |
-//! | `F8` | how fast the machine runs — 1× → 2× → 4× → 8× → 1×, shown on the readout as `speed` |
+//! | `F8` | how fast the machine runs — 1× → 4× → 16× → 64× → auto → 1×, shown on the readout as `speed` |
 //!
 //! `F8` is the answer to a tape taking three minutes. Nothing is bypassed: the machine is the same
 //! machine and the tape is still the signal `docs/M6.md` Decision 4 insists on, so every loader
-//! works — the wall clock is simply asked to hand over more of itself per tick. Sound is muted
+//! works — the wall clock is simply asked to hand over more of itself per tick. At the top fixed
+//! rung a three-minute cassette is **three seconds**, which is measured rather than hoped for and
+//! is derived in [`frontend::pacing::RUNGS`] from what this host actually emulates. Sound is muted
 //! above 1× and the reason is at the push site below.
+//!
+//! **`auto` is the last rung and is the one to press if the answer wanted is *"do not make me
+//! choose"*.** It runs flat out while the **machine is decoding a tape** and at real time the
+//! instant it stops, so a cassette goes as fast as this host can manage and the game arrives at
+//! the speed it was written for, with no second keypress and no number to get wrong. Reading the
+//! machine rather than the drive is what makes the order of the two gestures stop mattering:
+//! pressing PLAY *before* typing `LOAD ""` is what a person does, it is free on real hardware
+//! because the leader is five seconds long, and keyed off the motor it spent those five seconds
+//! in 0.055 s. The readout says
+//! `speed auto (loading)` while it is working and `speed auto` when it is not, because a machine
+//! running flat out and a machine with a broken clock look identical from outside.
+//! [`frontend::pacing::Rung::Automatic`] carries the whole argument.
 //!
 //! The arrows are the one choice this emulator cannot make once and be right about, because the
 //! Spectrum has no arrow keys and games disagree about what to read. See
@@ -51,9 +65,10 @@ use macroquad::prelude::*;
 
 use frontend::audio::{self, Resampler};
 use frontend::bundle;
+use frontend::drive;
 use frontend::keymap::Hotkey;
 use frontend::media;
-use frontend::pacing::{self, LossMeter, Pacer, RateMeter, Speed};
+use frontend::pacing::{self, EarMeter, LossMeter, Pacer, RateMeter, Rung, Speed, Tick};
 use frontend::viewport::Viewport;
 use frontend::{host, keymap, palette, viewport};
 use spectrum::screen::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -223,6 +238,11 @@ async fn main() {
     let mut pacer = Pacer::new();
     let mut meter = RateMeter::new(RATE_WINDOW, get_time());
     let mut loss = LossMeter::new(LOSS_WINDOW, get_time());
+    // The frame length comes off the machine rather than from a literal, for the reason
+    // `EarMeter::new` gives: a 128's frame is 1020 T-states longer and its threshold differs.
+    // Built once, here, because the model cannot change under a running window — `Spectrum::restore`
+    // refuses a snapshot of the other machine.
+    let mut ear = EarMeter::new(machine.ula().clock().timing().frame_t_states());
 
     // The machine's own clock decides its sample rate, and the two machines differ: 3,500,000
     // against 3,546,900 T-states a second.
@@ -253,7 +273,13 @@ async fn main() {
             }
         }
         for file in get_dropped_files() {
-            status.report(accept(&mut machine, &file));
+            let message = accept(&mut machine, &file);
+            // A dropped cassette replaces what is in the drive, so the tape that was turning a
+            // moment ago is simply gone. That is not a tape running out, and without this the
+            // next tick would say so over the top of the message naming the file. See
+            // [`drive::Drive::follow`].
+            status.drive.follow(machine.tape());
+            status.report(message);
         }
         // Both devices are rebuilt from the host's state every frame. The joystick needs it
         // more than the membrane does: it is active high and has no interlock, so a direction
@@ -267,16 +293,26 @@ async fn main() {
         // the keyboard and the joystick above are rebuilt from the host every frame. It is a push
         // rather than a second copy: `Status` decides, `Pacer` obeys, and there is no third place
         // the two could drift apart in. `keymap::Hotkey` records what shadowing costs.
-        let speed = pacing::SPEEDS[status.speed];
-        pacer.set_speed(speed);
-
-        // `try_from_secs_f32` rather than `from_secs_f32`: the latter panics on a negative or
-        // non-finite argument, and `get_frame_time` is a number from a windowing system
-        // rather than one this program computed.
-        let elapsed = Duration::try_from_secs_f32(get_frame_time()).unwrap_or(Duration::ZERO);
-        for _ in 0..pacer.advance(elapsed) {
-            machine.run_frame();
-        }
+        //
+        // **The machine is asked here rather than remembered**, for the same reason. A guest
+        // stops reading the `EAR` line the moment its loader finishes, so a cached answer would
+        // keep `Rung::Automatic` running flat out into the game — which is the shape of the bug
+        // `spectrum::tape::Tape::is_playing` was added to remove, one signal along.
+        //
+        // **This asked the drive, and the drive is not the machine.** `pacing::Rung::Automatic`
+        // carries what that cost: a turning motor with nobody listening is a cassette being spent
+        // at 90×, so pressing PLAY before typing `LOAD ""` — free on every real Spectrum, because
+        // the leader is five seconds long — burned the tape in 0.055 s. `EarMeter` reads how hard
+        // the machine is sampling the line instead, which covers the load *and* the wait before
+        // it, and is sampled before the decision rather than after so the rate describes frames
+        // that have actually run.
+        ear.sample(machine.ear_reads(), machine.frames());
+        let tick = pacing::RUNGS[status.speed].this_tick(ear.decoding());
+        run_tick(tick, &mut machine, &mut pacer);
+        // **Asked here, immediately after the frames that could have ended the tape.** Under
+        // `Rung::Automatic` a three-minute cassette reaches its end in about two seconds, so a
+        // report arriving a tick late is a report nobody can connect to anything.
+        report_a_finished_tape(&machine, &mut status);
         // One clock reading for both, so the figure and the colour describe the same second
         // rather than two instants a few microseconds apart.
         let now = get_time();
@@ -296,27 +332,44 @@ async fn main() {
         let produced = machine.take_samples();
         // **Above real time the device is fed nothing, and that is a decision rather than an
         // omission.** A sound card consumes exactly one second per second whatever the pacer
-        // does, so at 8× the resampler offers it eight seconds of samples per wall second: the
-        // queue grows at seven times real time until the ceiling below clamps it, and what comes
-        // out after that is one frame in eight, chosen by an accounting estimate rather than by
-        // anything musical — twenty-millisecond fragments of unrelated moments, which is a fault
-        // noise and not a fast tune.
+        // does, so at 64× the resampler offers it sixty-four seconds of samples per wall second:
+        // the queue grows at sixty-three times real time until the ceiling below clamps it, and
+        // what comes out after that is one frame in sixty-four, chosen by an accounting estimate
+        // rather than by anything musical — twenty-millisecond fragments of unrelated moments,
+        // which is a fault noise and not a fast tune.
         //
-        // The two alternatives were weighed and are worse. *Decimating* the mixed buffer aliases a
-        // 48 kHz signal down by the multiplier and puts tones in it the machine never made — the
-        // same argument `audio::Resampler::feed` already makes against nearest-neighbour picking,
-        // one octave up. *Resampling at the multiplied ratio* — playing the fast-forward
-        // time-compressed — shifts a beeper tune three octaves at 8×, mostly out of the audible
-        // band, and needs the resampler rebuilt on every speed change, discarding the DC filter
-        // history that `feeding_in_pieces_matches_feeding_in_one_go` exists to preserve.
+        // **The tape's own screech is the case worth naming, because somebody will want it.** It
+        // is the sound a Spectrum is remembered for and it is the one thing playing while `F8` is
+        // most useful. It still goes: a loading tone is a square wave a couple of kilohertz wide,
+        // and one frame in sixty-four of it is not a fast screech but a click every twenty
+        // milliseconds — the sampling artefact, not the signal. Somebody who wants to hear a tape
+        // load has the whole of real time to do it in, and that is `F8` back to `1×`, which is one
+        // keypress from the top rung by construction.
+        //
+        // The two alternatives were weighed and are worse, and the wider range makes both worse
+        // rather than better. *Decimating* the mixed buffer aliases a 48 kHz signal down by the
+        // multiplier and puts tones in it the machine never made — the same argument
+        // `audio::Resampler::feed` already makes against nearest-neighbour picking, six octaves up
+        // instead of one. *Resampling at the multiplied ratio* — playing the fast-forward
+        // time-compressed — shifts a beeper tune **six** octaves at 64×, which is not "mostly" out
+        // of the audible band but entirely out of it, and needs the resampler rebuilt on every
+        // speed change, discarding the DC filter history that
+        // `feeding_in_pieces_matches_feeding_in_one_go` exists to preserve.
         //
         // So: silence, and the readout says `snd mute` rather than leaving a frozen number that
         // reads as a device still holding samples. `take_samples` above is called either way —
         // draining is not optional, because the machine buffers two frames and then counts what
         // it lost, and `Spectrum::dropped_samples` must keep describing the machine rather than
         // the speed key.
+        //
+        // **The condition is the tick and not the rung, which is what makes `auto` sound right
+        // for free.** Automatic resolves to `Tick::Paced(REAL_TIME)` the moment the drive stops,
+        // so the sound comes back on the first tick after a cassette ends without a second rule
+        // anywhere — and goes away again the moment somebody presses PLAY. Writing this against
+        // the *rung* would have muted an automatic machine that was sitting at real time doing
+        // nothing, which is the state a person spends nearly all their time in.
         if let Some(resampler) = resampler.as_mut()
-            && speed == Speed::REAL_TIME
+            && tick == Tick::Paced(Speed::REAL_TIME)
         {
             mixed.clear();
             resampler.feed(produced, &mut mixed);
@@ -340,7 +393,7 @@ async fn main() {
         }
 
         video.draw(&machine);
-        status.draw(&machine, pacer, meter, loss);
+        status.draw(&machine, pacer, meter, loss, ear);
         next_frame().await;
     }
 }
@@ -434,22 +487,90 @@ fn accept(machine: &mut Spectrum, file: &DroppedFile) -> String {
     media::accept(machine, name, bytes)
 }
 
+/// Run the frames this tick calls for.
+///
+/// # Why the two arms are down here and not in the frame loop
+///
+/// They were up there, and the loop's nesting went from three levels to five: a `loop`, a `match`,
+/// an arm, and then the `for` that actually runs the frames. This file's header says it is *"held
+/// to plumbing"*, and five levels of it is not plumbing — it is the shape a reader has to unpick
+/// before finding the one line that runs a frame. Every other decision in this file already sits
+/// in a named function for the same reason, [`ink`] most explicitly.
+///
+/// The two arms are genuinely two loops rather than one with a variable bound, and that is the
+/// whole of what [`Tick`] distinguishes. [`Pacer::advance`] computes a count from time that has
+/// **already** elapsed and this file runs it; [`Pacer::run_flat_out`] owns its loop because the
+/// count can only be discovered by spending time that has not elapsed yet.
+///
+/// Nothing is returned. The frames reach [`Pacer::ran`] either way, which is what the readout's
+/// `Hz` is drawn from, so a second count here would be a number with no reader and somewhere for
+/// the two to disagree.
+fn run_tick(tick: Tick, machine: &mut Spectrum, pacer: &mut Pacer) {
+    match tick {
+        Tick::Paced(speed) => {
+            pacer.set_speed(speed);
+            // `try_from_secs_f32` rather than `from_secs_f32`: the latter panics on a negative or
+            // non-finite argument, and `get_frame_time` is a number from a windowing system rather
+            // than one this program computed.
+            let elapsed = Duration::try_from_secs_f32(get_frame_time()).unwrap_or(Duration::ZERO);
+            for _ in 0..pacer.advance(elapsed) {
+                machine.run_frame();
+            }
+        }
+        // `get_time` and not `get_frame_time`: the budget is spent *during* this call, so the clock
+        // has to move while it is being read. macroquad documents that one of the two does and the
+        // other is a per-tick delta, and `Pacer::run_flat_out` says what handing over the wrong one
+        // would cost.
+        Tick::FlatOut => {
+            pacer.run_flat_out(get_time, || machine.run_frame());
+        }
+    }
+}
+
+/// Say so when the tape has run out, which is the one drive change no key made.
+///
+/// # A named function rather than three lines in the loop, for [`ink`]'s reason
+///
+/// [`ink`] records what happens to a decision left inside a function no test can reach: putting
+/// the old defect back left **every** test green, because `Status::draw` needs a GPU. The frame
+/// loop is worse — it needs a window *and* never returns — so a call site in it is not merely
+/// hard to grade, it is unreachable. Out here `mod tests` drives it directly, and the assertion
+/// that the wiring exists is a machine's rather than a reader's.
+///
+/// The drive is asked **after** the frames have run, because those frames are what ends a
+/// cassette; asking first would report every tape one tick late.
+fn report_a_finished_tape(machine: &Spectrum, status: &mut Status) {
+    if let Some(message) = status.drive.ran_out(machine.tape()) {
+        status.report(message.to_owned());
+    }
+}
+
 /// Carry out a hotkey.
 fn act(action: Hotkey, machine: &mut Spectrum, status: &mut Status) {
     match action {
         Hotkey::ToggleStatus => status.visible = !status.visible,
         Hotkey::SaveSnapshot => status.report(write_snapshot(machine)),
+        // **Each of the three asks the drive afterwards rather than announcing beforehand.**
+        // `spectrum::tape::Tape::play` starts nothing on an empty drive and nothing on a tape
+        // wound to its end, and this arm used to report `tape playing` in both — a message that
+        // reports the keystroke cannot be wrong about the keystroke and cannot be right about
+        // anything else. `frontend::drive` carries the whole argument and owns the strings, which
+        // is also what makes them reachable from a test; `tests/on_screen_strings.rs` records that
+        // literals living here are not.
         Hotkey::PlayTape => {
             machine.tape_mut().play();
-            status.report("tape playing".to_owned());
+            let message = status.drive.played(machine.tape());
+            status.report(message.to_owned());
         }
         Hotkey::StopTape => {
             machine.tape_mut().stop();
-            status.report("tape stopped".to_owned());
+            let message = status.drive.stopped(machine.tape());
+            status.report(message.to_owned());
         }
         Hotkey::RewindTape => {
             machine.tape_mut().rewind();
-            status.report("tape rewound".to_owned());
+            let message = status.drive.rewound(machine.tape());
+            status.report(message.to_owned());
         }
         Hotkey::Reset => {
             machine.reset();
@@ -471,19 +592,46 @@ fn act(action: Hotkey, machine: &mut Spectrum, status: &mut Status) {
             status.report(format!("arrows: {} - {}", scheme.name, scheme.hint));
         }
         // The same shape as the arrows above, for the same reason: an index into a table, moved
-        // by one key, named on the bar every frame. The message says what the multiplier *costs*
-        // as well as what it is — somebody who pressed this and lost the sound needs to be told
-        // why by the thing that took it, not by a README they are not reading.
+        // by one key, named on the bar every frame. The message says what the rung *costs* as well
+        // as what it is — somebody who pressed this and lost the sound needs to be told why by the
+        // thing that took it, not by a README they are not reading. `speed_message` below carries
+        // the three sentences and the argument for which of them each rung earns.
         Hotkey::CycleSpeed => {
-            status.speed = (status.speed + 1) % pacing::SPEEDS.len();
-            let speed = pacing::SPEEDS[status.speed];
-            let sound = if speed == Speed::REAL_TIME {
-                "sound on"
-            } else {
-                "sound muted"
-            };
-            status.report(format!("speed: {}x real time - {sound}", speed.factor()));
+            status.speed = (status.speed + 1) % pacing::RUNGS.len();
+            status.report(speed_message(pacing::RUNGS[status.speed]));
         }
+    }
+}
+
+/// What the bar says at the moment the speed key moves.
+///
+/// # A function, so that `mod tests` can measure the strings
+///
+/// This was a `match` inside [`act`]'s own arm, and it took the nesting there to five levels for
+/// three one-line answers. Out here it is three, and — the reason that actually matters — the
+/// three sentences become **values a test can reach**. `tests/on_screen_strings.rs` records that
+/// it *"cannot cover `main.rs`'s own literals … because they are private to a binary that needs a
+/// window"*, and every literal that stayed inside `act` is still in that gap. These three are not.
+///
+/// The message is written from the **rung** rather than from the tick, and that is the one place
+/// in this file where the distinction matters to a person. A press of `F8` is a statement about
+/// what the machine will do from now on, so `auto` has to announce itself as *the rung that
+/// decides* even when the drive happens to be stopped and it is, at this instant,
+/// indistinguishable from 1×. The status bar carries the other half — whether it is doing
+/// anything right now, via [`Rung::note`] — and the two together are what stop `auto` reading as
+/// a key that did nothing.
+fn speed_message(rung: Rung) -> String {
+    // A guard rather than a `Rung::Fixed(Speed::REAL_TIME)` pattern: `Speed` wraps a `NonZeroU32`,
+    // which is not a structural-match type, so the constant cannot appear in a pattern at all.
+    // Comparing in a guard is the same question the compiler will actually answer.
+    match rung {
+        Rung::Automatic => {
+            "speed: automatic - flat out while a tape plays, real time otherwise".to_owned()
+        }
+        Rung::Fixed(speed) if speed == Speed::REAL_TIME => {
+            "speed: 1x real time - sound on".to_owned()
+        }
+        Rung::Fixed(speed) => format!("speed: {}x real time - sound muted", speed.factor()),
     }
 }
 
@@ -587,7 +735,7 @@ struct Status {
     visible: bool,
     /// Which of [`keymap::ARROW_SCHEMES`] the arrow keys currently press.
     arrows: usize,
-    /// Which of [`pacing::SPEEDS`] the machine is being run at.
+    /// Which of [`pacing::RUNGS`] the machine is being run at.
     ///
     /// The **only** copy of that choice. [`Pacer`] is handed it every frame rather than keeping
     /// its own, so there is nowhere for the two to disagree — the frame loop says why.
@@ -599,6 +747,13 @@ struct Status {
     /// the mixer all look identical from the outside. A number that climbs and falls says the
     /// device is alive; `--` says there is not one.
     audio_queued: i32,
+    /// The tape drive as this bar last described it, so that a tape ending is news.
+    ///
+    /// It lives here rather than beside [`Pacer`] in the frame loop because it is a property of
+    /// the *readout* and not of the machine: it records what was last said out loud, which is a
+    /// question only the thing doing the saying can answer. [`drive::Drive`] carries the argument
+    /// for why that is not the shadow copy `keymap` warns about.
+    drive: drive::Drive,
     message: String,
     /// Reused so the per-frame path formats without allocating.
     line: String,
@@ -618,6 +773,7 @@ impl Status {
             arrows: 0,
             speed: 0,
             audio_queued: -1,
+            drive: drive::Drive::new(),
             message: OPENING_MESSAGE.to_owned(),
             line: String::with_capacity(128),
         }
@@ -640,8 +796,13 @@ impl Status {
     /// The frozen number is the case worth naming: while fast-forwarding nothing is pushed, so
     /// the last depth would sit on the bar reading as a device still holding samples it has long
     /// since played.
-    fn queue(&self, speed: Speed) -> String {
-        if speed != Speed::REAL_TIME {
+    ///
+    /// It takes the **tick** and not the rung, which is the same choice the push site makes and
+    /// for the same reason: [`Rung::Automatic`] is muted while a cassette is moving and audible
+    /// the instant it stops, so a field written from the rung would say `mute` at a machine that
+    /// was playing perfectly well.
+    fn queue(&self, tick: Tick) -> String {
+        if tick != Tick::Paced(Speed::REAL_TIME) {
             MUTED.to_owned()
         } else if self.audio_queued < 0 {
             NO_DEVICE.to_owned()
@@ -659,7 +820,14 @@ impl Status {
     /// figures are glanced at, the sentence is read once. Separating them is also what lets the
     /// colour mean something exact, because only the row carrying the pacing figures changes with
     /// it.
-    fn draw(&mut self, machine: &Spectrum, pacer: Pacer, meter: RateMeter, loss: LossMeter) {
+    fn draw(
+        &mut self,
+        machine: &Spectrum,
+        pacer: Pacer,
+        meter: RateMeter,
+        loss: LossMeter,
+        ear: EarMeter,
+    ) {
         // Drawn **before** the visibility check, and `F1` does not hide it. A build that
         // embeds a Sinclair ROM is a redistribution to whoever runs the binary, and Amstrad's
         // permission asks that "the program/manual" carry the acknowledgement — for a
@@ -684,27 +852,45 @@ impl Status {
         draw_row(1.0, &self.message, LIGHTGRAY);
 
         self.line.clear();
-        // The multiplier is on the bar unconditionally, at `1x` as much as at `8x`. A machine
-        // running eight times too fast and a machine with a broken clock look identical from the
-        // outside, and a field that only appears when something is unusual is a field nobody
+        // The multiplier is on the bar unconditionally, at `1x` as much as at `64x`. A machine
+        // running sixty-four times too fast and a machine with a broken clock look identical from
+        // the outside, and a field that only appears when something is unusual is a field nobody
         // learns to look at — the argument `Status::new` already makes about the readout itself.
         //
         // `Hz` beside it is the honest corroboration rather than a duplicate: it reports emulated
-        // frames per **wall** second, so `speed 8x` next to `400.0 Hz` is the machine confirming
-        // it, and `speed 8x` next to `120.0 Hz` says this host cannot sustain what it was asked
-        // for. The colour, from `LossMeter`, is the same question a third way.
+        // frames per **wall** second, so `speed 64x` next to `3200.0 Hz` is the machine confirming
+        // it, and `speed 64x` next to `2000.0 Hz` says this host cannot sustain what it was asked
+        // for. The colour, from `LossMeter`, is the same question a third way. That pair is the
+        // whole of how a fast machine stays legible, and it is why [`pacing::RUNGS`]'s fixed
+        // entries top out one rung below what this host saturates at rather than at the
+        // saturation point: a bar that is red for the whole of every load is an alarm nobody
+        // would act on.
+        //
+        // **`auto` is the rung that needs that pair most**, because it names no multiplier at
+        // all. `speed auto (loading)` beside `4800.0 Hz` is the only way a person can see that
+        // it is working; `speed auto` beside `50.0 Hz` is it correctly doing nothing. Without
+        // the suffix the two would be one string, and a rung that looks identical whether or not
+        // it is doing its job is a rung nobody can trust.
         //
         // Infallible: writing to a `String` cannot fail. The `Result` is there for writers
         // that can, and is discarded here rather than handled.
-        let speed = pacing::SPEEDS[self.speed];
+        //
+        // **`(loading)` is drawn from the same meter the frame loop paced by**, which is what
+        // makes the word true. It used to come from the drive, so it appeared over a turning
+        // cassette nobody was reading — the same lie `drive::Drive` was written to take out of
+        // the row above, one field along. The meter is passed in rather than re-read from the
+        // machine so that the label describes the tick that just ran rather than a fresh sample
+        // taken after it.
+        let rung = pacing::RUNGS[self.speed];
+        let decoding = ear.decoding();
         let _ = write!(
             self.line,
-            "{:.1} Hz   speed {}x   dropped {}   frame {}   snd {}   arrows {}",
+            "{:.1} Hz   speed {rung}{}   dropped {}   frame {}   snd {}   arrows {}",
             meter.hz(),
-            speed.factor(),
+            rung.note(decoding),
             pacer.dropped(),
             machine.frames(),
-            self.queue(speed),
+            self.queue(rung.this_tick(decoding)),
             keymap::ARROW_SCHEMES[self.arrows].name,
         );
 
@@ -863,6 +1049,85 @@ mod tests {
         );
     }
 
+    /// A ROM of nothing but `NOP`, so the clock advances and the cassette with it.
+    const NOTHING: [u8; 16 * 1024] = [0x00; 16 * 1024];
+
+    /// A machine whose 60-T-state cassette has already been played off the end.
+    fn a_machine_with_a_spent_cassette() -> Spectrum {
+        let mut machine = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        machine.insert_tape(spectrum::Tape::new(vec![10, 20, 30]));
+        machine.tape_mut().play();
+        machine.run_frame();
+        assert!(
+            !machine.tape().is_playing(),
+            "the fixture is wrong: 60 T-states must not survive a 69,888 T-state frame",
+        );
+        machine
+    }
+
+    #[test]
+    fn pressing_play_on_a_spent_cassette_does_not_claim_to_be_playing() {
+        // **The wiring, not the decision.** `tests/tape_reports.rs` grades `frontend::drive` and
+        // would stay perfectly green with this file's `Hotkey::PlayTape` arm reverted to the
+        // `status.report("tape playing".to_owned())` it used to be — which is the whole of the
+        // defect, and it lived here rather than in the library. `ink` records the same lesson
+        // from the same file: a mutation that survives is a gate looking at the wrong function.
+        let mut machine = a_machine_with_a_spent_cassette();
+        let mut status = Status::new();
+
+        act(Hotkey::PlayTape, &mut machine, &mut status);
+        assert_eq!(status.message, drive::AT_THE_END);
+
+        // And the empty drive, which is the other press `tape playing` used to answer.
+        let mut empty = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        act(Hotkey::PlayTape, &mut empty, &mut status);
+        assert_eq!(status.message, drive::NO_TAPE);
+    }
+
+    #[test]
+    fn a_tape_running_out_is_reported_by_the_loop() {
+        // The other half of the wiring, and the half the frame loop cannot be asked about at all:
+        // it needs a window and never returns. So the call it makes is a named function, and this
+        // drives that function exactly as the loop does — press PLAY, run the frames, ask.
+        let mut machine = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        machine.insert_tape(spectrum::Tape::new(vec![10, 20, 30]));
+        let mut status = Status::new();
+
+        act(Hotkey::PlayTape, &mut machine, &mut status);
+        assert_eq!(status.message, drive::PLAYING);
+        report_a_finished_tape(&machine, &mut status);
+        assert_eq!(status.message, drive::PLAYING, "nothing has ended yet");
+
+        machine.run_frame();
+        report_a_finished_tape(&machine, &mut status);
+        assert_eq!(status.message, drive::RAN_OUT);
+    }
+
+    #[test]
+    fn every_thing_the_drive_can_say_fits_the_row_it_is_drawn_on() {
+        // These share row 1 with `OPENING_MESSAGE`, and they are the messages a person reads at
+        // the moment they are most confused — a press that did nothing, or a cassette that has
+        // just ended. A sentence explaining the recovery is worth nothing with the recovery off
+        // the right-hand edge, which is exactly what happened to `OPENING_MESSAGE` for a
+        // fortnight while width was gated in one place and not the other.
+        //
+        // Listed rather than looped over a table, because there is no table: each is a `pub const`
+        // in `frontend::drive` and a new one that nobody added here would be a new way to overrun
+        // the row. That is the same trade `spectrum::tape`'s own `SOURCES` makes, and for the same
+        // reason — a walk that silently stopped visiting a file reads as a file with nothing to
+        // find.
+        for (name, text) in [
+            ("drive::PLAYING", drive::PLAYING),
+            ("drive::NO_TAPE", drive::NO_TAPE),
+            ("drive::AT_THE_END", drive::AT_THE_END),
+            ("drive::RAN_OUT", drive::RAN_OUT),
+            ("drive::STOPPED", drive::STOPPED),
+            ("drive::REWOUND", drive::REWOUND),
+        ] {
+            assert_fits(name, text);
+        }
+    }
+
     #[test]
     fn the_readout_fits_at_every_value_it_can_hold() {
         // A bound rather than a guess: `u64::MAX` frames and losses, `i32::MAX` queued samples,
@@ -870,22 +1135,27 @@ mod tests {
         // running emulator can produce is wider than this, so a pass here is a pass for good
         // rather than a pass for a plausible afternoon.
         //
-        // The speed is bounded by `pacing::SPEEDS` rather than by `u32::MAX`, and that is the
-        // honest bound rather than a convenient one: `Status::speed` is an index into that table
-        // and `Hotkey::CycleSpeed` is modulo its length, so no other multiplier can reach this
+        // The speed field is bounded by `pacing::RUNGS` rather than by `u32::MAX`, and that is
+        // the honest bound rather than a convenient one: `Status::speed` is an index into that
+        // table and `Hotkey::CycleSpeed` is modulo its length, so no other rung can reach this
         // line. A table that grew a five-digit entry would redden this test, which is the point.
+        //
+        // **Both states of every rung**, because the widest thing the field can hold is no longer
+        // a number: `auto (loading)` is eleven characters wider than `64x`, and it is drawn on the
+        // same row as everything else here. Taken through `Rung::note` rather than by pasting the
+        // suffix in, so a rung that grew a longer one is measured rather than assumed away.
         let widest = keymap::ARROW_SCHEMES
             .iter()
             .map(|scheme| scheme.name)
             .max_by_key(|name| name.chars().count())
             .expect("ARROW_SCHEMES is never empty");
-        let fastest = pacing::SPEEDS
+        let speed = pacing::RUNGS
             .iter()
-            .map(|speed| speed.factor())
-            .max()
-            .expect("SPEEDS is never empty");
+            .flat_map(|rung| [false, true].map(|playing| format!("{rung}{}", rung.note(playing))))
+            .max_by_key(|field| field.chars().count())
+            .expect("RUNGS is never empty");
         let line = format!(
-            "{WIDEST_RATE:.1} Hz   speed {fastest}x   dropped {}   frame {}   \
+            "{WIDEST_RATE:.1} Hz   speed {speed}   dropped {}   frame {}   \
              snd {WIDEST_QUEUE}   arrows {widest}",
             u64::MAX,
             u64::MAX,
@@ -899,20 +1169,71 @@ mod tests {
         // both must be drawable — this file's whole `snd` field exists because a person cannot
         // otherwise tell a browser tab before its first click from a broken mixer, and
         // fast-forward adds a third case to the same confusion.
+        let real_time = Tick::Paced(Speed::REAL_TIME);
         let mut status = Status::new();
-        assert_eq!(status.queue(Speed::REAL_TIME), NO_DEVICE, "no device yet");
+        assert_eq!(status.queue(real_time), NO_DEVICE, "no device yet");
 
         status.audio_queued = 1024;
-        assert_eq!(status.queue(Speed::REAL_TIME), "1024", "a live device");
+        assert_eq!(status.queue(real_time), "1024", "a live device");
 
-        let fast = *pacing::SPEEDS.last().expect("SPEEDS is never empty");
-        assert_ne!(fast, Speed::REAL_TIME, "the table has only one entry");
         assert_eq!(
-            status.queue(fast),
+            status.queue(Tick::FlatOut),
             MUTED,
             "fast-forward left the last queue depth on the bar, which reads as a live device",
         );
         assert_ne!(MUTED, NO_DEVICE);
+
+        // And the case `auto` adds, which is the one a rung-shaped condition would have got
+        // wrong: an automatic machine with nothing in the drive is a machine at real time, and
+        // it must sound like one. This is the assertion that reddens if `queue` is ever rewritten
+        // to ask which rung is selected instead of what the tick resolved to.
+        assert_eq!(
+            status.queue(Rung::Automatic.this_tick(false)),
+            "1024",
+            "an automatic machine with the drive stopped was silenced for no reason",
+        );
+        assert_eq!(
+            status.queue(Rung::Automatic.this_tick(true)),
+            MUTED,
+            "an automatic machine running flat out was reported as feeding a device",
+        );
+    }
+
+    #[test]
+    fn every_message_the_speed_key_can_report_fits_and_is_drawable() {
+        // The payoff of `speed_message` being a function rather than a `match` inside `act`.
+        // `tests/on_screen_strings.rs` grades every status string this crate can hand a test, and
+        // records in its own header that it *"cannot cover `main.rs`'s own literals … because they
+        // are private to a binary that needs a window"*. These three sentences were inside that
+        // gap; now they are values, and they are graded on both axes the bar cares about — how
+        // wide they are, and whether the font has a glyph for every character in them.
+        let mut checked = 0;
+        for &rung in pacing::RUNGS {
+            let message = speed_message(rung);
+            assert_fits("a speed message", &message);
+            for character in message.chars() {
+                assert!(
+                    character.is_ascii() && !character.is_ascii_control(),
+                    "{message:?} holds {character:?}, which the status bar draws as an empty box",
+                );
+            }
+            checked += 1;
+        }
+        // Vacuously true is this file's recurring failure mode: an empty `RUNGS` would satisfy the
+        // loop by never entering it.
+        assert!(
+            checked >= 2,
+            "only {checked} rungs were checked — the table has shrunk"
+        );
+
+        // And that the rung which decides says something different from the rung it is currently
+        // indistinguishable from. Somebody pressing F8 from 64x to auto has to be able to tell
+        // that anything happened, and at that instant the drive is very likely stopped.
+        assert_ne!(
+            speed_message(Rung::Automatic),
+            speed_message(Rung::Fixed(Speed::REAL_TIME)),
+            "auto and 1x report the same sentence, so the press that reached auto reads as a no-op",
+        );
     }
 
     #[test]

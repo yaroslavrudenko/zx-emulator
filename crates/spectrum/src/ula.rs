@@ -352,6 +352,14 @@ pub struct Ula {
     /// there is no pair to disagree. [`Ula::border`] reads through it.
     border: BorderTrace,
     tape: Tape,
+    /// Times a guest has read the `EAR` line since power-on. See [`Ula::ear_reads`].
+    ///
+    /// It counts a **guest's** reads and not the machine's own work, which is why it sits
+    /// beside the drive rather than inside it: a cassette turning with nobody listening moves
+    /// this not at all, and a machine listening with an empty drive moves it at full rate.
+    /// Those two are the cases a drive's own `is_playing` cannot tell apart, and separating
+    /// them is the whole of what this field is for.
+    ear_reads: u64,
     /// The machine's sound: the beeper, the AY on a machine that has one, and the samples
     /// they have produced.
     ///
@@ -381,6 +389,7 @@ impl Ula {
             covered_t_states: 0,
             border: BorderTrace::new(Colour::BLACK),
             tape: Tape::default(),
+            ear_reads: 0,
             // The sound chip comes from the same value the clock and the map do, for the same
             // reason: a machine with a 48K's memory and a 128's chip is a machine nobody
             // built, and taking every model-dependent thing from one place makes it
@@ -408,6 +417,11 @@ impl Ula {
     /// 128 that was playing goes quiet. What is *not* discarded is the sample buffer — those
     /// samples describe sound the machine really made before the button was pressed, and a
     /// consumer that has not drained them yet is owed them.
+    ///
+    /// **[`Ula::ear_reads`] is not reset either, and that is load-bearing rather than an
+    /// oversight.** It is a running total whose only use is to be sampled twice and
+    /// subtracted, so a caller holding an earlier reading would underflow against a counter
+    /// that went backwards — the reset button would silently corrupt a rate nobody reset.
     pub fn reset(&mut self) {
         self.clock = Clock::with_timing(self.clock.timing());
         self.covered_t_states = 0;
@@ -514,6 +528,17 @@ impl Ula {
         self.audio.dropped()
     }
 
+    /// Times a guest has read the `EAR` line since power-on.
+    ///
+    /// A running total, in the shape of [`Ula::dropped_samples`] and [`Clock::frames`]:
+    /// **monotonic**, never reset — not by [`Ula::reset`], not by a snapshot — so a caller that
+    /// samples it twice can always subtract. See [`crate::Spectrum::ear_reads`] for what the
+    /// number is for and why it is a count rather than a verdict.
+    #[must_use]
+    pub fn ear_reads(&self) -> u64 {
+        self.ear_reads
+    }
+
     /// Whether the ULA is holding `/INT` low right now.
     #[must_use]
     pub fn interrupt_asserted(&self) -> bool {
@@ -581,6 +606,15 @@ impl Ula {
     /// Put `tape` in the drive, stopped and wound to wherever it stands.
     pub(crate) fn insert_tape(&mut self, tape: Tape) {
         self.tape = tape;
+    }
+
+    /// The tape in the drive, to read — where the head is, and whether it is moving.
+    ///
+    /// The immutable half of the pair below, added because [`crate::Spectrum::tape`] cannot
+    /// reach a private field of this struct without it. Nothing else in this file needs it:
+    /// [`Ula::ear_bit`] reads `self.tape` directly, being inside the type.
+    pub(crate) fn tape(&self) -> &Tape {
+        &self.tape
     }
 
     /// The tape in the drive — how anything starts, stops or rewinds it.
@@ -737,6 +771,11 @@ impl Bus for Ula {
         if port & ULA_PORT_SELECT != 0 {
             return FLOATING_BUS_BYTE;
         }
+        // Counted here rather than inside [`Ula::ear_bit`], which stays a pure read of the
+        // line. This is the arm where the `EAR` bit actually reaches a guest — the three above
+        // return before it — so this is the one place *"the machine looked at the tape"* is
+        // true, whether or not the guest went on to test bit 6.
+        self.ear_reads += 1;
         self.keyboard.read(port) | UNDRIVEN_INPUT_BITS | self.ear_bit()
     }
 

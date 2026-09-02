@@ -7,7 +7,22 @@ open. Updated as work lands, not once at the start.
 `tests/timing_oracle.rs`, which settled the item that had headed *Still ungraded* for two
 milestones, and once by `tests/frame_boundary.rs` and `tests/block_interrupt.rs`, which closed two
 properties of the **machine** that nothing had ever driven. **Then M6 merged** (`0d3e7ef`), and its
-own eight open rows were added on the same date — see the M6 section, immediately below.
+own eight open rows were added on the same date — see the M6 section, immediately below. **Then on
+2026-09-02 `tests/tzx_turbo_load.rs` narrowed three of those eight and closed none**: a turbo
+loader is graded, a turbo *game* still is not, and the difference between those two sentences is
+what the M6 rows now carry. A fourth — the `EAR` sampling point — had its settling condition
+*attempted* and is deliberately left as it stood, because a turbo loader running without failing
+for that reason is an absence of a distinguishing failure and this document exists to refuse
+reading one of those as evidence.
+
+> **Also on 2026-09-02: the 128 was graded against hardware for the first time, and it was wrong.**
+> `tests/timing_oracle.rs` now runs the 128 edition of Richard Butler's suite alongside the 48K
+> one. The first run was red on **62 of 70** rows: `Timing::SPECTRUM_128` carried
+> `first_contended_t_state: 14361` where the hardware wants **14362**, and a 32-T-state interrupt
+> window where it wants one in **`33..=43`**. Both are corrected and all 71 of the file's rows are
+> bit-exact. **The corpus had been on disk, hashed and documented, since 2026-09-01, read by
+> nothing** — see *A corpus nothing reads is not evidence* near the end of this document, which is
+> the part that generalises. `docs/MACHINE.md` carries the measurement.
 
 > **M7's memory half boots, and `crates/frontend` enters this register for the first time.**
 > Added 2026-09-01. The 128 pages through `0x7FFD`, carries both ROMs, contends per bank, has the
@@ -187,8 +202,18 @@ Four items, and the labels on them are load-bearing.
   contention stalls"* reddens the two contention-vs-tape gates and **leaves the ROM load gates
   green**, because the ROM's loader does not depend on the contention it suffers. What would grade
   it is a loader whose margins are tight enough to fail when the stalls are wrong — which is a turbo
-  loader, which needs `.tzx`, which is the row below.
-- **T4 runs nowhere, and it remains the only tier that grades a turbo loader.** It is also the only
+  loader, which needs `.tzx`, which is the row below. **Both have since arrived, and the row
+  narrows rather than closes.** `tests/tzx_turbo_load.rs` runs a loader whose margins are exactly
+  that tight: at 2.08× the ROM's data rate a bit's poll count lands *on* its threshold, and the
+  four-case I/O rule moves the cost of a poll across the frame, so which way a bit reads depends on
+  where in the frame it fell. The contention model is therefore no longer merely *exercised* by a
+  tape gate — one gate's observed behaviour is produced by it. It is still not *asserted* against
+  it: **no mutation of the stalls has been taken against that gate**, and until one is, this row is
+  open on a sharper condition than it had.
+- **T4 runs nowhere, and what it is the only tier for has narrowed.** It was recorded here as the
+  only tier that grades a turbo loader; since 2026-09-02 that is a turbo **game** rather than a
+  turbo loader, because `tests/tzx_turbo_load.rs` grades the format with a tape and a loader this
+  project wrote — see the `.tzx` row below. It remains the only
   tier that grades a program written by somebody who did not know how this emulator works, and the
   only instrument that would grade our **arithmetic** on a format's fields rather than merely our
   ability to read them back — that last was measured, not assumed: under the symmetric T-state
@@ -196,12 +221,55 @@ Four items, and the labels on them are load-bearing.
   in a third-party emulator is what settles it, it is observation, and it is **not done**. Nothing
   shrinks this to zero. What is required instead is that each run be **recorded** — file, SHA-256,
   outcome, date — in this document.
-- **`.tzx` is the first thing to add if T4 is ever attempted.** `.tap` is block data with the ROM's
-  standard timings *implied*; nothing in the format can say *"this loader uses 700-T-state bits"*,
-  so no `.tap` can carry a turbo loader at any speed, and most commercial titles are turbo-loaded.
-  The cost is already paid down: because the tape's internal form is a **pulse train** rather than a
-  block list (`M6.md` Decision 5), `.tzx` is a second converter with the ULA side untouched, not a
-  rewrite of the tape subsystem.
+- **`.tzx` was the first thing to add if T4 was ever attempted. It landed 2026-09-01, the turbo
+  gate followed on 2026-09-02, and what this row carries now is a distinction rather than an
+  absence: the turbo *format* is graded, and a turbo *game* is not.** The premise stands — `.tap` is
+  block data with the ROM's standard timings *implied*, nothing in the format can say *"this loader
+  uses 700-T-state bits"*, no `.tap` can carry a turbo loader at any speed, and most commercial
+  titles are turbo-loaded — and the cost was already paid down by the tape's internal form being a
+  **pulse train** rather than a block list (`M6.md` Decision 5), so `.tzx` was a second converter
+  with the ULA side untouched.
+
+  What was missing after it landed was the other end of the wire. Every gate that ran a *machine*
+  handed its `.tzx` to `LD-BYTES`, which reads only 855 and 1710, so `ID 11`'s pilot, sync and bit
+  fields were graded **only at the ROM's own values**, where they are indistinguishable from
+  constants.
+  `tests/tzx_turbo_load.rs` supplies the missing half: a **124-byte hand-assembled Z80 loader**
+  running from RAM on a blank ROM page, counting edges on `IN A,($FE)` itself, decoding a block at
+  pilot 1400 / sync 500 / bit0 500 / bit1 1200 against the ROM's 2168 / 667 / 855 / 1710, and never
+  calling the ROM at all. Three further encodings of the same signal — `ID 12 + 13 + 14`, an `ID 15`
+  direct recording, and an `ID 30 / 21 / 23` tape reached only by following a jump — produce one
+  identical **112,594-pulse** train, and four encodings sharing no field layout cannot be wrong the
+  same way by accident.
+
+  **Two measurements are worth carrying into this register rather than leaving in the gate.** There
+  is **no ceiling**: at **3.56×** the ROM's data rate — the fastest tried — the emulator plays a
+  tape a guest loader reads byte-perfect, and every failure met was the test loader's own
+  resolution, proved by replaying each failing rate byte for byte unchanged and lifting it with an
+  immediate inside the guest's Z80 code. And **2.08× fails silently**, which is the finding: the
+  loader painted its border **green over 1244 wrong bytes**, because a one bit's poll count lands on
+  its threshold, the ULA's I/O contention moves the poll cost across the frame, bits drop from the
+  same position in scattered bytes, and an even number of them cancels out of an `XOR` fold. That is
+  the all-zeros hole this document keeps cataloguing, met from the other side, and the gate asserts
+  it **structurally** — *the fold agreed and the bytes did not* — rather than by the 1244, which is a
+  property of that payload landing on that frame.
+
+  **The mutation matrix is a statement about instruments and belongs in this register for that
+  reason.** Against a deliberately broken `ID 11` handler in an isolated clone, ignoring the file's
+  bit-one length or its pilot count reddens `tzx_turbo_load` and `tzx_vectors` while **`tzx_rom_load`
+  and `tzx_rom_timings` stay green**. Substituting the ROM's own value for a field is invisible to
+  any gate whose tape carries the ROM's own value, so **every gate here that grades by running a
+  machine with the ROM in it was blind to those two**, and until this gate existed the only
+  instrument that caught them was the vector-level one — literals a human transcribed from the
+  format description. The generalisation *"a gate that runs a machine was blind"* is the tempting
+  one and it is wrong: `tzx_turbo_load` runs a machine too, and reddens on all three rows. What
+  distinguishes it is whose loader is reading. Transposing the pilot and sync
+  fields is wrong at *every* speed and all four see it. A machine-level gate reaches further than a
+  vector and sees only what its own loader is sensitive to; neither replaces the other.
+
+  What is still graded by nothing is a turbo **game**, and it is a corpus problem rather than a
+  capability one: `testdata/games/` is gitignored, no commercial turbo-loaded title is present, and
+  none can be committed.
 
 **Five further items M6 hands over, so that the four above are not read as the whole list.** Four
 become register rows: `CpuState::wz` is destroyed by every snapshot load and no format
@@ -1085,7 +1153,11 @@ row is the survivor.
 > **M6 merged and added eight rows, which now head this table.** Four of them are the milestone's
 > stated deliverable — the tape's timings graded against the **ROM** rather than against hardware,
 > contention during a load exercised and graded by nothing, **T4 running nowhere**, and the absence
-> of `.tzx` — and four more come from `M6.md`'s own hand-over table. The account of each lives in
+> of `.tzx` — and four more come from `M6.md`'s own hand-over table. **Three of those rows were
+> renamed on 2026-09-02 rather than closed**, when `tests/tzx_turbo_load.rs` made the turbo *format*
+> graded and left the turbo *game* where it was; the `.tzx` row in particular now reads *no turbo
+> **game** is graded*, which is where a reader looking for the old title should go. The account of
+> each lives in
 > the M6 section above and the settling condition lives here; that split is the one the M5 rows
 > already use, and it exists so that a reader looking for *what is open* finds one table rather than
 > three narratives.
@@ -1122,13 +1194,13 @@ row is the survivor.
 | Item | State | Settled by |
 |---|---|---|
 | **M6** — tape pulse timings are graded against **the ROM**, not against hardware | `tests/tape_rom_timings.rs` compares 3305 half-periods against the ROM's own `SA-BYTES`, by value and in order, with the ULA's contention of the writer's `OUT`s subtracted. That is an oracle and it is **not a hardware measurement**: that 2168 / 667 / 735 / 855 / 1710 are what a real Spectrum emits is **unverified** | An oscilloscope on a real Spectrum, or a tape-timing corpus with hardware provenance of the kind `testdata/timing/` has. **Nobody here has taken one, and no gate in this repository could** |
-| **M6** — contention during a tape load is exercised and graded by nothing | The loader performs thousands of contended port cycles and writes into contended RAM, so the model runs. Measured: the mutation *"the tape stops seeing contention stalls"* reddens the two contention-vs-tape gates and leaves the **ROM load gates green** — the ROM's loader does not depend on the contention it suffers | A loader whose margins fail when the stalls are wrong. That is a turbo loader, which needs `.tzx` — the row below |
-| **M6** — **T4 runs nowhere** | The only tier that grades a turbo loader, a program written by somebody who did not know how this emulator works, or our **arithmetic** on a format's fields. That last is measured, not assumed: under a symmetric mutation of the T-state formula the whole third-party corpus sweep stayed green | Nothing, structurally — a repository that may not carry games cannot commit the corpus. What is required instead: each run **recorded** here with file, SHA-256, outcome and date. Loading one of our own `.z80` files in a third-party emulator is the cheapest half and is **not done** |
-| **M6** — `.tzx` is absent, and therefore turbo loaders are | `.tap` is block data with the ROM's timings *implied*; nothing in the format can name a timing, so no `.tap` carries a turbo loader at any speed. Most commercial titles are turbo-loaded | Writing it. **Cost already paid down:** the tape's internal form is a pulse train, not a block list, so `.tzx` is a second converter with the ULA side untouched. It is the first thing to add if T4 is ever attempted |
+| **M6** — contention during a tape load is exercised and graded by nothing | The loader performs thousands of contended port cycles and writes into contended RAM, so the model runs. Measured: the mutation *"the tape stops seeing contention stalls"* reddens the two contention-vs-tape gates and leaves the **ROM load gates green** — the ROM's loader does not depend on the contention it suffers | **A mutation of the stalls taken against `tests/tzx_turbo_load.rs`.** The loader that row used to ask for now exists and its margins are that tight: its 2.08× row is *produced* by the four-case I/O rule moving the cost of a poll across the frame. So the contention model is no longer only exercised by a tape gate — it decides one gate's observed behaviour. Nothing has yet been mutated against it, which is why this is a settling condition and not a closure |
+| **M6** — **T4 runs nowhere** | The only tier that grades a turbo **game**, a program written by somebody who did not know how this emulator works, or our **arithmetic** on a format's fields. It read *"a turbo loader"* until 2026-09-02; a turbo loader is graded by `tests/tzx_turbo_load.rs`, and what cannot be committed is the game. That last is measured, not assumed: under a symmetric mutation of the T-state formula the whole third-party corpus sweep stayed green | Nothing, structurally — a repository that may not carry games cannot commit the corpus. What is required instead: each run **recorded** here with file, SHA-256, outcome and date. Loading one of our own `.z80` files in a third-party emulator is the cheapest half and is **not done** |
+| **M6** — no turbo **game** is graded, and none can be committed | This row read *"`.tzx` is absent, and therefore turbo loaders are"*. `.tzx` landed 2026-09-01 and `tests/tzx_turbo_load.rs` graded the format on 2026-09-02 — sixteen tests, a 124-byte loader of our own on a blank ROM page decoding `ID 11` at pilot 1400 / sync 500 / bit0 500 / bit1 1200, four encodings of one 112,594-pulse signal, **no ceiling found at 3.56×** the ROM's data rate, and a **silent** failure at 2.08× (a green border over 1244 wrong bytes) asserted structurally. The premise is unchanged: `.tap` names no timing, so it carries no turbo loader at any speed, and most commercial titles are turbo-loaded | Nothing available, and it is a **corpus** problem rather than a capability one: `testdata/games/` is gitignored, no commercial turbo-loaded title is present, and none may be redistributed. This is the same wall as the T4 row and closes with it or not at all |
 | **M6** — `CpuState::wz` is destroyed by every snapshot load | No format `MACHINE.md` names carries it; both parsers set zero. Observable only through the undocumented flag bits of a `BIT n,(IX+d)` executed before anything else writes it | Nothing available. `.szx` carries it, and M7 is where that would be reconsidered — `M6.md` Decision 9 defers it on YAGNI grounds that the field does not disturb |
 | **M6** — `.sna` restores at `frame_t_state = 0` **by convention** | Which is inside the interrupt window, so a `.sna` load takes an interrupt almost immediately. The format carries no T-state counter; this is what other implementations do and what most `.sna` files expect. A convention, not a measurement | A `.sna` observed to misbehave, or a format description that says otherwise |
 | **M6** — the FLASH phase across a load | **Nothing.** No format carries it, and this model derives it from `frames()`, which `restore` deliberately leaves alone so that uptime means one thing. A snapshot taken mid-flash renders inverted for up to 16 frames after loading | A user noticing the flash jump. It is also the thing that would decide `M6.md`'s open question of whether `restore` should reset `frames()` |
-| **M6** — the `EAR` sampling point within an `IN` cycle | Approximated to the start of the cycle: `Ula::in_port` runs after the contention stall is charged and before the cycle's four nominal ticks, so the level is sampled **up to four T-states early**. Far inside the ROM's tolerance, which distinguishes 855 from 1710 | A specific turbo loader failing. Same for issue 2 / issue 3 `EAR` readback, which is not modelled at all |
+| **M6** — the `EAR` sampling point within an `IN` cycle | Approximated to the start of the cycle: `Ula::in_port` runs after the contention stall is charged and before the cycle's four nominal ticks, so the level is sampled **up to four T-states early**. Far inside the ROM's tolerance, which distinguishes 855 from 1710 | A specific turbo loader failing. **One now runs** — `tests/tzx_turbo_load.rs`, against half-periods as short as 220 T-states — **and has not failed for this reason**: every limit it met was traced to a constant in its own Z80 code. That is the absence of a distinguishing failure, which this document's own standing rule forbids reading as evidence, so the row is unchanged and its condition has merely been attempted. Same for issue 2 / issue 3 `EAR` readback, which is not modelled at all |
 | **M5** — the frame's **origin** is a convention | We assert `/INT` at frame T-state 0 and everything is measured from there. `tests/timing_oracle.rs` grades the *interval* between `/INT` and the first contended T-state, so moving both together leaves it green — measured, not argued. Fifteen other tests pin the convention against drift and none establishes it | Hardware that reports where `/INT` falls relative to something the emulator does not also define |
 | **M5** — a `TYPE2` machine is **not** this machine with a 33-T-state window | The successor to the closed interrupt-window row below, which the sweep settled to a band. Three of the 68 rows resist at window 33: `group 3` contended (`R` 42 against 41), `group 7` uncontended (95 against 98), `group 34` uncontended (42 against 44). **`group 7` locates the residue**: its body ends `DI`/`EI`/`JR`, so its acceptance points are quantised, and the arithmetic puts an instruction boundary **exactly on** the frame's interrupt T-state — this machine takes the interrupt there and the hardware `TYPE2` machine did not. It cannot be reconciled with the detection row under any single integer-T-state change, because the two want **opposite tie-breaks**. So some second-order difference remains at that edge | A `TYPE2` machine's full 73-row hardware submission, or a Z80 interrupt-sampling model finer than one T-state. Neither is in hand, and neither is needed for the detection row, which is bit-exact |
 | **M5** — the interrupt window's length is pinned to a **band**, not a point | Closed as "ungraded" below, but not to a single value: the oracle is green across **`17..=32`** and cannot separate those sixteen. 32 is the community's figure and is what this crate uses. **One boundary in the sweep is unexplained and is recorded rather than smoothed away**: at windows **14–16** the detection group still reads `TYPE1` while contended rows disagree, so something in the contended groups is sensitive to a short window and this gate does not say what. A boundary nobody predicted is worth more than one that was | A timing program that varies when it enables interrupts *within* the window — the band's interior is invisible to a suite that only needs the interrupt accepted at the top of the frame |
@@ -1212,7 +1284,7 @@ is indistinguishable from a row nobody re-read.
 
 | Item | What it was | What closed it |
 |---|---|---|
-| **M1 fetch vs operand read** | *"Not blocking. Contention depends on address and `t mod 8`, both of which the machine has. A defaulted `fn fetch(&mut self, addr) -> u8 { self.read(addr) }` is non-breaking whenever a debugger or a precise floating-bus model wants it."* | **The reasoning was wrong and M5 measured it.** `LD A,B` and the read-modify half of `INC (HL)` emit byte-identical streams — `read(addr)` then four `tick(addr)` — while owing one contention point and two respectively, so address and phase are not sufficient however true it is that contention depends on them. `crates/spectrum/src/machine_cycle.rs` had to reconstruct the boundaries by deferral, at a residual of one contention point on the read-modify-write family — **an isolated stall of 0–6 T-states, which is not the same quantity as the observable error; see the correction below the table.** `Bus::fetch` landed in `crates/z80/src/bus.rs`, defaulted, with every M1 opcode fetch routed through it. **Both halves are now closed.** `crates/spectrum/src/ula.rs:685` — `fn fetch(&mut self, address: u16) -> u8` — implements it, `machine_cycle.rs` is deleted, and the residual is gone rather than pinned: with every cycle's length disclosed the moment it opens, there is nothing left to reconstruct. Full account in [`MACHINE.md`](MACHINE.md); the two rulings it forced are in [`Z80-REFERENCE.md`](Z80-REFERENCE.md) |
+| **M1 fetch vs operand read** | *"Not blocking. Contention depends on address and `t mod 8`, both of which the machine has. A defaulted `fn fetch(&mut self, addr) -> u8 { self.read(addr) }` is non-breaking whenever a debugger or a precise floating-bus model wants it."* | **The reasoning was wrong and M5 measured it.** `LD A,B` and the read-modify half of `INC (HL)` emit byte-identical streams — `read(addr)` then four `tick(addr)` — while owing one contention point and two respectively, so address and phase are not sufficient however true it is that contention depends on them. `crates/spectrum/src/machine_cycle.rs` had to reconstruct the boundaries by deferral, at a residual of one contention point on the read-modify-write family — **an isolated stall of 0–6 T-states, which is not the same quantity as the observable error; see the correction below the table.** `Bus::fetch` landed in `crates/z80/src/bus.rs`, defaulted, with every M1 opcode fetch routed through it. **Both halves are now closed.** `crates/spectrum/src/ula.rs:719` — `fn fetch(&mut self, address: u16) -> u8` — implements it, `machine_cycle.rs` is deleted, and the residual is gone rather than pinned: with every cycle's length disclosed the moment it opens, there is nothing left to reconstruct. Full account in [`MACHINE.md`](MACHINE.md); the two rulings it forced are in [`Z80-REFERENCE.md`](Z80-REFERENCE.md) |
 | **M5 — read-modify-write contention residual** | *"One contention point, 0–6 T-states, per instruction that performs exactly one internal cycle at the address it just read. Pinned by a test that asserts the loss rather than hiding it. **Now closable**: `Bus::fetch` has landed in the CPU."* | `Ula` implemented `fetch`. Closed by the row above and with it — the two were one item split across two tables, which is itself worth noticing: the Open row's settling condition named `Ula` implementing `fetch`, and it does. `machine_cycle.rs` and its residual-pinning test are deleted together. The **quantity** the heuristic lost was one contention point; the **error** it produced was 0 or 1 T-state — see the correction below |
 | **M5 — five mutations leave the boot gate green** | *"`/INT` never asserted; the keyboard reporting every key held; the ROM slot made writable; contention removed entirely; contention phase off by one… Until they land, the boot gate grades the memory map's read side and the screen, and nothing else."* | **Closed by being re-measured, and the re-measurement changed the finding.** Those verdicts were taken against the boot *example*, which nothing runs. Re-measured at `2157331` against the pre-gate lib target, **four of the five were already red** from unit tests inside `src` — 5, 7, 1 and 13 failing tests — and **the contention-phase mutation is the only survivor of the five**. (A keyboard-matrix permutation also survives and is why `keyboard_matrix.rs` exists, but it was never one of the five; this row said "three" and "two survivors" and both were wrong — see the M5 section.) Seven gates now exist and ten mutations turn them red — the tables are in the M5 section above |
 | **M5 — nothing runs the boot gate** | *"It is `crates/spectrum/examples/boot.rs`; `cargo test` builds an example without calling `main`. Deleting the committed ROM left the suite at 72 passed."* | `crates/spectrum/tests/boot.rs` exists and runs the ROM under `cargo test`, asserting both the message **and the frame it appears on** — the one number the example printed and never checked. The example remains, as an example. See *A gate that nothing runs, for the third time*, which this closes |
@@ -2146,7 +2218,7 @@ defect — and every one of them was cheaper to grep for than to argue about.
 > written down rather than described as handled.** Correcting four test doc-comments about the
 > timing oracle's scope meant grepping `docs/`, `README.md`, `CHANGELOG.md`, `testdata/` and the
 > `//!` blocks for every other copy of *"no oracle"* near `FIRST_CONTENDED_T_STATE`. Most of the
-> corpus is current — `crates/spectrum/src/timing.rs:36-44` opens with *"**The oracle exists**"*,
+> corpus is current — `crates/spectrum/src/timing.rs:54` opens with *"**The oracle exists**"*,
 > and `MACHINE.md`, `ARCHITECTURE.md`, `M6.md`, `README.md` and `testdata/README.md` all carry the
 > interval-scoped statement. **Four live copies remain, all in files that pass did not own, and
 > they are listed here so the next reader finds them rather than rediscovering them:**
@@ -2173,8 +2245,8 @@ defect — and every one of them was cheaper to grep for than to argue about.
 > **A fifth copy was found and had been fixed by the time it was checked, which is worth recording
 > as a method note rather than dropped.** The sweep reported `crates/spectrum/src/timing.rs:85` as
 > reading *"See the module documentation: unverified"*. Re-read from the file forty minutes later,
-> `timing.rs` contains **no occurrence of "unverified" at all**; the constant now sits at line 293
-> under *"Hardware-graded as an interval from `/INT`"*, and the file's mtime had moved. Another
+> `timing.rs` contains **no occurrence of "unverified" at all**; the constant sits under
+> *"Hardware-graded as an interval from `/INT`"*, and the file's mtime had moved. Another
 > agent corrected it mid-session. The copy was real, the report was accurate when taken, and
 > publishing it unchecked would have put a false claim in this table — **a sweep result is a
 > document too, and this document's own rule is to verify against the code and not against a
@@ -2374,6 +2446,65 @@ gate run this evening found **10** of this repository's 122 resolvable line cita
 and `docs/M7.md` grew from 1984 to 2022 lines inside a single session, turning a citation into it
 red with nobody touching either the citing sentence or the cited one. No convention about *where* a
 citation lives can fix that; only removing the line number can.
+
+### A corpus nothing reads is not evidence, and having it makes it look like evidence
+
+On 2026-09-02 the 128's timing constants were graded for the first time and **two of them were
+wrong**: `first_contended_t_state` read 14361 where the hardware wants **14362**, and the interrupt
+window read 32 where the hardware wants a value in **`33..=43`**. The machine was red on **62 of 70**
+rows. The correction is in [`MACHINE.md`](MACHINE.md) and in `crates/spectrum/src/timing.rs`; what
+belongs here is why it took a milestone, because none of the six reasons is about a 128.
+
+**1. The corpus was already on disk.** `timing_tests-128k_v1.0.z80` was fetched, hashed,
+licence-checked and written up in three documents on 2026-09-01 — and **read by nothing** until the
+following day, while the constants it refutes were being defended at length in prose four files
+away. `timing_oracle.rs` said *"Nothing here reads it"* in its own module documentation, accurately,
+for the whole of that time. This register already carries the sibling shape — *an `#[ignore]`d gate
+that no pipeline executes is not a gate* — and this is the same defect with the gate missing
+entirely rather than skipped. **Running the corpus you already have outranks any argument about what
+it could show.**
+
+**2. A missing results page was allowed to stand in for a missing corpus.** The argument that
+retired the question read: there is no 128 results database, so the anti-circularity leg the 48K
+enjoys has no 128 counterpart, so the 128 cannot be graded. Every clause of that is true and the
+conclusion does not follow — because **the 48K's grading never came from the database either.** That
+page publishes eight categorical columns and *no numbers at all*; it supplies the argument that the
+tables are not one author's emulator, not the tables. The expectations have always come from inside
+the file, and the 128 file has such a table. **When an argument concludes that something cannot be
+measured, check that it is talking about the instrument and not about the instrument's pedigree.**
+
+**3. A census counts copies, not witnesses.** The window was held at 32 because implementations split
+*three to two* — ZEsarUX, rustzx and MAME against Fuse and JSpeccy. The three were wrong. The same
+split recurs on the contention offset, and the "two documents" behind 14361 were **one text**: the
+Sinclair Wiki's oldest revision is a logged copy of the World of Spectrum FAQ, by the same author who
+wrote Fuse. Counting agreeing artefacts measures how often a number was copied, which is not
+evidence about the number.
+
+**4. A derivation predicted the answer and a vote overruled it.** The band `33..=43` was *derived*
+from the suite's own instruction stream before anything ran, printed in the constant's own comment,
+and correctly labelled a prediction to test. Hardware landed on it, both edges, to the T-state. The
+error was not the reasoning but the decision taken against it — and the decision was defensible on
+the day, because a derivation held out of a shipped value is the right call **while nothing has run
+it**. It stopped being the right call the moment something could.
+
+**5. When a source's figure and its own derivation disagree, it has told you its error bar.** The
+FAQ states 14361 and its own `63 × 228` geometry implies 14363. **The hardware is exactly between,
+at 14362** — which is what a two-T-state internal inconsistency normally means, and which neither
+number alone could say. The file that quoted the source recorded the figure and not the
+disagreement. **Transcribe the contradiction, not the conclusion.**
+
+**6. The lineage carried the right number under the wrong name.** 14362 is not a new number: Fuse and
+rustzx already store it, as `top_left_pixel`, and subtract one. Six implementations do. So the value
+the hardware wants was inside the lineage the whole time, one conversion away, and this project
+**inherited the conversion rather than the number**. The documents and the implementations were never
+disagreeing about a quantity — they were agreeing about a quantity and disagreeing about which event
+it names. **A figure and its coordinate system travel together or they do not travel.**
+
+**And a seventh that is about this register rather than about the constants: none of it was ever an
+open row.** The 128's numbers were argued over for a milestone in a doc comment, with an evidence
+table, a census, and a falsifiable prediction — everything the Open table exists to hold — and the
+Open table never heard of them. This document is named after that failure and still took it. **An
+argument long enough to need an evidence table is an item, and belongs where items live.**
 
 ## How this project is verified
 

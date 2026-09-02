@@ -11,7 +11,9 @@
 
 use std::time::Duration;
 
-use frontend::pacing::{FRAME_NANOS, LOSS_ALARM, LossMeter, MAX_CATCH_UP, Pacer, RateMeter};
+use frontend::pacing::{
+    EarMeter, FRAME_NANOS, LOSS_ALARM, LossMeter, MAX_CATCH_UP, Pacer, RateMeter,
+};
 
 /// Exactly one frame of a 50 Hz machine.
 const FRAME: Duration = Duration::from_millis(20);
@@ -294,4 +296,157 @@ fn the_rate_meter_divides_by_the_time_that_actually_passed() {
     let mut meter = RateMeter::new(1.0, 0.0);
     meter.sample(4.0, 50);
     assert_eq!(meter.hz(), 12.5, "50 frames over four seconds");
+}
+
+// ---------------------------------------------------------------------------------------
+// The `EAR` read rate, which is what `Rung::Automatic` now decides on
+// ---------------------------------------------------------------------------------------
+
+/// A 48K's frame, in T-states. `crates/spectrum/src/timing.rs` is where the number comes from.
+///
+/// Written out rather than read off a machine, which is the opposite of what
+/// `crates/frontend/tests/speed_multiplier.rs` does and is right for the opposite reason: that
+/// file *uses* the frame length and must not disagree with the machine, and this file *grades* a
+/// derivation from it. An expectation computed by the subject is a tautology.
+const FRAME_T_STATES_48K: u32 = 69_888;
+
+/// A 128's frame, which is 1020 T-states longer and therefore a different threshold.
+const FRAME_T_STATES_128: u32 = 70_908;
+
+/// Frames each rate below is offered over, so a rate is a division rather than a single reading.
+const FRAMES: u64 = 10;
+
+/// A fresh meter for a machine of `frame_t_states`, having just seen `per_frame` reads a frame
+/// over [`FRAMES`] frames.
+///
+/// **A new meter each time, and that is not tidiness.** The first attempt at this helper took
+/// `&mut EarMeter` and offered a second rate to a meter that had already closed a window —
+/// which is a call the loop never makes, because both counters only ever climb. Re-offering the
+/// same frame count reads as *a tick that ran nothing*, the meter correctly declined it, and the
+/// test asserted the previous verdict while believing it had measured a new one.
+fn at_rate(frame_t_states: u32, per_frame: u64) -> EarMeter {
+    let mut meter = EarMeter::new(frame_t_states);
+    // One call, because a fresh meter already has its window open at frame zero.
+    meter.sample(per_frame * FRAMES, FRAMES);
+    meter
+}
+
+#[test]
+fn the_threshold_is_two_samples_of_the_widest_pilot_half_period() {
+    // **The number, pinned as a literal, because every other gate on this signal would pass with
+    // it wrong.** A threshold twice too high still sits between a prompt's ten reads a frame and
+    // a loader's two thousand, so the fixture tests either side of it stay green while the rung
+    // stops firing on a real loader that reads more slowly than the fixture. The derivation is
+    // `2 x frame_t_states / 2168` — two samples inside the ROM pilot's half-period, which is the
+    // fewest that can see an edge — and this is that arithmetic written out by hand.
+    assert!(
+        !at_rate(FRAME_T_STATES_48K, 63).decoding(),
+        "63 reads a frame is under two samples of a 2168-T-state half-period on a 48K, so no \
+         loader could be resolving a pilot tone at it",
+    );
+    assert!(
+        at_rate(FRAME_T_STATES_48K, 64).decoding(),
+        "64 reads a frame is exactly two samples of a 2168-T-state half-period on a 48K, which is \
+         the floor a loader has to clear, and the threshold has drifted off it",
+    );
+
+    // **And that the threshold is per machine rather than per project.** A 128's frame is longer,
+    // so the same pulse needs one more sample inside it — and a frontend that wrote 64 down would
+    // fire one read a frame early on the machine it was not measured on.
+    assert!(
+        !at_rate(FRAME_T_STATES_128, 64).decoding(),
+        "a 128 accepted a 48K's threshold, so the frame length is not reaching the derivation",
+    );
+    assert!(
+        at_rate(FRAME_T_STATES_128, 65).decoding(),
+        "65 clears the floor on a 70,908-T-state frame",
+    );
+}
+
+#[test]
+fn a_machine_that_has_run_nothing_is_not_decoding() {
+    // The start-up case, which needs no special value: a meter that has seen no frames has a rate
+    // of zero, and zero is under any positive threshold. A frontend opening on `Rung::Automatic`
+    // therefore starts paced rather than flat out, which is the honest answer about a machine
+    // that has not run an instruction.
+    let meter = EarMeter::new(FRAME_T_STATES_48K);
+    assert!(!meter.decoding());
+}
+
+#[test]
+fn a_tick_that_ran_no_frames_leaves_the_last_verdict_standing() {
+    // `Pacer::advance` can owe zero frames — it does on most ticks of a 60 Hz display — and a
+    // rate over zero frames is not a low rate, it is no reading at all. Treating it as zero would
+    // drop a loading machine back to real time on every other tick and make `auto` stutter
+    // between speeds while a cassette played.
+    let mut meter = at_rate(FRAME_T_STATES_48K, 1000);
+    assert!(meter.decoding(), "a thousand reads a frame is a loader");
+
+    meter.sample(1000 * FRAMES, FRAMES);
+    assert!(
+        meter.decoding(),
+        "a tick that ran no frames was counted as a tick that read nothing",
+    );
+    meter.sample(1000 * FRAMES, FRAMES);
+    assert!(
+        meter.decoding(),
+        "and it stays that way over several of them"
+    );
+}
+
+#[test]
+fn the_rate_is_per_frame_rather_than_per_tick() {
+    // The two differ by two orders of magnitude on this rung: a paced tick runs one frame and a
+    // flat-out tick runs about a hundred and fifty, so a per-*tick* rate would read a loading
+    // machine as a hundred and fifty times busier once it had started and would never let go.
+    // Same reads a frame, wildly different frames a tick, same verdict.
+    let mut slow = EarMeter::new(FRAME_T_STATES_48K);
+    slow.sample(0, 0);
+    slow.sample(100, 1);
+
+    let mut fast = EarMeter::new(FRAME_T_STATES_48K);
+    fast.sample(0, 0);
+    fast.sample(100 * 150, 150);
+
+    assert_eq!(
+        slow.decoding(),
+        fast.decoding(),
+        "100 reads a frame either way"
+    );
+    assert!(slow.decoding());
+}
+
+#[test]
+fn a_machine_that_stops_reading_stops_being_a_loader() {
+    // The transition the whole rung turns on, in the direction that gives the machine back to the
+    // person: a loader finishes, the game it loaded does not poll the tape, and the next tick is
+    // paced. Asserted here as arithmetic so that `speed_multiplier.rs` can assert it on a machine
+    // without also having to prove the meter.
+    let mut meter = at_rate(FRAME_T_STATES_48K, 682);
+    assert!(
+        meter.decoding(),
+        "682 a frame is the measured rate of a running loader",
+    );
+
+    // The idle rate of a real ROM: `KEY-SCAN` walks one half-row per interrupt, so a machine at
+    // its prompt is not silent on this port and a signal that assumed it was would never let go.
+    meter.sample(682 * FRAMES + 8 * FRAMES, FRAMES * 2);
+    assert!(
+        !meter.decoding(),
+        "a machine back at eight reads a frame is still being taken for a loader",
+    );
+}
+
+#[test]
+fn a_counter_that_went_backwards_reports_a_machine_doing_nothing() {
+    // Both counters are documented monotonic, so this is a belt-and-braces case rather than a
+    // reachable one — but `overflow-checks` is on in this workspace's release profile, so a plain
+    // subtraction here would be an abort in a shipped window rather than a wrong number. The
+    // same choice `LossMeter::sample` makes, for the same reason.
+    let mut meter = at_rate(FRAME_T_STATES_48K, 1000);
+    meter.sample(0, FRAMES * 2);
+    assert!(
+        !meter.decoding(),
+        "a reversal read as a machine reading nothing"
+    );
 }

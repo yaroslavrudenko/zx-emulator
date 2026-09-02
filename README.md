@@ -71,7 +71,7 @@ loading screen and a Hewson title screen each consume one key, and only the thir
 `Key1;Key1;Key1` starts both games too, which is what identifies the first two as *advance* rather
 than as *select* — so neither picture required knowing anything about either game in advance.
 
-> **No game is distributed by this repository** — `testdata/**` is `.gitignore`d and nothing in
+> **No game is distributed by this repository** — `testdata/**` is `.gitignore`d and no game file in
 > `testdata/games/` is committed. *Manic Miner* is Matthew Smith's, published by Bug-Byte Software
 > Ltd in 1983; *Cybernoid*, *Cybernoid II* and *Exolon* are Raffaele Cecco's, published by Hewson
 > Consultants Ltd in 1987 and 1988. **No permission covering these screenshots was found for any of
@@ -248,9 +248,12 @@ arithmetic — with an external oracle instead of self-assessment.
 > games, and a milestone gated on it would be a gate that runs nowhere — which
 > [`docs/STATUS.md`](docs/STATUS.md) records this project shipping three times already.
 >
-> **The residue is not absorbed:** T4 is the only tier that grades a turbo loader or a program
-> written by somebody who did not know how this emulator works, and it runs nowhere. That is a row
-> in the register, not a footnote here.
+> **The residue is not absorbed:** T4 is the only tier that grades a turbo **game** or a program
+> written by somebody who did not know how this emulator works, and it runs nowhere. It was written
+> here as the only tier grading a turbo *loader*, and that half has since been shrunk rather than
+> removed: `crates/spectrum/tests/tzx_turbo_load.rs` grades the loader, and it commits precisely
+> because this repository wrote both the tape and the loader that reads it. What cannot be
+> committed is the game. That is a row in the register, not a footnote here.
 >
 > `docs/MACHINE.md` and `docs/ARCHITECTURE.md` carry the same table; both are corrected. This file
 > was the copy that was missed the last time a milestone row was corrected, which is why it is
@@ -319,8 +322,10 @@ browser build needs no extra setup either.
 
 **The Sinclair ROMs are committed; no game is.** `testdata/roms/48.rom`, `128-0.rom` and
 `128-1.rom` are in the repository under the permission quoted in
-[`testdata/README.md`](testdata/README.md). `testdata/games/` is gitignored and empty in a fresh
-clone, and every command below that names a game is naming a file of **yours**.
+[`testdata/README.md`](testdata/README.md). `testdata/games/` is gitignored, and a fresh clone
+finds exactly one file in it: [`PROVENANCE.md`](testdata/games/PROVENANCE.md), the record of what
+the games are and where each came from, which ships precisely because none of them may. Every
+command below that names a game is naming a file of **yours**.
 
 **The desktop sound device is a dependency, and it has been built on one platform.**
 `crates/page` takes `tinyaudio` on every target except `wasm32`, and its manifest records the
@@ -480,7 +485,7 @@ a format this emulator cannot load: a standalone that starts and shows nothing l
 emulator rather than a build that was never given anything.
 
 **The game is not in this repository and this builds a private artefact.** `testdata/games/` is
-gitignored, nothing in it is committed, and no permission here covers a game — so this is something
+gitignored, no game in it is committed, and no permission here covers a game — so this is something
 you build on your own machine, from a file you already have, for yourself. The binary carries
 Amstrad's acknowledgement under the picture whenever the embedded ROM really is a Sinclair one,
 because for a double-clicked artefact the window is both the program and the manual.
@@ -669,9 +674,18 @@ with the same test count. `ZX_CORPUS_ALLOW_MISSING=1` is the considered opt-out,
 
 ## Test data
 
-`testdata/` is gitignored with explicit un-ignore rules, not wholesale. `git ls-files testdata/`
-returns `.gitkeep`, `README.md` and the three Sinclair ROMs — `roms/48.rom`, `roms/128-0.rom` and
-`roms/128-1.rom`. Those are the only *corpus* exceptions. Fetch the rest locally:
+`testdata/` is gitignored with explicit un-ignore rules, not wholesale, and every exception is a
+path named on its own line in `.gitignore` rather than a glob. **The only *corpus* committed here is
+the Sinclair ROMs** — everything else in the table below is fetched. The un-ignore list also carries
+bookkeeping that is no corpus at all, so what git holds under `testdata/` is wider than what this
+repository redistributes, and it is read from git rather than from a sentence here:
+
+```sh
+git ls-files testdata/      # what is committed
+grep '^!' .gitignore        # every exception there is
+```
+
+Fetch the rest locally:
 
 > **This said the command returned *"exactly `.gitkeep`, `README.md` and `roms/48.rom`"*, and M7
 > committed the 128's pair.** `testdata/README.md` was corrected when they landed and this file was
@@ -680,6 +694,21 @@ returns `.gitkeep`, `README.md` and the three Sinclair ROMs — `roms/48.rom`, `
 > list that has gone stale reads exactly like a file list that is complete, so it fails silently in
 > the direction of claiming less than the repository actually redistributes. Run the command; do not
 > trust this paragraph either.
+>
+> > **That last instruction was the whole answer, and this section kept the list anyway.** What
+> > stood above was the *corrected* list — `.gitkeep`, `README.md` and the three ROMs — and on
+> > 2026-09-02 it was still precisely what the command printed. It has been removed **while it was
+> > still true**, which is the only hour in which removing it costs nothing to verify, and being
+> > wrong is not why it went: `.gitignore` had by then also un-ignored `testdata/games/` and the
+> > provenance record inside it, so the next commit touching that directory would have falsified
+> > this paragraph a second time without anybody editing it or knowing they had. **A transcription
+> > of a command's output is a second copy of something git already owns, and nothing keeps the
+> > copy in step.** Refreshing it buys one more correction cycle and guarantees a third. The
+> > *Engineering rules* test below settles it without needing that cycle: the sentences around the
+> > list stay true whatever the command prints, so the list was decoration on a claim they already
+> > make whole, and the command standing beside them is the citation. What the licensing claim
+> > actually rests on is which *corpus* ships, and the table below states that row by row with the
+> > permission each row leans on.
 
 | Directory | Contents | Committed? |
 |---|---|---|

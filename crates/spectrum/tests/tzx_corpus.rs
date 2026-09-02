@@ -22,9 +22,11 @@
 //!
 //! **There is no fetch to name for this one.** `.tzx` is the format commercial games ship in;
 //! a search of the sources this workspace already uses found none, and games may not be
-//! redistributed, so `testdata/games/` is gitignored and empty on a fresh clone. Applying the
-//! shared policy would make every clone fail with instructions nobody can follow, which is a
-//! worse failure than the one it guards against.
+//! redistributed, so no game is committed and a fresh clone finds exactly one file in
+//! `testdata/games/`: `PROVENANCE.md`, the record of what the corpus is and where each file came
+//! from, which ships precisely because none of them may. Applying the shared policy would make
+//! every clone fail with instructions nobody can follow, which is a worse failure than the one
+//! it guards against.
 //!
 //! So this sweep **skips when there is nothing to sweep**, and says so. It claims nothing on a
 //! clone with no files; it becomes the strongest instrument in the tape subsystem the moment
@@ -37,7 +39,7 @@ use spectrum::{Model, Spectrum};
 use std::path::{Path, PathBuf};
 use z80::CpuState;
 
-/// Where a user's own `.tzx` files may live. Both are gitignored.
+/// Where a user's own `.tzx` files may live. A `.tzx` in either is gitignored.
 const CORPUS_DIRS: [&str; 2] = ["tzx", "games"];
 
 /// `ID 10 - Standard Speed Data Block`, the one shape whose timings are fixed by the format and

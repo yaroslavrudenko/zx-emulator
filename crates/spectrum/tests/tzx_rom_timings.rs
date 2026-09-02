@@ -43,7 +43,17 @@
 //! row stays in the ungraded list, exactly as it does for `.tap`.
 //!
 //! It also grades nothing about a *genuinely* turbo tape — a block whose bits are faster than
-//! the ROM's — because the ROM cannot read one. Nothing in this repository can. That is T4.
+//! the ROM's — because the ROM cannot read one, and the ROM is this file's whole instrument.
+//!
+//! > That used to end *"Nothing in this repository can. That is T4."*, and the first sentence
+//! > stopped being true when `tzx_turbo_load.rs` landed. It grades a turbo tape the way this file
+//! > grades a standard one — by running a loader and measuring what it makes of the signal — with
+//! > a loader written in this repository rather than Sinclair's, because no ROM will do it. What
+//! > it cannot borrow from here is the *oracle*: the ROM's writer is code nobody here wrote, and
+//! > there is no equivalent third party for turbo timings, so that gate rests on a signal this
+//! > project generates and a loader this project wrote. The two files are therefore complementary
+//! > rather than overlapping — this one has the better oracle, that one the wider reach — and
+//! > **T4, a turbo *game* reaching its title screen, is still not done.**
 
 use spectrum::Model;
 use spectrum::memory::Memory;

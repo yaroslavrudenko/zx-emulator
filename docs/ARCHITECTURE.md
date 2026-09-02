@@ -1024,7 +1024,11 @@ multicolour effects). That is observation, not a green check.
 > — `docs/ARCHITECTURE.md`'s own licensing note says why — so a milestone gated on it would be
 > a gate that runs nowhere, which `STATUS.md` records three times already. It is **not done**,
 > and that residue is stated rather than absorbed: T4 is the only tier that grades a turbo
-> loader, and no `.tap` can carry one at any speed.
+> **game**. It read *"a turbo loader"* until `crates/spectrum/tests/tzx_turbo_load.rs` landed,
+> which grades the loader on every clone because this repository wrote both the tape and the
+> loader that reads it; what is left at T4 is a commercial title, and one may not be committed.
+> The premise beneath is unchanged — no `.tap` can carry a turbo loader at any speed, and most
+> commercial titles are turbo-loaded.
 >
 > The **or** was the smaller error and the more consequential one: snapshots and the tape are
 > both built, and a row offering a choice between them would have let either alone count.

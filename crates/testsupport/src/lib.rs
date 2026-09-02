@@ -290,9 +290,13 @@ mod tests {
 
     #[test]
     fn the_testdata_root_resolves_to_the_workspace() {
-        // `testdata/README.md` is committed — the one file in that tree `.gitignore`
-        // un-ignores besides the ROMs — so this is a real check that the relative path is
-        // right, and it goes red if this crate is ever moved to a different depth.
+        // `testdata/README.md` is committed, so a fresh clone has it before any corpus is
+        // fetched — which is what makes this a real check that the relative path is right
+        // rather than a tautology, and what sends it red if this crate ever moves to a
+        // different depth. Which paths `.gitignore` re-includes is deliberately not restated
+        // here: `git ls-files testdata/` answers that from the repository itself, and a copy
+        // of the answer in a comment can go quietly wrong while the sentence around it still
+        // reads as true.
         let root = testdata_dir();
         assert!(
             root.join("README.md").is_file(),

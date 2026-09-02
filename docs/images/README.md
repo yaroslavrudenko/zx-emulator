@@ -292,8 +292,10 @@ as a second copy does; the glob is derived from what those commands wrote, so th
 to this page converts itself.
 
 **The game files are yours to supply and are named here as they were on the machine that took
-these.** Nothing in `testdata/games/` is committed — `git check-ignore -v testdata/games/` is the
-proof, and [`testdata/games/PROVENANCE.md`](../../testdata/games/PROVENANCE.md) carries it. SHA-1
+these.** No game file in `testdata/games/` is committed — `git check-ignore -v` on any one of them
+is the proof, and [`testdata/games/PROVENANCE.md`](../../testdata/games/PROVENANCE.md) carries it
+for each, along with the reason that record is the one file in that directory which does ship.
+SHA-1
 of the four used above, taken from the bytes on disk on 2026-09-01, so that somebody with the same
 files can tell whether they have the same files:
 
@@ -653,6 +655,62 @@ The observation is left here as a finding for whoever owns the timing model; it 
 
 ---
 
+## A run in the window, which produced no picture
+
+Every frame in this directory came out of `zx-shot`, and `zx-shot` has no window: it renders into a
+`spectrum::Frame`, writes [`frontend::ppm`](../../crates/frontend/src/ppm.rs) bytes and exits. That
+is what makes each of them re-takeable, and it is also the whole of what they cannot show. The
+section above records what could not be photographed; this one records the opposite case — something
+that was seen and has no photograph, a person running the emulator in its own window — because
+`web/README.md` sets the rule for exactly that: **an unrecorded observation is indistinguishable
+from one nobody made.**
+
+The convention is that file's T4, adapted at the one point a native window differs from a browser:
+where its entries name a browser and its version, this names the build. Operating system, what was
+done, what happened and the date are the same fields, and an entry here is fixed to its date and is
+not edited afterwards for the same reason it is not there — a record quietly brought up to date has
+stopped being evidence of anything.
+
+### 2026-09-02 — the window, macOS 26.6.2 (25G83) / Darwin 25.6.0, arm64
+
+| | |
+|---|---|
+| Done | The owner ran the emulator in its own window and used the speed key's automatic rung — the **fifth** position of `F8`'s cycle, `1× → 4× → 16× → 64× → auto → 1×`, which [`crates/frontend/src/pacing.rs`](../../crates/frontend/src/pacing.rs)'s `Rung::Automatic` runs flat out while the machine is decoding a tape and at real time the instant it stops |
+| Observed | It works. That is the whole of the report, and it is the whole of what is recorded |
+| By | The owner, at his own keyboard, on his own machine |
+| Build | **Not recorded.** The branch stood at `318de03` with uncommitted work in the tree throughout the day, so what he ran cannot be named afterwards. That is this entry's weakness and it is stated rather than guessed at |
+| Machine | Read on the day with `sw_vers` and `uname -m`, rather than carried across from an earlier entry |
+
+**What this reaches that nothing above it could.** `pacing::FLAT_OUT_BUDGET` is derived from a
+thirty-millisecond tick, and the derivation's own table has two rows for what producing a picture
+costs: this crate's half — `Spectrum::render` into a `spectrum::Frame`, then
+`palette::write_rgba` — at **0.016 ms, measured**, and the GPU's half — a 320 KB texture upload, one
+draw call, the vsync wait — recorded there as *"not measurable from a headless test"*. It still is
+not. `a_real_cassette_end_to_end_under_automatic` loads a real cassette through the real
+`Rung::Automatic` decision and draws nothing, uploads nothing and waits for no vsync, so every
+figure this repository holds about the feature was taken with the upload, the draw and the vsync
+wait absent from the tick they were taken in — the three a window pays out of the same thirty
+milliseconds. A person with the window open is the only instrument that reaches them at all, and
+until this date nothing here recorded that instrument having been used on this rung.
+
+**What it does not establish, which is most of what a reader would want to know.** No frame rate.
+No load time in the window. No delivered multiplier, and in particular nothing whatever about how
+much of the headless figure survives vsync: `crates/frontend/src/lib.rs` says a person gets *"less
+than 93×, by an amount nothing in this repository can predict"*, and that sentence is exactly as
+unsettled this evening as it was yesterday. None of those numbers was given, and writing one down
+would be manufacturing the evidence rather than recording it — which is the failure this repository
+has spent the day cataloguing, arriving through the friendliest possible door. What was observed is
+**the feature working**, not a figure, and the machine's own answer to *how fast* remains the one it
+has always been: the `Hz` field beside `speed auto (loading)` on the status bar, which reports what
+was delivered rather than what was asked for.
+
+**And it is one person, once, on one machine.** Nothing runs it, a clean checkout is none the wiser,
+and it grades nothing — the same standing the photographs above it have, and the reason
+[`crates/frontend/src/lib.rs`](../../crates/frontend/src/lib.rs)'s coverage table keeps observations
+in the half of it that says so out loud.
+
+---
+
 ## Licensing — three different cases, and they are not the same
 
 ### 1. ROM output, and it is covered
@@ -702,13 +760,21 @@ cover for this repository would be stretching a sentence past what it says — w
 
 ### What is true of every game frame here, and the whole of it
 
-- **No game is distributed by this repository.** `testdata/**` is covered by `.gitignore` and
-  nothing in `testdata/games/` is committed; `PROVENANCE.md` carries the `git check-ignore` output
-  that shows it. Whoever runs these commands supplies the tapes themselves.
+- **No game is distributed by this repository.** `testdata/**` is covered by `.gitignore` and no
+  game file in `testdata/games/` is committed; `PROVENANCE.md` carries the `git check-ignore`
+  output that shows it, and is itself the one file there that is re-included by name — a record
+  about games is not a game. Whoever runs these commands supplies the tapes themselves.
 - **The provenance of the local copies is the machine's owner, not a documented fetch.**
-  `PROVENANCE.md` records exactly where each *Manic Miner* file came from, with URLs. The four
-  Hewson-game files came from a personal collection; their SHA-1s are listed above so a reader can
-  tell whether they hold the same bytes, and that is all that can honestly be said about them.
+  `PROVENANCE.md` records exactly where each *Manic Miner* file came from, with URLs. The other
+  four — `Batty.tap`, `Cybernoid.z80`, `CybernoidII.tap` and `Exolon.tap` — have **no recorded
+  origin**, and that is the record's finding rather than a hole in it. Each carries a macOS
+  quarantine attribute, which is why the browser that downloaded it and the moment it arrived are
+  known to the second; each is **missing** the `kMDItemWhereFroms` attribute that would have held
+  the URL, looked for on all four and absent from all four. **A download timestamp is evidence of
+  *when* a file arrived and never of *where from***, and reading the one as the other is precisely
+  the tidy, wrong provenance that record exists to prevent — so where those four came from is not
+  something this page knows. Their SHA-1s are listed above, and that is the part a reader can use:
+  it tells them whether they hold the same bytes, which is all that can honestly be said.
 - **These are screenshots, and screenshots are the ordinary practice of emulator projects.** They
   are here because a picture of a real game is the only honest way to show that one runs.
 - **`title.png` carries the game's own `© BUG-BYTE ltd. 1983` line, and `cybernoid-ii.png` carries

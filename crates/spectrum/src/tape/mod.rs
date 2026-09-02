@@ -277,6 +277,33 @@ impl Tape {
         self.playing = false;
     }
 
+    /// Whether the motor is turning.
+    ///
+    /// # A frozen surface, widened once and on purpose
+    ///
+    /// The reason is written here rather than left in a commit message, because this is an
+    /// addition to a published type. `crates/frontend/src/keymap.rs` has carried the finding
+    /// since the tape got three keys instead of a toggle: **nothing here reported whether the
+    /// drive was running**, so a frontend that needed to know had to keep its own flag — and
+    /// that flag goes wrong on its own, because *the tape stops itself*. [`Tape::play`] on a
+    /// wound-off tape is documented to leave it stopped, and playback clears the same field
+    /// when the train runs out. A shadow copy would then say *playing* while the drive said
+    /// *stopped*, and the next press would appear to do nothing.
+    ///
+    /// So the alternative that was refused is not *"a second accessor"*, it is *"a duplicate of
+    /// this field in every consumer"* — and `keymap.rs` names the cost in as many words:
+    /// *"shadowing state that the owner can change behind your back is how a frontend acquires a
+    /// bug nothing can see"*. One method, reporting the one field playback actually reads, is
+    /// the smaller surface of the two.
+    ///
+    /// It reports the **motor**, which is not the same question as *"is there anything left to
+    /// play"*: a tape wound to its end reads `false` here, and so does one that was never
+    /// started, because in both the head is not moving and the `EAR` line is holding still.
+    #[must_use]
+    pub const fn is_playing(&self) -> bool {
+        self.playing
+    }
+
     /// Wind back to the start, leaving the motor as it is.
     ///
     /// The level goes back to low with it: a rewound tape has to present the same signal it

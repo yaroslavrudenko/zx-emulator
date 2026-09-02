@@ -33,8 +33,19 @@
 //!
 //! **Timing precision**, exactly as for `.tap`: the ROM's thresholds are hundreds of T-states
 //! wide, so a converter some way off would still load. `tzx_rom_timings.rs` grades the values.
+//!
 //! And **a genuinely turbo block** — one whose bits are faster than the ROM's — because the ROM
-//! cannot read one. Nothing in this repository can.
+//! cannot read one. Nothing *the ROM loads* can be turbo, so nothing in this file grades the five
+//! timing fields of `ID 11` at anything other than the ROM's own values, where they are
+//! indistinguishable from constants.
+//!
+//! > That used to read *"Nothing in this repository can"*, and it was true until
+//! > `tzx_turbo_load.rs` landed. It supplies the missing half: a loader written here, running from
+//! > RAM, counting edges on `IN A,($FE)` itself, decoding a whole screen at pilot 1400 / sync 500 /
+//! > bit0 500 / bit1 1200 — and, with its own thresholds retuned, at up to 3.56× the ROM's data
+//! > rate. Its `a_turbo_block_the_rom_cannot_read_is_decoded_by_a_loader_of_our_own` is the gate,
+//! > and `the_files_one_bit_length_is_what_drives_the_pulse_train` is the negative control this
+//! > file could not write.
 
 use spectrum::tape::{Tape, tzx};
 use spectrum::timing::T_STATES_PER_FRAME;

@@ -34,6 +34,7 @@
 //! | `drained_48k` / `drained_128` | one `take_samples` per frame — **the whole cost of sound for a silent machine**, since nothing wrote a sound port |
 //! | `beeper_48k` | a guest toggling the speaker every 18 T-states, drained once |
 //! | `ay_128` | a guest writing an AY register every 29 T-states, drained once, with three tones and an envelope running |
+//! | `tape_reads_48k` | a guest reading `0xFE` every 11 T-states — the only case that exercises the **`IN`** path at all, and what `Spectrum::ear_reads`'s counter is priced against |
 //! | `border_48k` | a guest flipping the **border** every 18 T-states — about 3900 bands' worth in a frame |
 //! | `quiet_rendered_48k` / `border_rendered_48k` | the same frames **plus a `render`**, which is the only thing that walks the border record. The gap between the pair is what drawing bands costs over drawing one colour |
 //!
@@ -170,6 +171,16 @@ const BEEPER: &[u8] = &[0xEE, 0x10, 0xD3, 0xFE];
 /// bound on what a border-multicolour demo costs, not a workload.
 const BORDER: &[u8] = &[0xEE, 0x07, 0xD3, 0xFE];
 
+/// `IN A,(0xFE)` — the tape port read as hard as a loader reads it, and harder.
+///
+/// **The row `Spectrum::ear_reads` is measured against**, and the reason it exists: every case
+/// above writes ports and none of them reads one, so a cost on the `IN` path is invisible to all
+/// of them. This one is nothing but that path — an `IN` every eleven T-states, about six thousand
+/// a frame against the 682 a running ROM loader makes — so whatever the counter costs shows up
+/// here magnified roughly ninefold, and a figure that is lost in the noise here is lost in the
+/// noise everywhere.
+const TAPE_READS: &[u8] = &[0xDB, 0xFE];
+
 /// `LD BC,0xBFFD : LD A,n : OUT (C),A` — an AY data write every twenty-nine T-states.
 ///
 /// The register the writes land in is whatever `setup_ay` last latched, which is the volume
@@ -253,6 +264,18 @@ fn beeper_48k(bencher: Bencher) {
         UNCONTENDED,
         BEEPER,
         true,
+        FORTY_EIGHT_FRAME,
+    );
+}
+
+#[divan::bench]
+fn tape_reads_48k(bencher: Bencher) {
+    case(
+        bencher,
+        forty_eight,
+        UNCONTENDED,
+        TAPE_READS,
+        false,
         FORTY_EIGHT_FRAME,
     );
 }

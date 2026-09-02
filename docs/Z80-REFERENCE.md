@@ -35,7 +35,7 @@ site that takes it — selects HL, IX or IY, and the entire instruction set work
 > **It is recorded rather than quietly renamed, because it had already been caught and the fix did
 > not reach this file.** [`ARCHITECTURE.md:150`](ARCHITECTURE.md) carries the note that *"two
 > independent reviewers found `grep hl_base` returning zero hits while this document described it
-> as the decision 'everything hangs on'"*, and [`STATUS.md:540`](STATUS.md)'s M1 hardening-round
+> as the decision 'everything hangs on'"*, and [`STATUS.md:1127`](STATUS.md)'s M1 hardening-round
 > table records the resolution — *"fixed; `base` threaded, so `DD 29` becomes `ADD IX,IX` with no
 > new code"*. Two documents found the phantom in a third. **Neither of them carried the fix all the
 > way**, and the sweep run for this correction says exactly where it stopped: `ARCHITECTURE.md`
@@ -53,7 +53,7 @@ site that takes it — selects HL, IX or IY, and the entire instruction set work
 > grepped for every other copy of the thing you corrected.**
 >
 > Same class as `Cpu::pc()`, which `MACHINE.md` documented as an available method for two
-> milestones and which never existed — `MACHINE.md:791`, under *What the CPU already gives the
+> milestones and which never existed — `MACHINE.md`, under *What the CPU already gives the
 > machine*, records that correction. A name is a claim about the code, and it is the cheapest claim
 > in any of these documents to check.
 
@@ -435,21 +435,40 @@ These are conformance suites, not code. They are fetched locally into `testdata/
 vendored into this repository.
 
 > **Correction — this said `testdata/` is *"gitignored"*, full stop, and that is incomplete in the
-> one place it matters.** `.gitignore` carries `testdata/**` and then **un-ignores by exception**:
-> `!testdata/.gitkeep`, `!testdata/README.md`, `!testdata/roms/`, `!testdata/roms/48.rom`. So the
-> Sinclair 48K ROM **is committed** — `git ls-files testdata/` returns `.gitkeep`, `README.md` and
-> `roms/48.rom` — under the permission quoted in [`../testdata/README.md`](../testdata/README.md),
-> and because a subtly wrong ROM is the one corpus failure no harness here would explain.
+> one place it matters.** `.gitignore` carries `testdata/**` and then **un-ignores by exception**,
+> one named path per line. So the Sinclair ROMs **are committed** — under the permission quoted in
+> [`../testdata/README.md`](../testdata/README.md), and because a subtly wrong ROM is the one corpus
+> failure no harness here would explain. *Which* paths those are is a question git already answers:
+> `git ls-files testdata/` prints what is committed and `grep '^!' .gitignore` prints every
+> exception there is, both from the repository root. Run them — a list here would be a second copy
+> of both, and this block is what that copy costs.
+>
 > `README.md`'s *Test data* table states this correctly and `MACHINE.md` calls it *"the committed
 > ROM"*; this line did not, and is corrected to match rather than left as the odd one out.
 >
-> > **The last exception was `!testdata/roms/*.rom` when this block was written, and it is now one
-> > explicit filename per ROM.** The quotation above is corrected in place rather than annotated,
-> > because it is a transcription of another file and a transcription that has drifted is simply
-> > wrong. Why the glob went: it accepts *any* file ending in `.rom` — a game cartridge, a Multiface
-> > image, an Interface 1 ROM — and the permission this repository relies on **disclaims** the
-> > Interface 1 and 2 ROMs as not Amstrad's copyright at all. A glob turns *"may we redistribute
-> > this?"* from a decision into an accident.
+> > **`.gitignore`'s last exception was `!testdata/roms/*.rom` when this block was written — a
+> > historical quotation, fixed to M6 (2026-09-01), and not a description of the file today.** The
+> > glob was live from M5 until the M7 memory commit replaced it later the same day with one
+> > explicit filename per ROM; quoting the superseded form is the entire point here, so it is not
+> > refreshed and must not be. Why the glob went: it accepts *any* file ending in `.rom` — a game
+> > cartridge, a Multiface image, an Interface 1 ROM — and the permission this repository relies on
+> > **disclaims** the Interface 1 and 2 ROMs as not Amstrad's copyright at all. A glob turns *"may
+> > we redistribute this?"* from a decision into an accident.
+> >
+> > **This note also used to prescribe the remedy that failed.** Where the paragraph above now
+> > names two commands, it used to transcribe their answers — the four un-ignore rules of the day,
+> > and the three paths `git ls-files` returned — and this note said that transcription was
+> > *"corrected in place rather than annotated, because it is a transcription of another file
+> > and a transcription that has drifted is simply wrong"*. The diagnosis is right and the remedy is
+> > not: correcting a transcription in place only resets its clock. That list went stale twice more
+> > — the 128's ROM pair landed at M7 and this block never learned of it, and `.gitignore` has since
+> > un-ignored `testdata/games/` and the provenance record inside it — while the `git ls-files`
+> > output quoted beside it went wrong on the first of those and stood one commit from the second
+> > when both were read again on 2026-09-02. So the two are gone rather than corrected a third time,
+> > and the commands that produce them stand where they were. **A correction goes stale exactly as a
+> > claim does, and is the harder failure to catch, because it wears the costume of a fix** — the
+> > same trap `README.md` records in its own nested correction, under *"the note outlived the
+> > defect it named"*.
 >
 > Absence is not silent. A missing corpus makes its gate **fail**, naming the fetch instructions;
 > `ZX_CORPUS_ALLOW_MISSING=1` is the deliberate opt-out and is **refused** when `CI` is also set.
