@@ -45,23 +45,47 @@ use common::{Document, Repository, backtick_spans};
 /// **Measured, not chosen.** Against the tree as it stood, every backticked snake_case token
 /// that named something outside this repository — `split_at_checked`, `panic_bounds_check`,
 /// `miniquad_add_plugin`, `js_unwrap_to_buf`, `get_dropped_files`, twenty-six more — had
-/// **four segments or fewer**, and every one that named a test of ours had **seven or more**.
-/// The gap between four and seven is empty, so a floor of five sits in it with room on both
-/// sides rather than on top of the data.
+/// **four segments or fewer**, and every one that named a test of ours had seven or more. The
+/// gap between four and seven was empty, so a floor of five sat in it with room on both sides
+/// rather than on top of the data.
 ///
-/// It admits 913 of this repository's 922 `#[test]` functions. Raising it to silence a
-/// finding is the obvious way to disarm this gate, so it cannot be done quietly: the floor
-/// grades itself against the repository's own test names, and a floor that stops admitting
-/// almost all of them turns [`the_shape_this_gate_looks_for_is_the_shape_this_repository_writes`]
-/// red.
+/// # The gap has since closed from both directions, and the floor is now load-bearing
+///
+/// That paragraph is kept because it is how the number was arrived at, but the tree it
+/// describes is gone and the argument it makes no longer holds. Swept again on 2026-09-03:
+/// the repository's own cited names now reach down to **five** segments and are common at
+/// six, and on the other side at least one outsider has reached five as well —
+/// `clippy::multiple_unsafe_ops_per_block`, whose lint name written without its `clippy::`
+/// qualifier is a five-segment lowercase token this floor cannot tell from a test of ours.
+///
+/// So five is no longer a comfortable seat in an empty gap. It is the boundary itself, and
+/// both directions off it now cost something real: raising it drops citations that name live
+/// tests, and lowering it admits library and lint names. That is a **stronger** reason not to
+/// move it than the original one, not a weaker one — the number stopped being arbitrary and
+/// started being measured by the data on either side of it.
+///
+/// The count of this repository's own tests the floor admits is deliberately not written
+/// here any more. It was — as a pair of literals — and both had drifted by more than a
+/// hundred before anyone noticed, inside the file whose subject is exactly that. The figure
+/// is derived on every run instead, by
+/// [`the_shape_this_gate_looks_for_is_the_shape_this_repository_writes`], which prints what it
+/// measured when it fails. Raising this floor to silence a finding is the obvious way to
+/// disarm the gate, and that assertion is what makes it impossible to do quietly.
 const FEWEST_SEGMENTS: usize = 5;
 
 /// The percentage of this repository's own test names the floor must keep admitting.
 ///
-/// Not 100: nine tests are genuinely short (`state_round_trips`, `every_pixel_is_opaque`),
-/// and a gate that forbade a short name would be legislating style rather than catching rot.
-/// 95 leaves room for a few more of those and none at all for raising the floor past the
-/// empty gap.
+/// Not 100: a handful of tests are genuinely short (`state_round_trips`,
+/// `every_pixel_is_opaque`), and a gate that forbade a short name would be legislating style
+/// rather than catching rot. The margin between this and what the floor actually admits is
+/// what leaves room for a few more of those and none at all for raising the floor.
+///
+/// The handful was written here as **nine**, and was thirteen by the time anybody counted.
+/// The literal is gone for the same reason [`FEWEST_SEGMENTS`]'s is: the live figure is the
+/// difference between the two counts
+/// [`the_shape_this_gate_looks_for_is_the_shape_this_repository_writes`] measures and prints
+/// when it fails, so a sentence here restating it can only be a second copy waiting to
+/// disagree with the first.
 const NAMES_THE_FLOOR_MUST_ADMIT: usize = 95;
 
 /// A name the prose discusses in the past tense.
@@ -80,16 +104,30 @@ struct Removed {
 /// [`every_deleted_name_is_still_absent_and_still_discussed`] fails an entry that has come
 /// back and an entry nobody mentions any more — so it cannot become the quiet place a real
 /// finding goes to be silenced.
-const DELETED_ON_PURPOSE: [Removed; 1] = [Removed {
-    name: "every_key_is_visible_to_a_scan_of_its_own_half_row",
-    why: "Removed at M6. It derived both the port it scanned and the value it expected from \
-           Key::position(), the function under test, so it proved read() and position() \
-           agree and could say nothing about whether either matched hardware — under a \
-           review that permuted the matrix, 38 of 40 keys moved and the suite stayed green. \
-           crates/spectrum/tests/keyboard_matrix.rs replaced it with a literal table. The \
-           four sentences that name it all discuss it in the past tense, and they have to be \
-           able to.",
-}];
+const DELETED_ON_PURPOSE: [Removed; 2] = [
+    Removed {
+        name: "every_key_is_visible_to_a_scan_of_its_own_half_row",
+        why: "Removed at M6. It derived both the port it scanned and the value it expected from \
+              Key::position(), the function under test, so it proved read() and position() \
+              agree and could say nothing about whether either matched hardware — under a \
+              review that permuted the matrix, 38 of 40 keys moved and the suite stayed green. \
+              crates/spectrum/tests/keyboard_matrix.rs replaced it with a literal table. The \
+              four sentences that name it all discuss it in the past tense, and they have to be \
+              able to.",
+    },
+    Removed {
+        name: "a_stopped_tape_is_silent",
+        why: "Renamed to a_tape_that_was_never_started_is_silent when the tape reached the \
+              speaker: the name was broader than its fixture. Tape::new leaves the level low \
+              and the motor off, so what it graded was a cassette that has never been played — \
+              not one that was played and then stopped, which is a different state and is not \
+              silent: Tape::stop holds the signal where it stands, so a tape stopped on a high \
+              half-period holds the line high. crates/spectrum/tests/tape_signal.rs argues the \
+              rename where the test lives, grades the stopped-on-high state with two gates of \
+              its own, and recounts the old name in the past tense — the sentence this entry \
+              exists to keep legal.",
+    },
+];
 
 // ---------------------------------------------------------------------------------------
 // Extraction
@@ -218,6 +256,26 @@ fn definitions_on(line: &str, keyword: &str, openers: &[char]) -> Vec<String> {
 /// The attribute and the signature are separated by anything from nothing to a four-line
 /// `#[ignore = "…"]`, so the search runs forward a bounded distance rather than assuming
 /// adjacency.
+///
+/// # A recorded limit, rather than one nobody has looked at
+///
+/// The attribute is matched as a **line of its own**, and the **first** `fn` after it is the
+/// one taken. Both are narrower than Rust allows. An attribute sharing its line with anything
+/// else, and two `fn` keywords on one signature line, are shapes this repository does not
+/// write — swept while this note was added, every `#[test]` in the tree is the attribute
+/// alone — so widening the scan would be inventing a population to grade.
+///
+/// It is written down rather than left implicit because a scan that silently declines an
+/// input is the failure this whole directory hunts, and because the alternative reading is
+/// available and wrong: the narrowness is a bet on a convention, not a property of Rust. What
+/// backs the bet is that breaking it costs names, and losing names drives
+/// [`the_shape_this_gate_looks_for_is_the_shape_this_repository_writes`] *down* against its
+/// floor — the safe direction, since a scan that finds fewer tests reddens rather than
+/// quietly grading less.
+///
+/// No count is given here on purpose. One was, for the length of an afternoon, and the tree
+/// gained eleven tests before the paragraph was finished — which is the whole subject of
+/// [`FEWEST_SEGMENTS`]'s own correction two screens up.
 fn test_names(documents: &[Document]) -> Vec<String> {
     /// The most lines an attribute block between `#[test]` and its `fn` has ever taken here.
     const ATTRIBUTE_ROOM: usize = 12;
@@ -231,7 +289,7 @@ fn test_names(documents: &[Document]) -> Vec<String> {
             }
             let room = lines[index + 1..].iter().take(ATTRIBUTE_ROOM);
             names.extend(
-                room.filter_map(|l| definitions_on(l, "fn ", &['(', '<']).pop())
+                room.filter_map(|l| definitions_on(l, "fn ", &['(', '<']).into_iter().next())
                     .take(1),
             );
         }
@@ -295,9 +353,20 @@ fn every_cited_test_name_is_a_function_that_exists() {
 /// as far as the end of a thought and no further — so the failure message says so rather
 /// than leaving the reader to grep. When nothing is close it says nothing, which is the
 /// honest answer more often than a guess would be.
+///
+/// # "Close" needed a floor, because a short name is a prefix of everything
+///
+/// The prefix test alone had no notion of how much of the name had to match, and this
+/// repository defines a function called `a`. So a citation of a genuinely missing test came
+/// back reported as *"did you mean `a`?"* — a confident, useless suggestion attached to a
+/// true finding, which is the shape [`crate`]'s sibling `cited_lines.rs` spends a page
+/// arguing a gate must never produce. Candidates are now limited to names the gate would
+/// itself grade: a suggestion that is not test-shaped is not a truncation of a test name, it
+/// is a coincidence of spelling.
 fn nearest_relative(name: &str, defined: &BTreeSet<String>) -> String {
     let candidates: Vec<&String> = defined
         .iter()
+        .filter(|known| is_test_name_shaped(known))
         .filter(|known| known.starts_with(name) || name.starts_with(known.as_str()))
         .collect();
     match candidates.as_slice() {
@@ -436,7 +505,8 @@ fn the_name_gate_is_capable_of_failing() {
     // fastidiousness: written as literals, they were extracted from this file's own source
     // by the gate above, which reported them on its first run against the tree. A control
     // that fails the thing it is a control for is worse than no control.
-    let defined = defined_names(Repository::walk().documents());
+    let repository = Repository::walk();
+    let defined = defined_names(repository.documents());
     let phantom_name = "the_name_gate_is_capable_of";
     let truncated = cited_names(&format!("`{phantom_name}` grades the other branch"));
     let [(_, name)] = truncated.as_slice() else {
@@ -452,7 +522,6 @@ fn the_name_gate_is_capable_of_failing() {
         "a truncation must be reported as one; that is what both real hits were",
     );
 
-    let repository = Repository::walk();
     let phantom_file = "crates/testsupport/tests/no_such_gate.rs";
     let promised = cited_test_paths(&format!("kept honest by `{phantom_file}`"));
     let [(_, path)] = promised.as_slice() else {

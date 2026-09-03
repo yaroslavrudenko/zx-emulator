@@ -58,8 +58,10 @@ const WRITE_AT: u32 = 7 + OUT_TO_PORT_CYCLE;
 /// The frame line the display's first pixel row falls on, **hand-derived per machine**.
 ///
 /// A 48K contends from 14335, which is one T-state short of `64 x 224`, so the line containing
-/// it is the last border line and the display starts on line 64. A 128 contends from 14361,
-/// three T-states short of `63 x 228`, so its display starts on line 63.
+/// it is the last border line and the display starts on line 64. A 128 contends from **14362**,
+/// two T-states short of `63 x 228`, so its display starts on line 63. *(This said 14361 and
+/// "three T-states short", and the line number it derives is unchanged either way — which is
+/// exactly why nothing noticed when `timing_oracle.rs` moved the constant on 2026-09-02.)*
 const DISPLAY_LINE_48K: u32 = 64;
 const DISPLAY_LINE_128: u32 = 63;
 
@@ -69,8 +71,18 @@ const ROW_0_LINE_128: u32 = DISPLAY_LINE_128 - BORDER as u32;
 
 // The two derivations, written out so they are readable rather than inferred from the four
 // constants above.
-const _: () = assert!(DISPLAY_LINE_48K * 224 - 14335 == 1);
-const _: () = assert!(DISPLAY_LINE_128 * 228 - 14361 == 3);
+//
+// **Against the shipped constants rather than against literals, and that is the repair.** These
+// read `- 14335 == 1` and `- 14361 == 3`. The 48K literal was right; the 128 literal became
+// wrong on 2026-09-02 and **this assertion stayed green**, because a literal cannot disagree
+// with a constant it does not mention. Reading the offset out of `Timing` makes the derivation
+// go red the moment the number under it moves, which is the whole reason it was written down.
+const _: () = assert!(DISPLAY_LINE_48K * T_STATES_PER_LINE - FIRST_CONTENDED_T_STATE == 1);
+const _: () = assert!(
+    DISPLAY_LINE_128 * Timing::SPECTRUM_128.t_states_per_line()
+        - Timing::SPECTRUM_128.first_contended_t_state()
+        == 2
+);
 const _: () = assert!(ROW_0_LINE_48K == 32 && ROW_0_LINE_128 == 31);
 
 /// Put a border write of `colour` on the machine so that it reaches the port at exactly

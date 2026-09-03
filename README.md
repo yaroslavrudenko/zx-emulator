@@ -631,6 +631,237 @@ flag behaviour that most emulators quietly skip.
 
 ---
 
+## After the release — the work that came from listening
+
+The milestone table above ends at M8 and every row in it is a build gate, a corpus or a boot
+message. **None of them can hear.** `crates/frontend/src/audio.rs` has said so since M8 in the one
+row of its own table that matters — *"**That it sounds right** — **nothing.** There is no oracle for
+a tune"* — and that row is where this section comes from. The machine was finished, the gates were
+green, and then somebody put headphones on.
+
+Two defects came out of that, reported together on 2026-09-03. Neither was a wrong number and
+neither was caught by any gate, because both were a **missing connection** rather than a bad
+calculation — the class a green suite is structurally unable to find.
+
+**Fixing them produced two more, and those are the interesting ones.** The repair for the silent
+tape cost 23% of a frame; the repair for the clicking shipped with its control loop inverted. Both
+passed every gate that covered them. They are in the table below with the originals rather than
+above it, because a section that recorded only the defects somebody else caused would be the same
+kind of document this project spends its comments arguing against.
+
+| # | What was heard | What it actually was | State |
+|---|---|---|---|
+| **S1** | A tick through the music every few seconds | Frames of audio being **discarded** whenever the queue passed its ceiling | **fixed** — the rate is corrected instead, `Resampler::track` |
+| **S2** | Loading a tape was silent | The `EAR` line reached the CPU and **nothing else** — no path to the speaker existed | **fixed** — `Sample::tape`, mixed in the frontend |
+| **S3** | The tape, once audible, was too quiet | `TAPE_GAIN` was ruled at `0.5` by reasoning, and measured at 2.5% of full scale against the beeper's 12.9% | **partly fixed** — `0.9`, which is the ceiling a gate allows; see S4 |
+| **S4** | — | Every source divides by one shared `FULL_SCALE`, so loudness given to the tape is **taken from the beeper**. At `TAPE_GAIN = 2.0` a lone beeper fell to 34.6% of the mix and the clipping gate failed on its own words: *"a 48K would be thin"* | **open** — a design change, not a constant |
+| **P1** | — | The fix for S2 cost **+23% of a frame** on a machine with no tape in the drive | **fixed** — the tape reports its own edge |
+| **P2** | — | The S1 control loop's **sign was inverted** — the setpoint was a repeller | **fixed**, and closed-loop gates added |
+| **P3** | — | `Envelope::level` could not prove its range: a bounds check and an underflow check per AY sample | **fixed** — a mask, +1 LOC |
+| **P4** | — | **No benchmark played a tape**, which is why P1 shipped green | **fixed** — `tape_playing_48k`; the lesson stands |
+
+### S1 — the tick was a discarded frame, and the ceiling that discarded it was doing its job
+
+The emulator paces itself to the machine's own frame rate — 50.08 Hz on a 48K — and a sound card
+consumes exactly one second of samples per wall second off a crystal that agrees with nothing. The
+two are open-loop, so their difference **accumulates**: a fifth of a percent is half a sample per
+frame, and it was observed in a browser as 210 ms of backlog after four minutes and still climbing.
+
+The frontend closed that by refusing to push a frame once the backlog passed 100 ms. The latency
+was bounded and **that is what a person heard as a tick**: declining to push a frame takes 20 ms
+out of the middle of a waveform, which is a discontinuity, which is a click, recurring on a period
+set by the drift. The mechanism was not broken — its *shape* was wrong, and the code said so out
+loud while doing it: *"drops one frame of audio — a click — which is the honest trade"*.
+
+`Resampler::track` closes the same loop by moving the output rate instead, by at most 0.5% — **8.6
+cents** of pitch, against roughly 25 cents of just-noticeable difference — spread across every
+sample rather than concentrated in one edge. Nothing is discarded, so there is no edge to hear. The
+target is **half** the buffer and not its ceiling, because a queue that is too shallow underruns and
+an underrun is silence.
+
+### S2 — the tape reached the CPU and stopped there
+
+M6 closed the `EAR` bit: bit 6 of a `0xFE` read follows the tape, the real ROM's `LD-BYTES` loads
+through it, and `crates/spectrum/tests/tape_rom_load.rs` proves nothing supplies a byte by any
+other route. All of that was true, and a machine built to it **loads tapes perfectly and in
+silence** — because on real hardware the `EAR` socket feeds the amplifier as well as the ULA, and
+nothing here modelled the second wire.
+
+![Exolon loading: the grey BASIC screen carrying "Program: EXOLON" at the top left, framed by the tightly alternating red and cyan border stripes the ULA draws while the loader is reading a header.](docs/images/tape-loading-sound.png)
+
+That picture was already possible before this change. What was missing is the sound that goes with
+it — the reason a person can tell a leader from a data block from a dropout without looking at the
+screen at all.
+
+`Sample` gained a fifth source, `Audio::set_tape` is driven from `Ula::advance` — the one place
+time passes — and the mix stays in the frontend where `docs/M8.md` Decision 9 put it. The recording
+that settled the gain is `.agent-workspace/full-review/shots/tape-load.wav`, and its dominant
+frequency measures **807 Hz**, which is the pilot tone: 2168 T-states a half-period at 3.5 MHz is
+807.2 Hz, and nothing in the fix was fitted to that number.
+
+**S4 is the interesting half and it is still open.** The first gain was ruled at `0.5` by argument
+and measured at 2.5% of full scale — five times quieter than the beeper, on a machine remembered
+for being unbearable while loading. Raising it to `2.0` made the tape right and **every 48K game
+quieter**, because the mix divides every source by one shared `FULL_SCALE` and there is only so
+much of it: `five_sources_at_full_scale_do_not_exceed_the_headroom` caught that on the sentence it
+was written with. The gate's own inequality — `BEEPER_GAIN / FULL_SCALE > 0.4` — solves to
+`TAPE_GAIN < 0.97`, so `0.9` is a ceiling and not a preference, and the tape sits at 4.2% instead
+of the 12.9% the speaker gets.
+
+The structural answer is that a shared denominator spends headroom on a combination that does not
+happen: **a tape loads before a game makes music, not during it.** Normalising per source, or
+bounding the sum some other way, would give the tape its real loudness without taking it from the
+beeper. That is a design change and it is deliberately not smuggled in as a constant.
+
+### P — what the performance audit found, and what it cost to learn
+
+The sound work above was reviewed by three independent passes over the whole workspace, and the
+first thing they found was **in the fix itself**. Both are recorded here rather than quietly
+corrected, because how each survived a green suite is worth more than the defect.
+
+| # | Finding | Measured | State |
+|---|---|---|---|
+| **P1** | The `set_tape` call added to `Ula::advance` cost **+23% of a frame**, on a machine with **no tape in the drive** | 11 of 11 bench cases regressed; `quiet_48k` 150.8 → 180.3 µs | **fixed** — 146.1 µs |
+| **P2** | The control loop's **sign was inverted**: the setpoint was a repeller | 8.9 s of backlog over 20 minutes of browser drift, against 74 ms correct | **fixed** |
+| **P3** | `Envelope::level` could not prove its own range, so every AY sample paid a bounds check and an underflow check | up to **1.33 M** compare-and-branch pairs per second | **fixed** — a mask, +1 LOC |
+| **P4** | **No benchmark played a tape.** Zero `insert_tape` calls across every bench case, when the audit ran | `tape_playing_48k`: 147.4 µs, ~1 µs over the same frame drained silent | **fixed** — the hole that let P1 ship green is a case now |
+
+#### P1 — "one bool load and one comparison" was wrong by nine instructions
+
+`Ula::advance` runs **69,888 times per emulated frame**, fifty times a second. The call added to it
+looked free, and its comment said so:
+
+```rust
+self.audio.set_tape(self.tape.level(), self.clock.t_states());
+```
+
+`set_tape` returns early when the level has not moved, so the expensive part — rendering audio — is
+guarded. **The argument is not.** Rust evaluates arguments before the call, and
+`Clock::t_states()` is a 64-bit multiply-add; under this workspace's `overflow-checks = true` that
+is not one instruction but six, with two branch edges. The disassembly puts nine of them ahead of
+the comparison the comment called the whole cost:
+
+```asm
+ldr   x10, [x0, #0x2f0]   ; clock.frames
+umulh x11, x10, x8        ; overflow-check half-multiply
+cmp   xzr, x11
+b.ne  <panic>
+mul   x8, x10, x8
+adds  x1, x8, w9, uxtw
+b.hs  <panic>
+ldrb  w8, [x0, #0x2e5]    ; audio.tape
+cmp   w8, w19, uxtb       ; <-- the "one bool comparison" is HERE
+```
+
+`#[inline]` recovered nothing — the arguments are evaluated regardless. What recovered all of it
+was noticing that **the information already existed**: `Tape::finish_pulse` is the only thing that
+moves the `EAR` level, it runs inside `Tape::advance`, and it was throwing the edge away for the
+caller to reconstruct by comparison. Returning it puts the multiply inside a branch that is taken
+only when there is something to timestamp. `Tape::advance` is `pub(crate)`, so the public API did
+not move.
+
+**`overflow-checks = true` is what made this expensive, and it stays.** It is a deliberate
+correctness-first ruling — this is an emulator whose premise is that every wrap is written as an
+explicit `wrapping_*` call, and a silently wrapping *cycle counter* is a defect nothing would
+catch. The audit measured its cost and recommended keeping it; so does this note.
+
+#### P2 — the loop pushed the queue away from where it was aiming
+
+`Resampler::track` shipped with its correction inverted, on reasoning that reads as obvious and is
+false: *a deep queue is drained by consuming input faster, so take a larger step.* The input rate
+is not the resampler's to choose — the machine emits 2,184 samples per frame whatever happens — and
+`feed` turns each one into `corrected_step / cpu_hz` **outputs**. A larger step puts *more* into a
+queue draining at a fixed device rate. The setpoint was a repeller: simulated against twenty
+minutes of browser drift it reached **8.9 seconds** of latency where the correct sign held 74 ms.
+
+**Every test written for it passed under the wrong sign**, and the reason is the shape of the test
+rather than its assertions: they pinned the queue depth and measured the output. A pinned queue is
+an *open* loop — it grades direction and gain, and cannot ask whether applying the correction moves
+the error toward zero or away from it. `the_loop_converges_instead_of_running_away` and
+`a_drifting_emulator_does_not_accumulate_latency` close that: they run the loop **closed**, feeding
+the queue what `feed` produced and draining it at the device's own rate.
+
+#### P4 — the hole, which is the part worth keeping
+
+`benches/frame.rs` covered eleven cases and **none of them put a tape in the drive**. A regression
+on the tape path was therefore invisible to the one instrument that would have caught it, and it
+took a reviewer running the bench A/B against a hand-reverted tree to find a fifth of a frame.
+
+That is the generalisable lesson of this whole section: **the two defects were in the new code, and
+both were invisible to the gates that covered it** — one because no benchmark exercised the path,
+the other because the test held constant the very quantity whose motion was the property under
+test. Neither was a wrong number. Both were a gate measuring the wrong thing while reading green.
+
+**Closed the same day, 2026-09-03.** `benches/frame.rs` carries `tape_playing_48k` now —
+`drained_48k` plus a cassette actually turning, a ROM pilot tone under the same `NOP` frame, so
+the difference between the two rows is the whole of the tape path and nothing else. It measured
+147.4 µs that afternoon against `drained_48k`'s 146.3: a turning cassette prices at about a
+microsecond a frame, on record in the one instrument that would have caught the thirty-microsecond
+version. The lesson above stays as written, because the case exists *because* it was missing.
+
+### The optimization campaign — five small changes, and the refusals worth as much
+
+The three passes did not stop at the defects in the fix; they graded the whole workspace, and the
+verdict on the performance axis is the context for everything below: **the codebase was already
+clean.** Zero `dyn` dispatch, zero allocation on any per-frame path, bounds checks provably elided
+through the memory and render paths, a maximal release profile, and a benchmark whose whole job is
+defending that. So what followed was surgery rather than a rewrite — five changes, each landed on
+2026-09-03 with its measurement attached.
+
+| What moved | What it removed, measured | Cost |
+|---|---|---|
+| `Envelope::level` masks its position instead of letting the compiler doubt it | up to 1.33 M compare-and-branch pairs a second and three panic pads out of the AY loop — the mask makes the range provable, the same idiom the memory map already documents | +1 line |
+| The browser worklet's chunk array became a preallocated power-of-two `Float32Array` ring | the browser audio queue's missing ceiling — the desktop's written rule, drop rather than grow, holds in the browser now too — plus a five-load per-sample guard and per-sample field writes that block copies do instead | the worklet rewritten: 46 code lines became 67, and a ceiling it never had |
+| The desktop queue takes a frame of samples in one bulk `extend` | ~99 % of the audio mutex's hold time. The real-time callback shares that lock; the lock-free ring that removes it entirely was priced at +30 lines and refused, so a critical section a hundred times shorter is the clean mitigation | −6 lines |
+| `bundle::acknowledgement()` computes once behind a `LazyLock` | a whole-ROM `b"Sinclair"` scan that ran sixty times a second to answer a question whose answer cannot change while the process lives | +3 lines |
+| `Memory::is_contended` reads one derived `contended_slots` cache, rebuilt on the paging write | a dependent load→branch→load→load chain on ~3.5 M contention tests a second: ten instructions, three loads and two branches per test became four, one and one | +11 lines |
+
+The last row is the only one the frame benchmark can see, and it moved the headline number:
+`quiet_48k` went **143.4 → 138.8 µs, −3.2 %**, measured 2026-09-03 as the lowest median of
+interleaved before/after runs on a loaded machine — one-minute load 8.6–11.4 on 16 cores, another
+job ran throughout — with a per-run floor that repeated to the tenth of a microsecond on both
+sides: 143.3 µs in four runs of four before, 138.7 µs in every undisturbed run after. A floor that
+bit-stable is a change in the code's cycle count, not sampling luck. Ten of the twelve bench cases
+improved by 1.5–3.5 %; the two that did not rest on single anomalous runs each, dissected rather
+than laundered in the audit record. And zero new panic pads: 133 before, 133 after, counted over
+the whole disassembly.
+
+**The refusals are the other half of the result, and they were measured rather than assumed.** The
+z80 core is at a local optimum. `wrapping_add` on the register-pair increment — the obvious
+one-word fix for three overflow-check pads — made codegen strictly worse: twenty-one check sites
+where there had been three, eight of them at `t_states += 1`, the hottest statement in the
+program, because the wrapping form destroys the range fact the *successful* check was feeding
+LLVM. `#[inline]` on the two out-of-line functions produced a byte-identical binary. Erasing the
+register newtypes traded one bounds check for an extra overflow check and a larger binary. And the
+things that look wasteful on paper were checked and found already optimal: the parity flag lowers
+to a three-instruction xor-fold with no table, whole `internal_cycles` loops coalesce into a
+single constant move, and the two function-pointer parameters devirtualise to zero indirect calls
+under the LTO this ships with. All of it stays as written, with the numbers on record, so the next
+person tempted by the same obvious wins knows they were bought once and returned.
+
+The campaign also closed the second instrument hole it was run under — P4's is above. The audit's
+last item read: the hot-path invariant is prose, and prose does not go red. `web/gate.sh` now
+holds `quiet_48k` to a recorded ceiling — the 138.7 µs floor under a margin the audit's own
+variance data set, derivation dated at the step itself — so the next P1-class regression turns the
+pre-push gate red on the machine the baseline was recorded on, instead of waiting for somebody to
+run a bench A/B against a hand-reverted tree. Nothing runs that gate automatically; that hole is
+older than this section, and it is still open where `docs/STATUS.md` records it.
+
+### The games these were tested against
+
+![R-Type's Torasoft loader on a 128: white text on black reading R-TYPE - 128K, ELECTRIC DREAMS ©1987, and three lines crediting a 1993 128K remix, a trained +3 pack and a turbo loader.](docs/images/rtype-loader.png)
+
+**R-Type takes 28,429 frames of tape to load** — nine and a half minutes of emulated cassette, and
+the number is printed by `zx-shot --keys-after` rather than estimated. It is a turbo loader, which
+makes it the harshest test of the `EAR` path in this repository: the timing margins a turbo block
+uses are far tighter than the ROM loader's, and the sampling point is a known approximation with a
+stated size — see `crates/spectrum/src/ula.rs`, *"the level is read up to four T-states early"*.
+
+![R-Type's attract screen: R TYPE 9 TECHNICAL SPECIFICATION in red at the top, a green wireframe cutaway of the ship at the right, its specification listed in white at the left, the ELECTRIC DREAMS logo in cyan at the centre, and two more craft drawn below.](docs/images/rtype-spec.png)
+
+It loads, and it runs to its attract loop. Both screenshots came out of `zx-shot`, headless, on the
+same pipeline the window runs.
+
 ## Layout
 
 ```

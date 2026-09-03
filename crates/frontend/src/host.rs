@@ -1,12 +1,33 @@
 //! What the user asked for, and how bytes get out.
 //!
-//! # This module is the entire `wasm32` seam
+//! # This module holds two of the four `wasm32` seams, and the other two do not pass through it
+//!
+//! > **This heading said *"This module is the entire `wasm32` seam"* and counted the
+//! > non-portable calls at *"two"*. Both halves are now false, and the sentence was the crate's
+//! > most load-bearing doc claim — `crates/page/src/lib.rs:5` quotes it, `tests/portability.rs`
+//! > calls the `cfg(target`-free property *"the **only** thing that makes a host-run test say
+//! > anything at all about a `wasm32` build"*, and `docs/M8.md` Decision 7's T1 tier rests on
+//! > the seam being enumerable in one file.** `crates/page` has **four** target-conditional
+//! > entry points, and the audio pair is called from `main.rs` directly:
+//! >
+//! > | Entry point | Reached through | What it is |
+//! > |---|---|---|
+//! > | [`page::query_string`] | **this file**, [`arguments`] | where the arguments come from |
+//! > | [`page::offer_download`] | **this file**, [`save`] | how bytes get out |
+//! > | `page::audio_rate` | `main.rs`, the frame loop | whether there is a device, and at what rate |
+//! > | `page::audio_push` | `main.rs`, the frame loop | how samples reach it |
+//! >
+//! > A reader auditing `wasm32` behaviour from this file would not find the audio path at all —
+//! > which is how an unbounded browser audio queue reached a branch. The structural repair is
+//! > to route audio through a module the way arguments and downloads are routed through this
+//! > one; that is a larger call than a doc correction and it is recorded as an open item rather
+//! > than performed here. What is fixed is the claim.
 //!
 //! `docs/ARCHITECTURE.md` puts M8 at *"WASM + macroquad — playable from a URL"*, and the way
 //! to make that a build change rather than a rewrite is to keep the count of non-portable
-//! calls small enough to list. It is two: **where the arguments come from**, and **how bytes
-//! get out**. Everything else in this crate is portable already, by three deliberate choices
-//! made here rather than discovered later:
+//! calls small enough to list. **This module's** two are **where the arguments come from** and
+//! **how bytes get out**. Everything else *in this module* is portable already, by three
+//! deliberate choices made here rather than discovered later:
 //!
 //! - Time comes from [`macroquad::time::get_frame_time`] and [`macroquad::time::get_time`],
 //!   never from [`std::time::Instant`]. `Instant::now` is the usual thing that makes an
@@ -15,14 +36,21 @@
 //! - Bytes come in through [`macroquad::file::load_file`], which is `async` on both targets
 //!   and is a `fetch` in a browser. The `async fn main` that `#[macroquad::main]` already
 //!   provides is what makes that free.
-//! - Nothing in the frame loop touches the filesystem.
+//! - Nothing on the **per-frame** path touches the filesystem. *This said "nothing in the frame
+//!   loop", and the frame loop is where `F2` is handled:* [`save`] runs from inside it, and
+//!   [`free_path`] probes up to `NAME_LIMIT` candidate names with a [`Path::exists`] each before
+//!   `std::fs::write`. `free_path`'s own doc already draws the finer line — *"not on any
+//!   per-frame path"* — which is right about *per-frame* and was wrong about *in the frame
+//!   loop*. On a cold filesystem that is a visible hitch on the thread that draws, once, on a
+//!   keypress; `free_path` says what it costs.
 //!
 //! # Why there is still no `#[cfg]` here
 //!
-//! Both non-portable calls now have browser implementations, and **neither of them is in this
-//! file**. They are in `crates/page`, whose two entry points compile and behave on every
-//! target: [`page::query_string`] is empty off `wasm32`, and [`page::offer_download`] answers
-//! [`page::Handoff::NoPage`], which is what routes [`save`] back to the filesystem.
+//! Every non-portable call now has a browser implementation, and **none of them is in this
+//! file**. They are in `crates/page`, whose entry points compile and behave on every target:
+//! [`page::query_string`] is empty off `wasm32`, [`page::offer_download`] answers
+//! [`page::Handoff::NoPage`], which is what routes [`save`] back to the filesystem, and the
+//! audio pair falls through to a `tinyaudio` device.
 //!
 //! So the target-conditional code in this workspace is confined to one crate that exists for
 //! it, and `tests/portability.rs` asserts the absence here as a property rather than leaving

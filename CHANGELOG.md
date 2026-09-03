@@ -1,8 +1,18 @@
 # Changelog
 
-Notable changes to the published surface of **this workspace** — `crates/z80` and
-`crates/spectrum`. Milestones are recorded even before the first release, because each crate's API
-is being frozen decision by decision and the moment each one stopped being free is worth knowing.
+Notable changes to the published surface of **this workspace** — `crates/z80`, `crates/spectrum`
+and `crates/frontend`. Milestones are recorded even before the first release, because each crate's
+API is being frozen decision by decision and the moment each one stopped being free is worth
+knowing.
+
+> *This line named two crates while the second blockquote below records the deliberate decision to
+> widen it to three, taken on 2026-09-01.* The reasoning moved and the scope sentence did not, so
+> `crates/frontend`'s entries sat in a file that said it did not cover them — which is the exact
+> shape `docs/STATUS.md` calls *"a row nobody re-reads keeps asserting, with the register's
+> authority, a thing the code stopped doing"*. `crates/page` is deliberately **not** in the list:
+> its whole surface is an FFI seam consumed by `crates/frontend` and nothing outside this
+> workspace can call it, so a change there is a change to `crates/frontend`'s behaviour and is
+> recorded as one.
 
 **Every entry names its crate.** Entries written before M5 were `crates/z80` by definition and have
 been labelled as such; nothing in them changed.
@@ -47,6 +57,85 @@ been labelled as such; nothing in them changed.
 > "elsewhere" is `crates/frontend/src/lib.rs`'s gated / not-gated tables, and those are an
 > **evidence** register, not an API register. Pointing a reader asking *"did this break?"* at a
 > table answering *"is this tested?"* is the same conflation rejected above.
+
+## Unreleased — audio · `crates/spectrum` + `crates/frontend` — the tape became audible and the clicking stopped
+
+Two defects a person hears, reported together and fixed together. Neither was a wrong number: both
+were a missing connection and a loop that was never closed.
+
+### `crates/spectrum` — `Sample::tape`, the `EAR` line's own field
+
+**Added.** `Sample` gains a third field, and the mix a fifth source. The `EAR` line already reached bit 6 of a `0xFE` read —
+M6 closed that, and tapes loaded correctly because of it — but it reached **nothing else**, so a
+machine that loaded a tape perfectly did it in silence. On real hardware the socket feeds the
+amplifier as well as the ULA, which is why a loading Spectrum screeches and why a person can hear a
+leader, a data block and a dropout without looking at the screen.
+
+`Audio::set_tape` is driven from `Ula::advance` — the one place time passes, and therefore the one
+place the tape's level can change — **on the tape's own edge rather than on every T-state**, so the
+cost on a machine with no tape playing is the `bool` `Tape::advance` was already computing.
+
+> **That sentence said *"the same compare-before-render shape `set_beeper` uses"*, and shipping it
+> that way cost +23% of the emulator's speed.** `set_beeper` compares inside itself, which is right
+> for a setter called thousands of times a second; `Ula::advance` runs **69,888 times per frame**,
+> and Rust evaluates arguments *before* the call, so the timestamp — `Clock::t_states`, a 64-bit
+> multiply-add that under this workspace's `overflow-checks = true` compiles to two multiplies and
+> two branch-to-panic edges — ran on every elapsed T-state and was then thrown away by the guard
+> inside the callee. Measured on `benches/frame.rs`: **+19% to +30% across all eleven cases, mean
+> +23%**, on a machine with **no tape in the drive**.
+>
+> `Tape::advance` already knew when the level moved — `finish_pulse` is the only writer of it and
+> runs right there — so it returns that, and the timestamp is computed only when there is something
+> to timestamp. `Tape::advance` is `pub(crate)`, so the repair has no public-API delta. No benchmark
+> in this workspace played a tape, which is why the regression shipped green; `benches/frame.rs`
+> now has a `tape_playing_48k` case.
+
+**`Sample` is `#[non_exhaustive]`, so the new field is not a breaking change**, and the crate still
+mixes nothing: the tape is kept apart from the beeper for exactly the reason `docs/M8.md` Decision 9
+keeps the beeper apart from the AY. Gated by `the_tape_reaches_the_speaker_and_not_only_the_ear_bit`
+and `a_tape_that_was_never_started_is_silent` in `tests/tape_signal.rs`.
+
+### `crates/frontend` — `Resampler::track`, and the end of the dropped frame
+
+**Added**, and it replaces a ceiling that was doing real damage. The emulator paces to the machine's
+50.08 Hz; a sound card consumes one second per second off a crystal that agrees with nothing. The
+difference accumulates — observed in a browser as 210 ms of backlog after four minutes — so the
+frontend used to stop feeding the device once the queue passed 100 ms.
+
+**That is what a person heard as a tick every few seconds.** Declining to push a frame discards
+20 ms out of the middle of a waveform, which is a discontinuity, which is a click, recurring on a
+period set by the drift. The bound was correct and the mechanism was the wrong shape.
+
+`track` closes the same loop by moving the output rate instead, by at most `MAX_CORRECTION` — 0.5%,
+which is **8.6 cents** of pitch and reached only at the extremes of the queue. Nothing is discarded,
+so there is no edge to hear. The target is half the buffer rather than its ceiling, because a queue
+that is too shallow underruns and an underrun is silence.
+
+`mix` carries the tape at `TAPE_GAIN`, and `FULL_SCALE` grew to match, so the five-source case still
+cannot clip — gated by `five_sources_at_full_scale_do_not_exceed_the_headroom`, which was named for
+four until this entry.
+
+**Also added: `audio::queue_target`.** The setpoint was an expression in the frame loop —
+`device_hz() * page::BUFFER_MILLISECONDS / 2000`, where `2000` fused a unit conversion to a ruling
+— inside the one function this crate holds *"to plumbing"* because nothing in it can be graded. It
+is a named `const fn` with a test now.
+
+**Signature note, taken while it was still free.** `Resampler::track` was added in this same entry
+taking `queued: i32`, carrying `page::audio_push`'s `-1` sentinel into a public signature in a
+different crate; it takes `Option<u32>` before either ships. No released version had the `i32`
+form.
+
+**Also added: `media::DEFAULT_ROM` and `media::load_named`** — the same commit's de-duplication
+half rather than its audio half, recorded because an unrecorded `pub` item is exactly what
+widening this file to `crates/frontend` was for. The constant was declared twice, doc comment and
+all, once in each binary; the function is the recognise-load-or-say-why-not step `zx`'s drop path
+already owned and `zx-shot` now shares — which also changes what `zx-shot` prints for a 128
+snapshot on a 48K: `load_named`'s `Error::Model` arm names the ROMs that machine needs, where the
+binary's own copy of the decision had no such arm.
+
+**What is still not graded: that any of it sounds right.** Every assertion added here is arithmetic
+on a buffer. `crates/frontend/src/audio.rs`'s own table has said so since M8 and it is still the row
+to read twice — a person listening is the only instrument for this, and no gate substitutes for one.
 
 ## Unreleased — MEMPTR · `crates/z80` — an address latch that was nearly always zero
 

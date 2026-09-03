@@ -50,9 +50,14 @@
 //! therefore asks the slot map, not the address, from the start. Getting this wrong is not
 //! a bug that shows up as a crash; it shows up as a demo tearing three years later.
 //!
-//! **That is why M7 costs nothing on the hot path.** `is_contended` is byte-for-byte the
-//! function it was at M5; the only thing the 128 changes is the contents of the `contended`
-//! array it reads. Same branches, same loads, same code.
+//! **That is why M7 cost nothing on the hot path.** Through M8, `is_contended` was
+//! byte-for-byte the function it was at M5 — the only thing the 128 changed was the contents
+//! of the `contended` array it read. *(That sentence was present tense until the audio-glitch
+//! pass measured what it was defending: two dependent loads and two branches, on every memory
+//! access, for an answer that moves only on a `0x7FFD` write. `is_contended` now reads
+//! `contended_slots`, a third derived cache rebuilt in the same breath as `slots`, and the
+//! property this section argues survives the fold: the cache is derived from the slot map, so
+//! contention still follows the bank into whichever slot pages it.)*
 //!
 //! # The bank index is provably in range
 //!
@@ -280,6 +285,23 @@ const _: () = assert!(slot_maps_eq(
     SPECTRUM_48K_SLOTS
 ));
 
+/// The contention [`Memory::is_contended`] answers for each slot of `slots`.
+///
+/// The third derived cache, and the reason it exists is where its two callers sit:
+/// `is_contended` runs on every memory access — the call site in `crates/spectrum/src/ula.rs`
+/// is on what that file calls the hottest line in the emulator — while the inputs, the slot
+/// map and the per-bank contention table, move only on a `0x7FFD` write. So the bank lookup
+/// and its two branches are paid at the write, once, and the access path reads one `bool`.
+fn contended_slots_for(
+    slots: [Slot; SLOT_COUNT],
+    contended: [bool; BANK_COUNT],
+) -> [bool; SLOT_COUNT] {
+    slots.map(|slot| match slot {
+        Slot::Rom(_) => false,
+        Slot::Bank(bank) => contended[bank.index()],
+    })
+}
+
 /// A ROM image that is not one page long.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("a Spectrum ROM image is {expected} bytes; this one is {actual}")]
@@ -298,6 +320,9 @@ pub struct Memory {
     slots: [Slot; SLOT_COUNT],
     /// A derived cache of [`Model::contended_banks`], fixed for this machine's lifetime.
     contended: [bool; BANK_COUNT],
+    /// A derived cache of [`contended_slots_for`]`(slots, contended)`, rebuilt in the same
+    /// breath as `slots` and read by [`Memory::is_contended`] on every memory access.
+    contended_slots: [bool; SLOT_COUNT],
     model: Model,
     /// The last value written to `0x7FFD` — the SSOT for the map, the screen and the lock.
     paging_port: u8,
@@ -340,11 +365,14 @@ impl Memory {
     /// Cleared RAM, empty ROM pages, and `model`'s power-on paging state.
     fn blank(model: Model) -> Self {
         let paging_port = model.paging_port_at_reset();
+        let slots = slots_for(paging_port);
+        let contended = model.contended_banks();
         Self {
             ram: Box::new([[0; PAGE_SIZE]; BANK_COUNT]),
             rom: Box::new([[0; PAGE_SIZE]; ROM_COUNT]),
-            slots: slots_for(paging_port),
-            contended: model.contended_banks(),
+            slots,
+            contended,
+            contended_slots: contended_slots_for(slots, contended),
             model,
             paging_port,
         }
@@ -388,10 +416,7 @@ impl Memory {
     #[must_use]
     pub fn is_contended(&self, address: u16) -> bool {
         let (slot, _) = split(address);
-        match self.slots[slot] {
-            Slot::Rom(_) => false,
-            Slot::Bank(bank) => self.contended[bank.index()],
-        }
+        self.contended_slots[slot]
     }
 
     /// What the slot covering `address` currently shows.
@@ -485,6 +510,7 @@ impl Memory {
     pub(crate) fn set_paging_port(&mut self, value: u8) {
         self.paging_port = value;
         self.slots = slots_for(value);
+        self.contended_slots = contended_slots_for(self.slots, self.contended);
     }
 
     /// The reset button, as far as memory is concerned: the power-on map, lock cleared.

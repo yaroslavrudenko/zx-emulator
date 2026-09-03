@@ -136,10 +136,7 @@ use macroquad::input::KeyCode;
 
 use frontend::audio::{self, Resampler};
 use frontend::{bundle, host, keymap, media, palette, ppm, wav};
-use spectrum::{Frame, Spectrum};
-
-/// The ROM used when the command line names none.
-const DEFAULT_ROM: &str = "testdata/roms/48.rom";
+use spectrum::{Frame, Model, Spectrum};
 
 /// What `--media` accepts, as this binary says it out loud.
 ///
@@ -194,7 +191,8 @@ const DEFAULT_FRAMES: u64 = 120;
 ///
 /// Ten is unchanged and clears both edges by a wide margin. What changed is that the range is
 /// written at both ends and gated at both ends — the `const` assertions below for this default,
-/// and [`mod tests`](tests) for the threshold itself, which is a property of the ROM rather than
+/// and this binary's own `mod tests` for the threshold itself — `#[cfg(test)]`, so rustdoc cannot
+/// link it from a non-test build — which is a property of the ROM rather than
 /// of any one setting and so is asserted where the behaviour changes rather than at a sample.
 const HOLD_FRAMES: u64 = 10;
 
@@ -353,11 +351,20 @@ impl Recorder {
     fn new(machine: &Spectrum, wanted: bool, from: u64) -> Self {
         Self {
             resampler: None,
-            // `ay()` is how a frontend asks which machine it is holding — the AY's presence *is*
-            // the 128-ness — and it is the same question `src/main.rs` asks for the same reason:
-            // a 48K runs at 3,500,000 T-states a second and a 128 at 3,546,900, so the two
+            // A 48K runs at 3,500,000 T-states a second and a 128 at 3,546,900, so the two
             // resample differently.
-            cpu_hz: audio::cpu_hz(machine.ay().is_some()),
+            //
+            // **This asked `ay().is_some()`, and cited `src/main.rs` as asking the same question
+            // for the same reason.** `main.rs` documents *retiring* exactly that: what sets the
+            // clock rate is the **model**, and a machine is not fast because it has a sound chip
+            // — the two agree today and agree by coincidence. So the comment made a checkable
+            // claim about a sibling file and the sibling file disproved it, while the defect it
+            // described stayed live here: a +2A is a 128-clocked machine, and `--wav` from one
+            // with no AY wired resampled at 3,500,000 instead of 3,546,900 — **1.34% out, a
+            // quarter-tone of pitch error**, in the crate's only audio evidence artefact. The
+            // fix was half-applied because the derivation exists twice; that is the duplication,
+            // and this is what it cost.
+            cpu_hz: audio::cpu_hz(machine.model() == Model::Spectrum128),
             samples: Vec::new(),
             elapsed: 0,
             from: wanted.then_some(from),
@@ -427,11 +434,14 @@ fn run(arguments: &[String]) -> Result<String, String> {
 
     for path in &options.media {
         let bytes = read(path)?;
-        if let Some(reason) = media::unsupported(path) {
-            return Err(format!("{path}: {reason}"));
-        }
-        let kind = media::kind_of(path).ok_or_else(|| format!("{path}: not a {MEDIA_FORMATS}"))?;
-        media::insert(&mut machine, kind, &bytes).map_err(|error| format!("{path}: {error}"))?;
+        // **One decision, and this used to be a second copy of it.** These three steps —
+        // `unsupported`, `kind_of`, `insert`, each with its own message — were written out here
+        // and again in `media::accept`, and `media.rs`'s own header predicts what happens next:
+        // *"a second way to decide 'what is this file and what do we do with it' is a second
+        // thing that can disagree."* They had already disagreed. The copy here had no arm for
+        // `Error::Model`, so a 128 snapshot on a 48K stopped this binary with *"needs a 128"*
+        // while the window said the same thing **and** named the ROMs that would fix it.
+        media::load_named(&mut machine, path, &bytes)?;
     }
 
     let mut recorder = Recorder::new(&machine, options.wav.is_some(), options.wav_from);
@@ -625,11 +635,12 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         // A bundled build supplies what nobody named, exactly as `host::arguments` does for the
         // window — and through the same `host::partition`, so a `--rom`-shaped embedded ROM is
         // sorted from an embedded tape by the one function that makes that decision anywhere.
-        let (bundled_roms, bundled_media) = host::partition(&bundle::arguments(), DEFAULT_ROM);
+        let (bundled_roms, bundled_media) =
+            host::partition(&bundle::arguments(), media::DEFAULT_ROM);
         roms = bundled_roms;
         media = bundled_media;
     } else if roms.is_empty() {
-        roms.push(DEFAULT_ROM.to_owned());
+        roms.push(media::DEFAULT_ROM.to_owned());
     }
     Ok(Options {
         roms,

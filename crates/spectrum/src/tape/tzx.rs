@@ -31,7 +31,7 @@
 //! - **The level after a direct recording is the *last sample*, not its opposite** — where after
 //!   every other signal block it *is* the opposite, *"so that a subsequent pulse will produce an
 //!   edge"*. The two rules are one sentence apart in the description and they disagree on
-//!   purpose. [`Signal::direct`](super::signal::Signal::direct) is where that is honoured.
+//!   purpose. `Signal::direct` is where that is honoured.
 //!
 //! # What this module refuses, and why refusing beats skipping
 //!
@@ -57,12 +57,12 @@
 //! - **A loop block multiplies.** Three bytes can ask for a body to be replayed 65535 times,
 //!   and a `Tape` is materialised — so a loop count times a block length is exactly an
 //!   allocation sized from the file. The bound is
-//!   [`MAX_PULSES`](super::signal::MAX_PULSES), it is checked on every push, and exceeding it
+//!   `MAX_PULSES`, it is checked on every push, and exceeding it
 //!   is [`Error::TapeTooLong`] rather than a large allocation.
 //! - **A jump block revisits.** *"Jump 0 = 'Loop Forever' - this should never happen"*, says the
 //!   description, of a file it also permits. Progress is therefore **not** structural here, and
 //!   that is the honest difference from [`crate::snapshot`], where every loop iteration consumes
-//!   an input byte. It is a budget — [`MAX_BLOCKS_PLAYED`] — and reaching it is
+//!   an input byte. It is a budget — `MAX_BLOCKS_PLAYED` — and reaching it is
 //!   [`Error::TooManyBlocksPlayed`].
 //!
 //! The block **scan** is structural in the old sense: every iteration consumes at least the
@@ -575,21 +575,8 @@ impl<'a> Player<'a> {
                 offset: block.offset,
             });
         };
-        self.signal.speed_data(
-            &SpeedData {
-                pilot: tap::PILOT_PULSE,
-                pilot_pulses: tap::pilot_pulses(flag),
-                sync_first: tap::SYNC_FIRST,
-                sync_second: tap::SYNC_SECOND,
-                data: Data {
-                    bytes: data,
-                    used_bits: UsedBits::ALL,
-                    zero: tap::BIT_ZERO,
-                    one: tap::BIT_ONE,
-                },
-            },
-            block.offset,
-        )?;
+        self.signal
+            .speed_data(&tap::rom_speed_data(flag, data), block.offset)?;
         self.pause(pause, block.offset)
     }
 

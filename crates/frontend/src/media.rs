@@ -60,6 +60,17 @@ pub const EXTENSIONS: &[(&str, Kind)] = &[
     ("tzx", Kind::Tzx),
 ];
 
+/// The ROM used when nothing on the command line or in the query string names one.
+///
+/// **Declared here because it was declared twice**, identically and with an identical doc
+/// comment, in `src/main.rs` and in `src/bin/zx-shot.rs` — and both then hand it to the same
+/// [`crate::host::partition`], so the two copies existed only to be handed to one function. A
+/// path is a fact about where this repository keeps its ROMs, and this module is where the
+/// binaries already come to ask what a file is; `web/build.sh` restates the same path
+/// structurally when it stages the page, which no Rust constant can reach and which is recorded
+/// as an open item rather than solved here.
+pub const DEFAULT_ROM: &str = "testdata/roms/48.rom";
+
 /// What `path`'s extension says it is, or `None` for anything else.
 #[must_use]
 pub fn kind_of(path: &str) -> Option<Kind> {
@@ -277,14 +288,44 @@ pub fn insert(machine: &mut Spectrum, kind: Kind, bytes: &[u8]) -> Result<(), Er
 /// three different places: a format we know and cannot load yet ([`unsupported`]); a format we
 /// do not recognise at all; and a file that parsed and cannot be used.
 pub fn accept(machine: &mut Spectrum, name: &str, bytes: &[u8]) -> String {
+    match load_named(machine, name, bytes) {
+        Ok(kind) => format!("{} {name}", verb(kind)),
+        Err(refusal) => refusal,
+    }
+}
+
+/// The decision itself: recognise `name`, load `bytes`, or say why not.
+///
+/// # Why this is separate from [`accept`], and what it cost not to be
+///
+/// [`accept`] answers with one `String` whichever way it goes, which is right for a window: a
+/// drop always says something and the shell prints it. A **headless** caller needs the other
+/// shape — `zx-shot` must exit non-zero on a file it cannot load — so it could not reuse
+/// [`accept`] and re-implemented the three-failure decision instead:
+///
+/// ```text
+/// if let Some(reason) = media::unsupported(path) { return Err(format!("{path}: {reason}")); }
+/// let kind = media::kind_of(path).ok_or_else(|| format!("{path}: not a {MEDIA_FORMATS}"))?;
+/// media::insert(&mut machine, kind, &bytes).map_err(|error| format!("{path}: {error}"))?;
+/// ```
+///
+/// **And the two had already diverged**, exactly as this module's header predicts they would:
+/// that copy has no arm for [`Error::Model`], so a 128 snapshot handed to `zx-shot` on a 48K said
+/// *"needs a 128"* and stopped, while the window said the same thing **and named the one action
+/// that fixes it**. The prediction came true and nothing noticed, which is what a second copy of
+/// a decision is for.
+///
+/// So the decision lives here once and returns a [`Result`]; [`accept`] is the two-line
+/// projection of it onto a window's one-string shape.
+pub fn load_named(machine: &mut Spectrum, name: &str, bytes: &[u8]) -> Result<Kind, String> {
     if let Some(reason) = unsupported(name) {
-        return format!("{name}: {reason}");
+        return Err(format!("{name}: {reason}"));
     }
     let Some(kind) = kind_of(name) else {
-        return format!("{name}: not a .rom, .tap, .tzx, .z80 or .sna");
+        return Err(format!("{name}: not a .rom, .tap, .tzx, .z80 or .sna"));
     };
     match insert(machine, kind, bytes) {
-        Ok(()) => format!("{} {name}", verb(kind)),
+        Ok(()) => Ok(kind),
         // **The library's answer and the frontend's genuinely differ here, and neither is a
         // bug.** [`Spectrum::restore`] refuses a 128 snapshot on a 48K, which is right for a
         // library: silently dropping five banks is the defect `docs/M6.md` refused for
@@ -295,10 +336,10 @@ pub fn accept(machine: &mut Spectrum, name: &str, bytes: &[u8]) -> String {
         // given. Reusing the 48K ROM, or guessing which of two is the editor, would be
         // inventing a machine and calling it the user's. So the refusal stands, and the message
         // names the one thing that would fix it.
-        Err(error @ Error::Model(_)) => {
-            format!("{name}: {error} - restart naming the ROMs that machine needs")
-        }
-        Err(error) => format!("{name}: {error}"),
+        Err(error @ Error::Model(_)) => Err(format!(
+            "{name}: {error} - restart naming the ROMs that machine needs"
+        )),
+        Err(error) => Err(format!("{name}: {error}")),
     }
 }
 

@@ -346,8 +346,14 @@ impl fmt::Display for Rung {
     /// `1x`, `64x`, `auto` — the name only, with [`Rung::note`] carrying the state.
     ///
     /// A `Display` rather than a `String`-returning method so that [`Status::draw`] keeps
-    /// formatting the whole readout in one `write!` into its reused buffer, allocating nothing
-    /// fifty times a second.
+    /// formatting the whole readout in one `write!` into its reused buffer, rather than building
+    /// a string per field fifty times a second.
+    ///
+    /// *The sentence here claimed the readout allocates **nothing** fifty times a second.* This
+    /// field obeys that; the `snd` field in the same `write!` does not — `Status::queue` returns
+    /// a `String`. The claim is corrected rather than the code because every repair measured is
+    /// longer or breaks the single-`write!` property this impl exists to give; `Status::line`'s
+    /// own doc carries the measurement and the open finding.
     ///
     /// [`Status::draw`]: ../zx/index.html
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -653,12 +659,26 @@ impl RateMeter {
     }
 
     /// Offer the current time and cumulative frame count; closes the window when it is due.
+    ///
+    /// **`saturating_sub`, matching both siblings.** [`LossMeter::sample`] and
+    /// [`EarMeter::sample`] already do this, and `EarMeter`'s doc states the rule the file then
+    /// broke here: *"`overflow-checks` is on in this workspace's release profile, so a plain
+    /// subtraction here would be a panic in a shipped window."* This meter's own caller is
+    /// monotonic, so it was unreachable rather than wrong — but a written policy applied at two
+    /// of three identical sites is a policy that has already started to rot, and `RateMeter` is
+    /// `pub`, so the caller is not the only one there will ever be.
+    ///
+    /// A `window_seconds` of zero makes the guard below never fire and `hz` a `NaN`, printed as
+    /// `NaN Hz`. [`LossMeter`] names that hazard for itself and refuses a `Default` because of
+    /// it; recorded here so this meter's hole is a considered position rather than an unexamined
+    /// one. It is not guarded because guarding it would mean choosing a value for a window
+    /// nobody asked for, and there is no right one.
     pub const fn sample(&mut self, now: f64, frames: u64) {
         let elapsed = now - self.opened_at;
         if elapsed < self.window_seconds {
             return;
         }
-        self.hz = (frames - self.frames_at_open) as f64 / elapsed;
+        self.hz = frames.saturating_sub(self.frames_at_open) as f64 / elapsed;
         self.opened_at = now;
         self.frames_at_open = frames;
     }

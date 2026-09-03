@@ -63,12 +63,25 @@
 //!   the hardware rule. The FUSE corpus predates the `MEMPTR` work and expects them from
 //!   the tested value instead, so four of its vectors are carried as documented omissions.
 //!   `zexall` settles it at M4.
+//! - **`LD A,I` / `LD A,R` during interrupt acceptance** report `IFF2` in P/V unconditionally.
+//!   NMOS silicon **clears** P/V instead when an interrupt is accepted during the
+//!   instruction's final M-cycle — the bug that makes the naive `LD A,I` / `JP PO` probe for
+//!   `IFF2` unreliable on exactly the parts this core otherwise models. Not modelling it is a
+//!   choice, and it is listed **because** it is one: this list had two entries while the
+//!   `SCF` latch and the MEMPTR clone variance were catalogued to the paragraph, and a third
+//!   deviation kept only in the handler's own comment is a deviation the list denies. See
+//!   `Cpu::load_a_from_special`, which now carries the mechanism.
 //!
 //! # What is modelled that the field names may not suggest
 //!
 //! - **`MEMPTR`/`WZ`** ([`CpuState::wz`]) is *live*, not an inert snapshot field: it is the
-//!   mechanism behind the `BIT n,(IX+d)` flag rule, and `BIT` is the only instruction that
-//!   reads it back. Every rule in Boo-boo and Kladov's *MEMPTR, esoteric register of the
+//!   mechanism behind the `BIT n,(IX+d)` flag rule. **This used to add *"and `BIT` is the
+//!   only instruction that reads it back"*, which was already false when it was written.**
+//!   `CPI`/`CPD` read the latch in order to write it back one higher or lower, and that
+//!   second reader is not an exception to the register's story — it *is* the story, because
+//!   walking the latch with a `CPD` loop is how Boo-boo and Kladov measured every other rule
+//!   below. Two readers, then; only `BIT`'s reaches a flag. Every rule in their *MEMPTR,
+//!   esoteric register of the
 //!   ZiLOG Z80 CPU* is implemented — the indexed accesses, the accumulator and pair loads and
 //!   stores, `EX (SP),rp`, the 16-bit arithmetic, `RLD`/`RRD`, all four block families, the
 //!   I/O group, every jump, call and return, and interrupt acceptance. `Cpu::set_memptr` is
@@ -109,9 +122,19 @@ use registers::{Registers, index, pair};
 /// Deliberately **not** exported alongside the three machine-cycle lengths in [`bus`], and
 /// the asymmetry is the rule rather than an oversight: those three are public because each
 /// corresponds to a [`Bus`] transfer callback, so an implementation can recognise the cycle
-/// they measure and needs the number to decode the tick stream. An acknowledge has no
-/// callback — it reads no memory, so there is nothing for a machine to recognise — and
-/// exporting its length would hand out a number a `Bus` cannot act on.
+/// they measure and needs the number to decode the tick stream.
+///
+/// **The argument for keeping this one private has been rewritten, because the argument it
+/// used to make is dead.** It read: *"an acknowledge has no callback — it reads no memory, so
+/// there is nothing for a machine to recognise — and exporting its length would hand out a
+/// number a `Bus` cannot act on."* [`Bus::acknowledge`] now exists, and `crates/spectrum`'s
+/// joystick acts on it, so the premise is simply false — and false in a doc a maintainer
+/// would reason forward from.
+///
+/// The conclusion survives on the opposite footing, and [`Bus::acknowledge`] states it from
+/// its own side: the length reaches the machine **as an argument to the callback**, at the
+/// moment it applies. A public constant would be a *second* copy of the same figure, sitting
+/// where a machine could transcribe it once and then drift.
 const INTERRUPT_ACKNOWLEDGE: u8 = 7;
 
 /// T-states in a non-maskable-interrupt acknowledge cycle.
@@ -263,8 +286,13 @@ pub struct CpuState {
     /// itself; a hand-built state that sets this flag with `pc` pointing elsewhere will
     /// resume one byte past whatever it does point at.
     pub halted: bool,
-    /// `MEMPTR` (often written `WZ`) — an internal address latch with no instruction that
-    /// reads it directly.
+    /// `MEMPTR` (often written `WZ`) — an internal address latch that no instruction *names*.
+    ///
+    /// **This used to say "with no instruction that reads it directly", and that is wrong
+    /// twice.** `BIT` reads it for its undocumented flag bits, and `CPI`/`CPD` read it in
+    /// order to write it back one higher or lower. What is true — and what the sentence was
+    /// reaching for — is that no *encoding* takes it as an operand, which is why a
+    /// programmer's model of the Z80 can leave it out and a snapshot cannot.
     ///
     /// It leaks into observable behaviour through the undocumented flag bits of `BIT`,
     /// which is why a snapshot must carry it: `BIT n,(HL)` executed just after a load is
@@ -340,7 +368,7 @@ pub struct Cpu<B> {
     bus: B,
     interrupts: InterruptState,
     halted: bool,
-    /// `MEMPTR`. Written by [`Cpu::set_memptr`] and read only by `BIT`.
+    /// `MEMPTR`. Written by [`Cpu::set_memptr`]; read by `BIT` and by `CPI`/`CPD`.
     wz: u16,
     /// The flag latch. See [`CpuState::q`].
     q: u8,
@@ -365,16 +393,22 @@ enum InterruptDispatch {
     Vectored(u16),
 }
 
+/// Bits 5–3 of an `RST` opcode: the restart target, already scaled by eight in place.
+///
+/// Crate-level because [`restart_target`] and `Cpu::restart` both derive that address, and
+/// each used to carry its own `const TARGET_MASK: u8 = 0x38` with its own copy of the
+/// derivation. The two functions stay separate — `restart` cannot call `restart_target`
+/// without unwrapping an `Option` it has already proven — but the mask is one fact.
+pub(crate) const RESTART_TARGET_MASK: u8 = 0x38;
+
 /// The address an `RST` opcode restarts to, or `None` if the byte is not an `RST`.
 ///
 /// `RST` is `11 ttt 111`, and `ttt` is already scaled by eight in place.
 fn restart_target(opcode: u8) -> Option<u16> {
     /// The bits that must all be set for the encoding to be an `RST`.
     const RESTART_PATTERN: u8 = 0xC7;
-    /// Bits 5–3.
-    const TARGET_MASK: u8 = 0x38;
 
-    (opcode & RESTART_PATTERN == RESTART_PATTERN).then(|| u16::from(opcode & TARGET_MASK))
+    (opcode & RESTART_PATTERN == RESTART_PATTERN).then(|| u16::from(opcode & RESTART_TARGET_MASK))
 }
 
 impl<B: Bus> Cpu<B> {
@@ -799,11 +833,19 @@ impl<B: Bus> Cpu<B> {
     ///
     /// The transfer goes through [`Bus::fetch`] rather than [`Bus::read`] so the machine can
     /// tell a four-T-state opcode fetch from a three-T-state read followed by an internal
-    /// cycle. This is the only route to that method, and every M1 cycle in the instruction
-    /// stream comes through here: the un-prefixed opcode, each `DD`/`FD`/`CB`/`ED` prefix
-    /// byte, and the opcode on the `CB` and `ED` pages. The `DDCB`/`FDCB` operand bytes do
-    /// **not** — they are memory reads, which is why `R` advances twice across those four
-    /// bytes and why they are fetched with [`Cpu::fetch_byte`].
+    /// cycle. Every M1 cycle **in the instruction stream** comes through here: the un-prefixed
+    /// opcode, each `DD`/`FD`/`CB`/`ED` prefix byte, and the opcode on the `CB` and `ED`
+    /// pages. The `DDCB`/`FDCB` operand bytes do **not** — they are memory reads, which is why
+    /// `R` advances twice across those four bytes and why they are fetched with
+    /// [`Cpu::fetch_byte`].
+    ///
+    /// **This used to claim to be *"the only route to that method"*, and it is not.**
+    /// [`Cpu::halt_cycle`] is the second — `rg 'bus\.fetch'` finds both — and the difference
+    /// is one a downstream `Bus` would act on: a halted CPU refetches the `HALT` opcode once
+    /// per step and discards it, so a `fetch` is not proof that the byte entered the
+    /// instruction stream. What *is* true of every call, and is what the sentence was
+    /// protecting, is the cycle shape: one four-T-state M1 with `/M1` asserted, which is all a
+    /// contention model needs. [`Bus::fetch`] now says the same from the other side.
     #[inline]
     fn fetch_opcode(&mut self) -> u8 {
         let address = self.regs.pc();
@@ -826,7 +868,7 @@ impl<B: Bus> Cpu<B> {
     /// Fetch one operand byte as a signed relative displacement.
     #[inline]
     fn fetch_signed_byte(&mut self) -> i8 {
-        i8::from_ne_bytes([self.fetch_byte()])
+        self.fetch_byte().cast_signed()
     }
 
     /// Fetch a 16-bit operand. The Z80 stores words low byte first.
@@ -879,6 +921,7 @@ impl<B: Bus> Cpu<B> {
     }
 
     /// The carry flag, which several instruction classes take as an input.
+    #[inline]
     fn carry_flag(&self) -> bool {
         (self.regs.f() & flags::CARRY) != 0
     }
@@ -2458,8 +2501,23 @@ mod tests {
         assert_eq!(f & flags::CARRY, 0);
     }
 
+    /// `SCF`/`CCF` derive bits 3 and 5 as `((Q ^ F) | A) & 0x28`, not from `A` alone.
+    ///
+    /// **This test was named `..._take_the_undocumented_bits_from_the_accumulator`, after the
+    /// rule `flags::scf` was written to replace** — and it passed under either, because its
+    /// only fixture was `A = 0x28` entered from a state load, which is exactly the collapse
+    /// case (`Q == F`, so `Q ^ F == 0` and the expression reduces to `A & 0x28`). A green test
+    /// named after a retired rule is worse than no test: it reads as evidence for the rule in
+    /// its name.
+    ///
+    /// The third vector below is the one that separates them. It sets `A = 0x00` with a
+    /// latch differing from `F` in both undocumented positions, so `(Q ^ F) | A` is `0x28`
+    /// where `A & 0x28` is `0` — the divergence condition `flags::scf` states, and the pattern
+    /// `zexall` never once produced in ~32,000 executions.
     #[test]
-    fn scf_and_ccf_take_the_undocumented_bits_from_the_accumulator() {
+    fn scf_and_ccf_derive_the_undocumented_bits_from_the_q_latch_or_the_accumulator() {
+        // Collapse case: the state load leaves Q == F, so this pins `A & 0x28` and nothing
+        // about the latch. Kept because it is what the corpus and the exerciser both reach.
         let state = CpuState {
             af: 0x2800,
             ..ready()
@@ -2474,6 +2532,20 @@ mod tests {
         };
         let (_, f) = accumulator_and_flags(&[0x3F], state);
         assert_eq!(f, flags::BIT5 | flags::HALF_CARRY | flags::BIT3);
+
+        // The distinguishing vector: A contributes nothing, so both bits can only have come
+        // from `Q ^ F`. Under the retired accumulator-only rule this is `flags::CARRY` alone.
+        let state = CpuState {
+            af: 0x0000,
+            q: flags::BIT5 | flags::BIT3,
+            ..ready()
+        };
+        let (_, f) = accumulator_and_flags(&[0x37], state); // SCF
+        assert_eq!(
+            f,
+            flags::BIT5 | flags::BIT3 | flags::CARRY,
+            "bits 3 and 5 must come from Q ^ F when A has neither"
+        );
     }
 
     #[test]

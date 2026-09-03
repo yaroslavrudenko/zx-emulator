@@ -1,8 +1,20 @@
-// The page's half of `crates/page`, and the whole of the JavaScript this project wrote.
+// The page's half of `crates/page`: the query string, the download, the audio bridge, and the
+// canvas focus.
 //
-// Registered as a miniquad plugin before the module is instantiated, so that the three
-// functions `crates/page/src/lib.rs` declares in its `unsafe extern "C"` block exist in
-// `importObject.env` by the time WebAssembly links against them.
+// *This line said **"and the whole of the JavaScript this project wrote"**, in a directory whose
+// other hand-written file, `zx_audio_worklet.js`, is two hundred lines of this project's
+// JavaScript and is loaded by the function forty lines below.* `web/README.md`'s table said the
+// same thing one row above the row that listed the worklet. Both were written when this was the
+// only file and neither was revisited when the second one arrived, which is the shape this
+// repository catalogues most often — a sentence that was a measurement, left standing as a
+// claim.
+//
+// Registered as a miniquad plugin before the module is instantiated, so that the **five**
+// functions `crates/page/src/lib.rs` declares across its two `unsafe extern "C"` blocks exist in
+// `importObject.env` by the time WebAssembly links against them. *That figure also said "three",
+// from before the audio seam existed.* It is written here rather than dropped because
+// `web/gate.sh` asserts all five by name against the built module, so this is a count with a
+// gate on it rather than a copy without one — and if it drifts again, the gate is what says so.
 //
 // ## The failure this file is shaped around
 //
@@ -19,10 +31,10 @@
 // ## The contract with the Rust side
 //
 // Names, argument order and the return convention are fixed by `crates/page/src/lib.rs`.
-// `PLUGIN_VERSION` here must equal that file's, and miniquad checks it: `init_plugins` calls
-// `wasm_exports.zx_page_crate_version()` and `console.error`s on a mismatch. That is a weak
-// check — it does not stop the page — which is why `web/gate.sh` also asserts the three imports
-// exist in the built module by name.
+// `PLUGIN_VERSION` here must equal that file's and `STARTED` must equal its `STARTED`;
+// `web/gate.sh` reads both literals out of both files and compares them, because miniquad's own
+// runtime check is a `console.error` that does not stop the page, and `STARTED` has no runtime
+// check at all.
 
 (function () {
     "use strict";
@@ -36,6 +48,12 @@
     const STARTED = 1;
     const REFUSED = 0;
 
+    // What `zx_audio_push` and `zx_audio_rate` answer when there is nothing to push into. See
+    // `crates/page`'s `audio_push`: three situations, one number, because the Rust side's
+    // response to all of them is identical.
+    const NO_DEVICE = -1;
+    const NO_RATE = 0;
+
     // `gl.js` hardcodes `document.querySelector("#glcanvas")`. The id is not configurable.
     const CANVAS = "#glcanvas";
 
@@ -44,11 +62,18 @@
     // browsers; never revoking leaks one Blob per `F2`.
     const REVOKE_AFTER_MS = 60000;
 
+    // Built once. Both are stateless and were being constructed per call — the encoder on every
+    // `zx_query_length` and `zx_query_copy`, the decoder on every `F2`. The *bytes* are
+    // deliberately not cached: `zx_query_copy` re-reads `location.search` on purpose, because
+    // `history.replaceState` can change it between the two calls.
+    const ENCODER = new TextEncoder();
+    const DECODER = new TextDecoder();
+
     // `location.search` as UTF-8, leading `?` included — the exact string
     // `frontend::host::arguments_from_query` is documented against. Not decoded: a value here
     // names a file the page will fetch over HTTP, so it is going straight back into a URL.
     function queryBytes() {
-        return new TextEncoder().encode(window.location.search);
+        return ENCODER.encode(window.location.search);
     }
 
     // A view over wasm memory, created fresh on every call. `wasm_memory.buffer` is detached
@@ -58,6 +83,35 @@
         return new Uint8Array(wasm_memory.buffer, pointer, length);
     }
 
+    // Wrap an import so that a JavaScript exception becomes a refusal the Rust side can read.
+    //
+    // **A JavaScript exception thrown out of a wasm import does not return a value — it traps
+    // the instance.** The emulator does not fail the operation; it stops existing, leaving a
+    // console message and a frozen canvas. That is reachable from three of these five imports
+    // without going anywhere exotic: `new Float32Array(wasm_memory.buffer, pointer, count)` and
+    // `new Uint8Array(...)` both throw `RangeError` on a misaligned offset or an out-of-range
+    // length, and `TextEncoder.encode` can throw on allocation failure.
+    //
+    // *One of the five was defensive and four were not.* `zx_offer_download` carried its own
+    // `try`/`catch` and returned `REFUSED`; the doctrine that made it do so — *"`undefined`
+    // crosses as 0, so success is 1 and everything else is a refusal"* — is stated in this
+    // file's header as a property of the whole seam, and was implemented for one fifth of it.
+    // It is one helper rather than five `try` blocks so that the next import gets it by
+    // construction instead of by remembering.
+    //
+    // Reported to the console as well as returned, because the return value reaches a status
+    // line with room for one sentence and this reaches a console with a stack.
+    function refusing(name, refusal, body) {
+        return function (...args) {
+            try {
+                return body(...args);
+            } catch (error) {
+                console.error("zx_page: " + name + " failed", error);
+                return refusal;
+            }
+        };
+    }
+
     // ---- audio -------------------------------------------------------------------------
     //
     // The device lives in `zx_audio_worklet.js`; this is the bridge to it. Three states matter
@@ -65,7 +119,7 @@
     // three is identical — generate nothing:
     //
     //   no AudioContext        -> 0   (no Web Audio at all)
-    //   context suspended      -> 0   (autoplay policy: no user gesture yet)
+    //   context not running    -> 0   (autoplay policy, or a later suspend)
     //   worklet not yet loaded -> 0   (addModule is asynchronous)
     //
     // Rust polls it every frame until it is non-zero, then builds a resampler for that exact
@@ -73,7 +127,35 @@
     // silently and then play late, all at once, which sounds like a fault rather than a delay.
     let audioContext = null;
     let audioNode = null;
-    let audioQueued = 0;
+
+    // The two running totals that make `zx_audio_push` answer the question it is documented to
+    // answer: **how many samples are queued ahead of the caller, counting the ones just handed
+    // over.**
+    //
+    // *This used to return `audioQueued`, the worklet's last periodic report of its own backlog.*
+    // That answer excluded the chunk being posted and lagged by up to `REPORT_EVERY` render
+    // quanta, so it was neither of the two things a caller could reasonably assume, and it
+    // disagreed with what `crates/page`'s desktop `push` returns for the same call. Three
+    // contracts for one function stopped being a documentation defect the moment
+    // `frontend::audio::Resampler::track` began steering the output rate from this number every
+    // 20 ms: a control loop whose sensor systematically under-reads by a whole frame has a bias
+    // built into it that no amount of tuning can see.
+    //
+    // `postMessage` is **ordered**, so the samples in flight can be accounted for exactly rather
+    // than estimated. `audioConsumed` is the worklet's count of samples it will never play again
+    // — drained to the device, or dropped at its ring's ceiling — and everything this page has
+    // pushed and the worklet has not yet finished with is `audioPushed - audioConsumed`, whether
+    // it is sitting in the ring or still travelling. That is the answer, and it is exact for the
+    // in-flight part rather than approximate.
+    //
+    // What is left over is the worklet's drain *since* its last report, which no message has
+    // carried yet. It is bounded by `REPORT_EVERY` quanta — 8 x 128 = 1024 samples, about
+    // 21.3 ms at 48 kHz, just inside one emulated frame — and it can only make this answer too
+    // **large**, never too small. Erring toward "the queue is deeper than you think" makes the
+    // loop produce slightly less audio, which is the safe direction: the failure being guarded
+    // against is a backlog that climbs for the life of the tab.
+    let audioPushed = 0;
+    let audioConsumed = 0;
 
     function audioStart() {
         if (audioContext !== null) {
@@ -93,7 +175,13 @@
                     outputChannelCount: [2],
                 });
                 audioNode.port.onmessage = function (event) {
-                    audioQueued = event.data.queued;
+                    // The worklet posts one number and nothing else. Checked rather than read
+                    // blind: an unexpected shape would put `undefined` into the arithmetic
+                    // above and make every subsequent push answer `NaN`, which reaches Rust as
+                    // 0 and reads as "the queue is empty" forever.
+                    if (typeof event.data === "number") {
+                        audioConsumed = event.data;
+                    }
                 };
                 audioNode.connect(audioContext.destination);
             })
@@ -110,53 +198,88 @@
     // audio plugin does exactly the same thing for the same reason.
     function audioResume() {
         audioStart();
-        if (audioContext !== null && audioContext.state === "suspended") {
-            audioContext.resume();
+        if (audioContext === null || audioContext.state === "running") {
+            return;
         }
+        audioContext.resume().catch(function (error) {
+            // *This call had no `.catch`, so a rejection was an unhandled rejection and nothing
+            // else* — in a file that catches `addModule` forty lines up and says why in the
+            // comment there. A context that refuses to resume is the whole of "why is there no
+            // sound", and it is the one thing a person can act on.
+            console.error("zx_page: the audio context refused to resume", error);
+        });
     }
 
     function registerAudio(importObject) {
-        importObject.env.zx_audio_rate = function () {
+        importObject.env.zx_audio_rate = refusing("zx_audio_rate", NO_RATE, function () {
             if (audioContext === null || audioNode === null) {
-                return 0;
+                return NO_RATE;
             }
-            return audioContext.state === "running" ? audioContext.sampleRate : 0;
-        };
+            return audioContext.state === "running" ? audioContext.sampleRate : NO_RATE;
+        });
 
-        importObject.env.zx_audio_push = function (pointer, count) {
-            if (audioNode === null) {
-                return -1;
-            }
-            // `.slice()` **copies** out of wasm memory. The buffer is then transferred to the
-            // worklet, which owns it on another thread for as long as it likes — a view over
-            // wasm memory would alias a buffer that can grow, detach and be reused underneath
-            // it. This is the copy `crates/page`'s SAFETY comment relies on.
-            const samples = new Float32Array(wasm_memory.buffer, pointer, count).slice();
-            audioNode.port.postMessage(samples, [samples.buffer]);
-            return audioQueued;
-        };
+        importObject.env.zx_audio_push = refusing(
+            "zx_audio_push",
+            NO_DEVICE,
+            function (pointer, count) {
+                // **A context that is not `running` reports "no device", and nothing is
+                // posted.** The same condition `zx_audio_rate` already applies, at the other
+                // end of the same seam, and the reason it has to be here too is that nobody is
+                // still asking `zx_audio_rate`: `crates/frontend`'s frame loop polls it only
+                // until a resampler exists. So a context that *leaves* `running` afterwards —
+                // an iOS interruption, an output-device change, any `suspend` — stops the
+                // worklet's `process` being called, and nothing drains the ring. Posting into
+                // that would grow memory and latency for as long as the tab is open while the
+                // control loop, fed a frozen depth, ran open loop on a constant.
+                //
+                // `NO_DEVICE` already means exactly this to every caller, and
+                // `Resampler::track` already ignores it.
+                if (
+                    audioNode === null ||
+                    audioContext === null ||
+                    audioContext.state !== "running"
+                ) {
+                    return NO_DEVICE;
+                }
+                // `.slice()` **copies** out of wasm memory. The buffer is then transferred to
+                // the worklet, which owns it on another thread for as long as it likes — a view
+                // over wasm memory would alias a buffer that can grow, detach and be reused
+                // underneath it. This is the copy `crates/page`'s SAFETY comment relies on, and
+                // `.slice()` is that view's last read: everything below touches only the copy.
+                const samples = new Float32Array(wasm_memory.buffer, pointer, count).slice();
+                audioNode.port.postMessage(samples, [samples.buffer]);
+                audioPushed += count;
+                return audioPushed - audioConsumed;
+            },
+        );
     }
 
     function registerPlugin(importObject) {
         registerAudio(importObject);
-        importObject.env.zx_query_length = function () {
+        importObject.env.zx_query_length = refusing("zx_query_length", 0, function () {
             return queryBytes().length;
-        };
+        });
 
-        importObject.env.zx_query_copy = function (destination, capacity) {
-            const bytes = queryBytes();
-            // `min` because the Rust side sized its buffer from a *previous* call to
-            // `zx_query_length`, and nothing guarantees the URL did not change between the
-            // two — `history.replaceState` can do it without a reload. Writing past the
-            // buffer would be a heap overflow in a language that has no way to notice.
-            const count = Math.min(bytes.length, capacity);
-            view(destination, count).set(bytes.subarray(0, count));
-            return count;
-        };
+        importObject.env.zx_query_copy = refusing(
+            "zx_query_copy",
+            0,
+            function (destination, capacity) {
+                const bytes = queryBytes();
+                // `min` because the Rust side sized its buffer from a *previous* call to
+                // `zx_query_length`, and nothing guarantees the URL did not change between the
+                // two — `history.replaceState` can do it without a reload. Writing past the
+                // buffer would be a heap overflow in a language that has no way to notice.
+                const count = Math.min(bytes.length, capacity);
+                view(destination, count).set(bytes.subarray(0, count));
+                return count;
+            },
+        );
 
-        importObject.env.zx_offer_download = function (namePtr, nameLen, bytesPtr, bytesLen) {
-            try {
-                const name = new TextDecoder().decode(view(namePtr, nameLen));
+        importObject.env.zx_offer_download = refusing(
+            "zx_offer_download",
+            REFUSED,
+            function (namePtr, nameLen, bytesPtr, bytesLen) {
+                const name = DECODER.decode(view(namePtr, nameLen));
                 // `.slice()` **copies**. The Blob outlives this call and wasm memory may grow
                 // and detach its buffer afterwards, so a Blob built over a live view would be
                 // a download of whatever happened to be at that address later — or of
@@ -170,19 +293,22 @@
                 anchor.download = name;
                 anchor.style.display = "none";
                 document.body.appendChild(anchor);
+                // **Both reads of wasm memory are already finished here, and `crates/page`'s
+                // SAFETY comment now says so rather than claiming this cannot re-enter.**
+                // `HTMLElement.click()` synchronously dispatches a bubbling `click` through
+                // `document`, so any listener a future version of this page adds runs *inside*
+                // this call and may grow wasm memory. Nothing above this line would notice,
+                // because nothing above this line still holds a view. Keep it that way: a new
+                // read of `view(...)` placed below this call would be a use-after-detach with
+                // no diagnostic.
                 anchor.click();
                 anchor.remove();
                 setTimeout(function () {
                     URL.revokeObjectURL(url);
                 }, REVOKE_AFTER_MS);
                 return STARTED;
-            } catch (error) {
-                // Reported here as well as returned, because the return value reaches a status
-                // line with room for one sentence and this reaches a console with a stack.
-                console.error("zx_page: the download failed", error);
-                return REFUSED;
-            }
-        };
+            },
+        );
     }
 
     // miniquad binds `canvas.onkeydown`, not `window.onkeydown`, so an unfocused canvas
@@ -199,9 +325,28 @@
 
     // Both listeners, because the two ways into this emulator are a click and a keystroke, and
     // a person who lands on the page and immediately types should not have to click first to
-    // get sound. `once` on each: after the context is running they have nothing left to do.
-    document.addEventListener("pointerdown", audioResume, { once: true });
-    document.addEventListener("keydown", audioResume, { once: true });
+    // get sound.
+    //
+    // *Both carried `{ once: true }`, on the reasoning that "after the context is running they
+    // have nothing left to do".* That is true of the state they were written for and of no
+    // other, and it cost two things:
+    //
+    //   - **The one keydown attempt could be spent on a key that grants nothing.** Browsers
+    //     deliberately withhold sticky user activation for modifier and navigation keys, and
+    //     this emulator binds SYMBOL SHIFT to **Ctrl and Tab** (`web/index.html`). A person who
+    //     lands on the page and types — which `index.html` explicitly invites, with *"Sound
+    //     starts on your first click or keystroke"* — could burn the listener on a keystroke
+    //     that could never have started audio, and then never get another.
+    //   - **There was no way back.** If the context later left `running`, both listeners were
+    //     already gone and `audioStart` early-returns, so the tab was silent for the rest of its
+    //     life with nothing a user could do about it.
+    //
+    // Leaving them bound fixes both, and costs a function call per keystroke: `audioResume`
+    // reaches its early return in two comparisons once the context exists and is running. A
+    // `statechange` listener was considered and is bigger for less — this is the same mechanism
+    // the user is already performing, and it needs no second state machine.
+    document.addEventListener("pointerdown", audioResume);
+    document.addEventListener("keydown", audioResume);
 
     miniquad_add_plugin({
         name: "zx_page",

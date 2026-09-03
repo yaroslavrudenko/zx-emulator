@@ -588,8 +588,11 @@ pub const INTERRUPT_T_STATES: u32 = Timing::SPECTRUM_48K.interrupt_t_states();
 
 /// The first T-state of a 48K's frame at which a contended access is delayed.
 ///
-/// See the module documentation. Hardware-graded as an interval from `/INT`; the 128's
-/// equivalent is [`Timing::SPECTRUM_128`]'s and is transcribed rather than graded.
+/// See the module documentation. Hardware-graded as an interval from `/INT`. **So is the 128's
+/// equivalent, [`Timing::SPECTRUM_128`]'s 14362, since 2026-09-02** — this sentence said it was
+/// *"transcribed rather than graded"*, which contradicted that constant's own doc a few hundred
+/// lines above in this same file, and it was the wrong half of the contradiction to leave
+/// standing. The transcribed figure was 14361 and the measurement moved it by one.
 pub const FIRST_CONTENDED_T_STATE: u32 = Timing::SPECTRUM_48K.first_contended_t_state();
 
 /// The stall a contended access on a **48K** starting at `frame_t_state` suffers, in T-states.
@@ -715,9 +718,9 @@ impl Clock {
     ///
     /// # It is not monotonic, and the two places it moves backwards are named
     ///
-    /// [`Clock::set_frame_t_state`] and a fresh clock after [`crate::Ula::reset`] both move
+    /// `Clock::set_frame_t_state` and a fresh clock after [`crate::Ula::reset`] both move
     /// this backwards, because neither is elapsed time. Anything integrating over it must
-    /// handle that explicitly rather than assume it away; [`crate::audio::Audio::rebase`] is
+    /// handle that explicitly rather than assume it away; `Audio::rebase` is
     /// what does, and it exists because a restore that manufactured a frame of audio out of
     /// the jump would be the same defect as a restore that charges a machine cycle.
     #[inline]

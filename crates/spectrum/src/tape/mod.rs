@@ -48,7 +48,7 @@
 //! > [`crate::ula`] was touched. What the two converters do share — *"most significant bit
 //! > first, two equal half-periods per bit"*, *"a data block is a pilot tone, a sync pair,
 //! > then those bits"*, and the ceiling on how large a train may grow — lives once, in
-//! > [`signal`], because `.tzx`'s standard-speed block **is** a `.tap` block and its
+//! > `signal`, because `.tzx`'s standard-speed block **is** a `.tap` block and its
 //! > turbo-speed block is the same shape with the numbers read from the file instead.
 //!
 //! Materialising every pulse costs about 16 `u32`s per data byte plus the pilot tone, so a
@@ -339,15 +339,29 @@ impl Tape {
     ///
     /// Called only from [`crate::Ula`]'s own `advance`, alongside the clock, so elapsed time
     /// reaches both or neither.
-    pub(crate) fn advance(&mut self, mut t_states: u32) {
+    /// # It reports whether the signal moved, and that return value is a hot-path decision
+    ///
+    /// [`crate::Ula::advance`] runs on every elapsed T-state and has to tell the audio generator
+    /// when the `EAR` line flips. It first did that by comparing [`Tape::level`] against a mirror
+    /// held inside the generator — which meant evaluating the *timestamp* argument on every call,
+    /// a `u64` multiply-add, **before** the guard that discarded it. Measured against
+    /// `benches/frame.rs`: **+21.9% on `quiet_48k`**, a machine with no tape in the drive at all.
+    ///
+    /// The edge was never unknown — `finish_pulse` is the only thing that moves the level and it
+    /// runs right here. Returning it costs a `bool` that is already in a register and lets the
+    /// caller put the timestamp inside the branch, which is where the work belongs.
+    pub(crate) fn advance(&mut self, mut t_states: u32) -> bool {
+        let mut flipped = false;
         while self.playing && t_states > 0 {
             if self.remaining > t_states {
                 self.remaining -= t_states;
-                return;
+                return flipped;
             }
             t_states -= self.remaining;
             self.finish_pulse();
+            flipped = true;
         }
+        flipped
     }
 
     /// The current half-period has elapsed: flip the signal and take the next one.

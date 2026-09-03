@@ -1,9 +1,10 @@
-//! What the machine's two sound sources emit, as a stream of samples a consumer can drain.
+//! What the machine's sound sources emit, as a stream of samples a consumer can drain.
 //!
-//! # The two sources are kept apart, and that is a requirement rather than a convenience
+//! # The sources are kept apart, and that is a requirement rather than a convenience
 //!
-//! A [`Sample`] carries the AY's three channels **and** the beeper as separate numbers, and
-//! nothing in `crates/spectrum` ever adds them together. Two independent rulings say so:
+//! A [`Sample`] carries the AY's three channels, the beeper **and** the tape's `EAR` signal as
+//! separate numbers, and nothing in `crates/spectrum` ever adds them together. Two independent
+//! rulings say so:
 //!
 //! - `docs/M7.md` Decision 6 requires the AY's frame hash to cover *"the AY's own output, not
 //!   'the machine's audio'"*, precisely so that the beeper landing cannot falsify a gate that
@@ -18,23 +19,55 @@
 //! the standard way a 128 emulator presents `ABC` or `ACB` — needs the channels a mixdown
 //! would have destroyed.
 //!
-//! # Sound is not on the emulator's hot path, and this is where that is decided
+//! # Sound is almost never on the emulator's hot path, and this is where that is decided
 //!
-//! [`crate::Ula::tick`] is the hottest function in the emulator and **M7's sound half does not
-//! add a branch, a load or a field to it.** Nothing generates audio per T-state. The chip's
-//! state at any moment is a pure function of the registers and the time since they were last
-//! written, so the generator can be run **late** — and it is, at exactly two kinds of moment:
+//! **This heading read *"Sound is not on the emulator's hot path"*, and the paragraph below it
+//! said M7's sound half *"does not add a branch, a load or a field"* to `Ula::tick` and ran the
+//! generator at *"exactly two kinds of moment"*, both guest-initiated. M8's tape half added a
+//! third and neither sentence was brought along.** They are corrected rather than replaced,
+//! because a reader who took the absolute form and reasoned from it — that anything at all on
+//! the per-T-state path is therefore impossible — needs to see that the shape changed rather
+//! than only the wording.
+//!
+//! `Ula::tick` is the hottest function in the emulator. The chip's state at any moment is a pure
+//! function of the registers and the time since they were last written, so the generator can be
+//! run **late** — and it is, at three kinds of moment:
 //!
 //! 1. when something the guest does would otherwise be lost: the speaker bit **changing**, or
 //!    a write to an AY register;
-//! 2. when a consumer asks for the samples.
+//! 2. when a consumer asks for the samples;
+//! 3. **when the tape flips the `EAR` line** — the machine's own passage of time rather than
+//!    anything the guest did, which is what makes it a different *kind* of moment from the first
+//!    two and why the count was wrong rather than merely low.
 //!
-//! Between those it does nothing at all. The total work is proportional to emulated time
-//! either way, so nothing is saved by generating eagerly and a per-T-state branch is spent.
+//! Between those it does nothing at all. The total work is proportional to emulated time either
+//! way, so nothing is saved by generating eagerly.
+//!
+//! **What the third moment costs per T-state, measured rather than asserted.** `Ula::advance`
+//! runs on every elapsed T-state and asks `crate::tape::Tape::advance` whether the level moved;
+//! the answer is a `bool` that function's own loop guard already computed, so on a machine with
+//! no cassette the whole per-T-state cost is that one test. The timestamp — a `u64`
+//! multiply-add — sits **inside** the branch. An earlier cut passed it as an argument at the
+//! call site, where it was evaluated before any guard could discard it, and that cost
+//! **+21.9 % on `quiet_48k`**: a machine with no tape paying for one on every T-state.
+//!
+//! ```text
+//! cargo bench -p spectrum --bench frame     # 2026-09-03, lowest median of three runs
+//! quiet_48k          143.4 µs               # no tape in the drive
+//! drained_48k        150.9 µs               # + one take_samples per frame
+//! tape_playing_48k   151.8 µs               # + a pilot tone turning, ~32 EAR edges a frame
+//! ```
+//!
+//! **+0.9 µs for a cassette actually turning**, against a 20,000 µs frame. That is the third
+//! moment's whole price, and it is what the run-late design predicts: the same samples are
+//! generated either way, merely across 33 calls instead of one. `benches/frame.rs`'s
+//! `tape_playing_48k` is the row that says so, and it did not exist when the paragraph above was
+//! written — which is why a 23 % regression on this exact path once shipped green.
 //!
 //! A border write that leaves the speaker bit alone costs one comparison, which is why
-//! [`Audio::set_beeper`] takes the level and compares rather than being called only when the
-//! caller thinks it changed — the comparison belongs where the state is.
+//! `Audio::set_beeper` takes the level and compares rather than being called only when the
+//! caller thinks it changed — the comparison belongs where the state is. `Audio::set_tape` is
+//! deliberately **not** that shape: its own note says why the caller filters instead.
 //!
 //! # The sample grid
 //!
@@ -82,8 +115,8 @@ use crate::timing::Timing;
 
 /// The largest value any field of a [`Sample`] can hold.
 ///
-/// The full scale of **each source separately**. See the module documentation: two sources
-/// sharing a full scale is not a claim that they are equally loud.
+/// The full scale of **each source separately**. See the module documentation: sources sharing
+/// a full scale is not a claim that they are equally loud.
 pub const AMPLITUDE_MAX: u16 = u16::MAX;
 
 /// T-states between samples.
@@ -121,7 +154,7 @@ const SAMPLES_PER_LONGEST_FRAME: usize =
 ///
 /// Two frames of the longest frame there is. **A consumer that drains once per frame never
 /// drops a sample**, and one that drains less often is told how many it lost by
-/// [`Audio::dropped`] rather than hearing an unexplained gap. The buffer is allocated once at
+/// `Audio::dropped` rather than hearing an unexplained gap. The buffer is allocated once at
 /// construction and filled in place, which is what `docs/M8.md` asks for: *"Buffers allocated
 /// once, filled in place, handed to the device."*
 pub const SAMPLE_CAPACITY: usize = SAMPLES_PER_LONGEST_FRAME * 2;
@@ -144,6 +177,32 @@ pub struct Sample {
     /// The fraction of this sample's window the ULA drove the speaker high, so a pulse
     /// shorter than the window arrives attenuated rather than missing.
     pub beeper: u16,
+    /// The `EAR` input — what the tape is driving the line to — 0 to [`AMPLITUDE_MAX`].
+    ///
+    /// Averaged over the window exactly like [`Sample::beeper`], and **kept apart from it for
+    /// the same reason the AY is**: how loud a tape is against the speaker is a mix decision,
+    /// and the mix is the frontend's.
+    ///
+    /// # Why the machine emits this at all
+    ///
+    /// On a real Spectrum the `EAR` socket does not only reach the CPU. It reaches the
+    /// amplifier, which is why a loading tape screeches out of the television and why a person
+    /// can hear the difference between a leader, a data block and a dropout without looking at
+    /// the screen. An emulator that routes the tape to bit 6 of a `0xFE` read and nowhere else
+    /// loads tapes correctly **in silence**, which is the state this field exists to end.
+    ///
+    /// **Not necessarily zero when the tape is stopped**, and the first version of this sentence
+    /// claimed otherwise. [`crate::tape::Tape::stop`] holds *"the signal where it stands"*, and a
+    /// cassette that runs out stops on whichever half-period it ended on — high half the time. So
+    /// a stopped tape contributes a constant level, which the frontend's DC blocker removes
+    /// rather than this field pretending it is absent.
+    ///
+    /// The never-played case is gated by `a_tape_that_was_never_started_is_silent` — the test
+    /// that carried the broader name until its fixture was read against it — and the
+    /// stopped-after-playing case by `a_tape_stopped_on_a_high_half_period_holds_the_line_high`
+    /// and `a_cassette_that_runs_out_on_a_high_half_period_holds_the_line_high`, one per route
+    /// into that state. The rename is argued in `crates/spectrum/tests/tape_signal.rs`.
+    pub tape: u16,
 }
 
 /// The machine's sound: the chip a 128 has, the speaker both machines have, and the samples
@@ -162,6 +221,8 @@ pub(crate) struct Audio {
     ay: Option<Ay>,
     /// Whether the ULA is driving the speaker high.
     beeper: bool,
+    /// Whether the tape is driving the `EAR` line high.
+    tape: bool,
     /// T-states the generator has already rendered, since power-on or the last rebase.
     rendered: u64,
     /// T-states left in the sample window being accumulated.
@@ -172,6 +233,8 @@ pub(crate) struct Audio {
     channel_accumulator: [u32; CHANNEL_COUNT],
     /// The beeper's, likewise.
     beeper_accumulator: u32,
+    /// The `EAR` line's, likewise.
+    tape_accumulator: u32,
     samples: Box<[Sample; SAMPLE_CAPACITY]>,
     len: usize,
     dropped: u64,
@@ -183,11 +246,13 @@ impl Audio {
         Self {
             ay: model.has_ay().then(Ay::new),
             beeper: false,
+            tape: false,
             rendered: 0,
             to_next_sample: SAMPLE_PERIOD_T_STATES,
             to_next_ay_step: AY_STEP_T_STATES,
             channel_accumulator: [0; CHANNEL_COUNT],
             beeper_accumulator: 0,
+            tape_accumulator: 0,
             samples: Box::new([Sample::default(); SAMPLE_CAPACITY]),
             len: 0,
             dropped: 0,
@@ -239,6 +304,33 @@ impl Audio {
         self.beeper = high;
     }
 
+    /// Set the level the tape is driving the `EAR` line to, as of `t_state`.
+    ///
+    /// **Renders first, and only when the level actually moves.** Rendering first is what puts
+    /// the edge at the right place in the stream, exactly as in [`Audio::set_beeper`].
+    ///
+    /// **Where it stops resembling `set_beeper`, and this sentence used to claim it did not.**
+    /// `set_beeper`'s guard exists so that its caller need not think: a `0xFE` write is almost
+    /// always a border change, and letting it call unconditionally and compare here is both
+    /// cheaper and harder to get wrong. That reasoning does not transfer, because this caller is
+    /// [`crate::Ula::advance`] — the one place time passes — and it runs 3.5 million times a
+    /// second rather than once per `OUT`. At that rate the guard is in the wrong place: `t_state`
+    /// is an **argument**, so it is evaluated at the call site before this function can discard
+    /// it, and it is a `u64` multiply-add. Measured, that cost +21.9 % on `benches/frame.rs`'s
+    /// `quiet_48k` — on a machine with no tape in the drive at all.
+    ///
+    /// So the caller filters now: `Tape::advance` returns whether the level moved, and this is
+    /// reached only when it did. The guard below is kept as a second line rather than deleted,
+    /// because it costs one comparison on a path that now runs ~32 times a frame instead of
+    /// 69,888, and because it is what keeps the function total for any other caller.
+    pub(crate) fn set_tape(&mut self, high: bool, t_state: u64) {
+        if high == self.tape {
+            return;
+        }
+        self.render_to(t_state);
+        self.tape = high;
+    }
+
     /// Latch a register address — the guest's `OUT` to `0xFFFD`.
     ///
     /// Renders nothing, because the latch changes no output: it decides where the *next*
@@ -273,6 +365,8 @@ impl Audio {
     pub(crate) fn reset(&mut self) {
         self.ay = self.ay.as_ref().map(|_| Ay::new());
         self.beeper = false;
+        // The tape is **not** reset: `crate::Ula::reset` leaves the cassette in the drive and
+        // wound where it stood, so the line is still being driven by whatever the head is over.
         self.rebase(0);
     }
 
@@ -291,6 +385,7 @@ impl Audio {
         self.to_next_ay_step = AY_STEP_T_STATES;
         self.channel_accumulator = [0; CHANNEL_COUNT];
         self.beeper_accumulator = 0;
+        self.tape_accumulator = 0;
     }
 
     /// Generate every sample whose window closes at or before `t_state`.
@@ -338,6 +433,9 @@ impl Audio {
         if self.beeper {
             self.beeper_accumulator += u32::from(AMPLITUDE_MAX) * t_states;
         }
+        if self.tape {
+            self.tape_accumulator += u32::from(AMPLITUDE_MAX) * t_states;
+        }
     }
 
     /// Close the current window into a sample, or count it as dropped.
@@ -350,9 +448,11 @@ impl Audio {
         let sample = Sample {
             channels: self.channel_accumulator.map(mean),
             beeper: mean(self.beeper_accumulator),
+            tape: mean(self.tape_accumulator),
         };
         self.channel_accumulator = [0; CHANNEL_COUNT];
         self.beeper_accumulator = 0;
+        self.tape_accumulator = 0;
 
         match self.samples.get_mut(self.len) {
             Some(slot) => {
@@ -371,7 +471,7 @@ impl Audio {
 mod tests {
     use super::*;
 
-    /// A 128's audio, which has both sources.
+    /// A 128's audio, which is the model that has the chip as well as the speaker.
     fn audio() -> Audio {
         Audio::new(Model::Spectrum128)
     }

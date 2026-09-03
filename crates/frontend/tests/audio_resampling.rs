@@ -12,7 +12,7 @@
 //! DC offset that eats the headroom, a rate that drifts a few samples a minute, and a filter
 //! that quietly removes the signal along with the offset.
 
-use frontend::audio::{Resampler, cpu_hz, mix};
+use frontend::audio::{Resampler, cpu_hz, mix, queue_target};
 use spectrum::Sample;
 use spectrum::audio::AMPLITUDE_MAX;
 
@@ -31,11 +31,24 @@ fn beeper(level: u16) -> Sample {
     sample
 }
 
-/// A sample with all four sources at full scale.
+/// A sample with all five sources at full scale.
+///
+/// **Five and not four**: the tape's `EAR` signal joined the mix when the machine started
+/// emitting it, and the clipping gate below is only a clipping gate if it carries every source
+/// that can be loud at once. A loading tape over a game's own music is not a contrived case —
+/// it is what a turbo loader with a title tune does.
 fn everything() -> Sample {
     let mut sample = Sample::default();
     sample.beeper = AMPLITUDE_MAX;
+    sample.tape = AMPLITUDE_MAX;
     sample.channels = [AMPLITUDE_MAX; 3];
+    sample
+}
+
+/// A sample with only the tape's `EAR` signal, at `level`.
+fn tape(level: u16) -> Sample {
+    let mut sample = Sample::default();
+    sample.tape = level;
     sample
 }
 
@@ -57,7 +70,7 @@ fn silence_mixes_to_nothing() {
 }
 
 #[test]
-fn four_sources_at_full_scale_do_not_exceed_the_headroom() {
+fn five_sources_at_full_scale_do_not_exceed_the_headroom() {
     // The defect this exists for is clipping, which sounds like distortion and is inaudible in
     // any test that only ever plays one source. A 128 running an AY tune *and* clicking the
     // beeper is the case that reaches it.
@@ -259,4 +272,202 @@ fn feed_appends_and_does_not_replace() {
     resampler.feed(&vec![silent(); 10_000], &mut out);
     assert!(out.len() > 3);
     assert_eq!(&out[..3], &[0.25, 0.25, 0.25]);
+}
+
+// ---------------------------------------------------------------------------------------
+// The tape reaches the mix
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_playing_tape_is_audible_on_its_own() {
+    // The defect this closes: the machine loaded tapes correctly and in silence, because the
+    // `EAR` line reached bit 6 of a `0xFE` read and nothing else. A level on the line must now
+    // move the mix, with every other source quiet.
+    assert!(
+        mix(tape(AMPLITUDE_MAX)) > 0.0,
+        "a tape at full deflection must be heard"
+    );
+    assert_eq!(mix(tape(0)), 0.0, "and a stopped one must not");
+}
+
+#[test]
+fn the_tape_is_quieter_than_the_beeper_at_the_same_level() {
+    // Not a claim about any real deck — see `TAPE_GAIN`, which is a ruling. It is the property
+    // the ruling exists to produce: a loading tone holds full deflection for the length of a
+    // block, so at unity it would sit on top of beeper music rather than under it.
+    assert!(mix(tape(AMPLITUDE_MAX)) < mix(beeper(AMPLITUDE_MAX)));
+}
+
+// ---------------------------------------------------------------------------------------
+// The rate correction
+// ---------------------------------------------------------------------------------------
+
+/// Output samples produced from `frames` frames' worth of input, with the queue held at `queued`.
+///
+/// **Open-loop: the queue is pinned, so this measures gain and direction and nothing else.** It
+/// cannot tell a stabilising controller from a destabilising one — that is what
+/// [`settled_queue_depth`] is for, and the reason it exists is that an inverted sign passed every
+/// test written against this helper.
+fn produced_with_queue(queued: Option<u32>, target: u32, frames: usize) -> usize {
+    let mut resampler = Resampler::new(cpu_hz(false), DEVICE_HZ);
+    let mut out = Vec::new();
+    let frame = vec![silent(); 2184];
+    for _ in 0..frames {
+        resampler.track(queued, target);
+        resampler.feed(&frame, &mut out);
+    }
+    out.len()
+}
+
+/// Run the loop **closed** for `frames` frames and return the queue depth it ends at.
+///
+/// The queue is fed by what `feed` produces and drained by what a device consumes in one frame —
+/// `device_hz / 50`, since the device runs on its own clock and does not care what the emulator
+/// is doing. `drift` scales the emulator's frame rate against the device's: `1.002` is an
+/// emulator running 0.2% fast, which is the real case that made the backlog grow.
+///
+/// This is the shape that grades **stability**. An open-loop test holds the error constant and so
+/// cannot see whether applying the correction makes the error smaller or larger — which is
+/// exactly how a sign error survives a green suite.
+fn settled_queue_depth(start: i32, target: u32, drift: f64, frames: usize) -> i32 {
+    let mut resampler = Resampler::new(cpu_hz(false), DEVICE_HZ);
+    let mut out = Vec::new();
+    let mut queued = start;
+    let per_frame = vec![silent(); 2184];
+    for _ in 0..frames {
+        resampler.track(u32::try_from(queued).ok(), target);
+        out.clear();
+        resampler.feed(&per_frame, &mut out);
+        queued += out.len() as i32;
+        // What the device took while that frame was being emulated, including the drift.
+        let drained = (f64::from(DEVICE_HZ) / 50.0 * drift) as i32;
+        queued = (queued - drained).max(0);
+    }
+    queued
+}
+
+#[test]
+fn a_deep_queue_is_given_less_and_a_shallow_one_more() {
+    // **The sign, and this test asserted the opposite of it until 2026-09-03.** The reasoning
+    // behind the error was that a backlog is drained by consuming input faster — but the input
+    // rate is not this function's to choose. The machine emits 2184 samples a frame regardless,
+    // and `feed` turns each into `corrected_step / cpu_hz` outputs, so a larger step puts *more*
+    // into a queue that drains at a fixed device rate.
+    //
+    // Direction only. Whether applying it converges is `the_loop_converges_instead_of_running_away`,
+    // which is the test this one was mistaken for.
+    let target = 2400;
+    let at_target = produced_with_queue(Some(target), target, 200);
+    let too_deep = produced_with_queue(Some(target * 2), target, 200);
+    let too_shallow = produced_with_queue(Some(0), target, 200);
+
+    assert!(
+        too_deep < at_target,
+        "a backlog must be given fewer samples, not more: {too_deep} vs {at_target}"
+    );
+    assert!(
+        too_shallow > at_target,
+        "and an emptying queue must be given more: {too_shallow} vs {at_target}"
+    );
+}
+
+#[test]
+fn the_correction_stays_within_its_bound() {
+    // What keeps the correction inaudible. `MAX_CORRECTION` is 0.5%, and a queue at ten times
+    // its target must not exceed it — the clamp, not the arithmetic, is what is being measured.
+    let target = 2400;
+    let frames = 500;
+    let at_target = produced_with_queue(Some(target), target, frames) as f64;
+    let extreme = produced_with_queue(Some(target * 10), target, frames) as f64;
+    let ratio = extreme / at_target;
+    assert!(
+        ratio >= 0.994,
+        "a correction beyond the bound would be heard as pitch: ratio {ratio}"
+    );
+    assert!(
+        ratio < 1.0,
+        "and it must still be correcting: ratio {ratio}"
+    );
+}
+
+#[test]
+fn no_device_yet_leaves_the_rate_alone() {
+    // `page::audio_push` answers `-1` when there is no device, and `main.rs` decodes that to
+    // `None` before it reaches here — a depth that does not exist is not a measurement of
+    // anything, and correcting against it would start every session with a rate error nothing
+    // asked for. It is also the answer a browser gives while its `AudioContext` is suspended,
+    // which is the case that would otherwise leave this loop steering on a frozen number.
+    let target = 2400;
+    let untouched = produced_with_queue(Some(target), target, 100);
+    let no_device = produced_with_queue(None, target, 100);
+    assert_eq!(no_device, untouched);
+}
+
+#[test]
+fn the_loop_converges_instead_of_running_away() {
+    // **The gate the first version of `track` needed and did not have.** It shipped with the sign
+    // inverted — a larger step for a deeper queue — and every open-loop test above passed under
+    // it, because pinning the queue measures direction without ever asking whether applying the
+    // correction moves the error towards zero or away from it.
+    //
+    // Simulated over twenty minutes of browser drift the inverted sign reached 8.9 seconds of
+    // backlog. Here: start away from the setpoint in both directions and require that the loop
+    // ends nearer to it than it began.
+    let target = 2400;
+    let frames = 3000;
+
+    let from_deep = settled_queue_depth(target as i32 * 2, target, 1.0, frames);
+    let from_empty = settled_queue_depth(0, target, 1.0, frames);
+
+    let deep_error = (from_deep - target as i32).abs();
+    let empty_error = (from_empty - target as i32).abs();
+    assert!(
+        deep_error < target as i32,
+        "a queue starting at twice the target settled at {from_deep}, error {deep_error}"
+    );
+    assert!(
+        empty_error < target as i32,
+        "a queue starting empty settled at {from_empty}, error {empty_error}"
+    );
+}
+
+#[test]
+fn a_drifting_emulator_does_not_accumulate_latency() {
+    // The case that produced the defect in the first place: the emulator paces to 50.08 Hz and the
+    // device consumes one second per second, so without a loop the backlog grows without bound.
+    // 210 ms after four minutes was the browser observation; this is the same shape, run long.
+    //
+    // **Both rails, and the lower one is not decoration.** A ceiling-only assertion passes on the
+    // inverted sign: under it the queue does not run away, it collapses to zero and stays there —
+    // which on the desktop is `desktop::fill` substituting silence for the samples that never
+    // arrive, once per frame, a continuous 50 Hz rasp in place of the tick this branch set out to
+    // remove. Measured: with the sign flipped this test was the one closed-loop gate that still
+    // passed. Zero millisecond of backlog is not success.
+    let target = 2400;
+    let settled = settled_queue_depth(target as i32, target, 1.002, 15_000);
+    let milliseconds = f64::from(settled) / f64::from(DEVICE_HZ) * 1000.0;
+    assert!(
+        (1.0..250.0).contains(&milliseconds),
+        "0.2% of drift settled at {milliseconds:.1} ms of backlog over 15,000 frames; the band \
+         is (1, 250) — above it the loop lost, at the bottom it is a permanent underrun"
+    );
+}
+
+#[test]
+fn the_setpoint_is_half_the_device_buffer() {
+    // `queue_target` is the ruling the frame loop used to spell `* BUFFER_MILLISECONDS / 2000`,
+    // where `2000` was a unit conversion and a policy multiplied together. Both halves are
+    // asserted separately here, so a change to either is a change a test names.
+    let whole_buffer = DEVICE_HZ * page::BUFFER_MILLISECONDS / 1000;
+    assert_eq!(
+        queue_target(DEVICE_HZ),
+        whole_buffer / 2,
+        "the setpoint is half the ring, so the correction has the same authority in both \
+         directions"
+    );
+    // And in the unit a person reads off the status bar: half of 100 ms.
+    assert_eq!(queue_target(DEVICE_HZ), 2400);
+    // A 44.1 kHz device gets its own figure rather than the 48 kHz one — the setpoint is a
+    // duration, and the sample count that expresses it is the device's.
+    assert_eq!(queue_target(44_100), 2205);
 }

@@ -31,7 +31,7 @@ so a new copy has to be argued for rather than swept in by a glob.
 |---|---|
 | `index.html` | this directory. The canvas, the key guide, and the Amstrad acknowledgement as visible text |
 | `mq_js_bundle.js` | **vendored** from the pinned `macroquad` crate — provenance below |
-| `zx_page.js` | this directory. The only JavaScript this project wrote: the query string, the download, and focusing the canvas |
+| `zx_page.js` | this directory. The page's half of `crates/page`: the query string, the download, the audio bridge, and the canvas focus. *This cell called it "the only JavaScript this project wrote", one row above the worklet's — the other hand-written file. `zx_page.js`'s own header carries the retraction* |
 | `zx_audio_worklet.js` | this directory. The audio worklet, fetched **by name** at run time by `audioWorklet.addModule` &mdash; so a build that omits it produces a page that starts, draws and is silent, with the explanation in a console nobody has open. `gate.sh`'s T2 asserts both that the file is here and that `build.sh` copies it, precisely to convert that into a build-time failure |
 | `zx.wasm` | `cargo build --release --target wasm32-unknown-unknown --bin zx` |
 | `testdata/roms/48.rom` | copied from the checkout, at the path `DEFAULT_ROM` names, so a bare URL boots |
@@ -100,9 +100,11 @@ loudly at build time; the runtime check fails quietly at the only moment it coul
 
 ### `zx_page.js` and `crates/page` are one contract in two files
 
-The three import names, their argument order, and the rule that **1 means started and everything
-else means refused** are fixed by `crates/page/src/lib.rs`. `PLUGIN_VERSION` appears in both
-files and must match; `web/gate.sh` additionally asserts that all three imports exist in the
+The five import names, their argument order, and the rule that **1 means started and everything
+else means refused** are fixed by `crates/page/src/lib.rs`. *This paragraph counted "three",
+twice, from before the audio seam added `zx_audio_rate` and `zx_audio_push` — the same drift
+`zx_page.js`'s header records about its own copy of the figure.* `PLUGIN_VERSION` appears in both
+files and must match; `web/gate.sh` additionally asserts that all five imports exist in the
 built module under the `env` module name, so a rename on one side that the other does not follow
 is caught at build time.
 
@@ -153,7 +155,8 @@ sh web/gate.sh
 |---|---|---|
 | Every existing frontend gate, plus the query/`argv` agreement table and the download's refusal codes | **proven** | yes |
 | `crates/frontend` contains no `cfg(target`, and `crates/page` does | **proven** | yes |
-| The `unsafe` surface is five blocks, two extern blocks and one attribute, each with a `SAFETY:` comment — `EXPECTED_BLOCKS`, `EXPECTED_EXTERN_BLOCKS` and `EXPECTED_UNSAFE_ATTRIBUTES` in `crates/page/tests/unsafe_inventory.rs` | **proven** | yes |
+| The `unsafe` surface is five blocks each with a `SAFETY:` comment, two extern blocks whose obligations are discharged at the call sites (each call is one of the five blocks), and one attribute whose linker assertion is discharged in its own `# Safety` doc section — `EXPECTED_BLOCKS`, `EXPECTED_EXTERN_BLOCKS` and `EXPECTED_UNSAFE_ATTRIBUTES` in `crates/page/tests/unsafe_inventory.rs`. *This row said all three kinds carried a `SAFETY:` comment; only the blocks do, and only the blocks are what the comment gate grades* | **proven** | yes |
+| `quiet_48k` stays under a recorded hot-path ceiling — the lowest `fastest` of three bench runs against 138.7 µs × 1.15, the derivation dated and spelled out at the step itself | **measured**, on the machine the baseline was recorded on; skipped, and counted as an unanswered question, anywhere else | **no** |
 | `cargo clippy --target wasm32-unknown-unknown` — the only run that lints the `unsafe` blocks at all | **proven**, of the wasm build | **no** |
 | The crate builds and **links** for `wasm32-unknown-unknown` | **proven**, of the link | **no** |
 | The artefact exists, clears a size floor, and carries the imports `zx_page.js` provides and the exports `gl.js` calls | **proven**, of the artefact | **no** |

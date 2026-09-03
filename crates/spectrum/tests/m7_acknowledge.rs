@@ -23,8 +23,11 @@
 //!   T-states, contention begins at 14335, and acceptance cannot be deferred past the window's
 //!   end. Every accepted interrupt lands in the top border.
 //! - **On a 128 the same argument holds**, re-derived on its own numbers rather than inherited:
-//!   the window still opens at frame T-state 0 and contention begins at 14361. The conclusion
-//!   does not depend on that disputed figure — it would have to be under about forty.
+//!   the window still opens at frame T-state 0 and contention begins at **14362**. The conclusion
+//!   never depended on the figure — it would have to be under about forty. *(This read 14361 and
+//!   called it "that disputed figure". `tests/timing_oracle.rs`'s 128 edition settled it on
+//!   2026-09-02 at 14362, uniquely; the margin the argument rests on does not notice one
+//!   T-state, which is what the sentence was for.)*
 //! - **`NMI` is the exception, and it has no hardware source on either machine.** Nothing on a
 //!   Spectrum drives `/NMI`, so no guest reaches this either; a test does, because `Cpu::nmi` is
 //!   a public entry point.
@@ -252,9 +255,11 @@ fn no_accepted_interrupt_on_either_machine_can_reach_a_contended_t_state() {
             timing.first_contended_t_state()
         );
 
-        // And the margin, so that the conclusion is visibly insensitive to the one figure this
-        // milestone could not establish. 14361 would have to be wrong by three orders of
-        // magnitude for the argument to fail.
+        // And the margin, so that the conclusion is visibly insensitive to the offset. Written
+        // when that offset was "the one figure this milestone could not establish"; the 128
+        // edition of `timing_oracle.rs` established it on 2026-09-02, and the assertion is worth
+        // keeping unchanged because what it grades is the *margin* — the offset would have to be
+        // wrong by three orders of magnitude for the argument to fail, and it moved by one.
         assert!(
             timing.first_contended_t_state() > 40 * latest,
             "{name}: the conclusion should not be close"

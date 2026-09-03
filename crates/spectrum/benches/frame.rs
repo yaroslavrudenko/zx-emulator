@@ -35,6 +35,7 @@
 //! | `beeper_48k` | a guest toggling the speaker every 18 T-states, drained once |
 //! | `ay_128` | a guest writing an AY register every 29 T-states, drained once, with three tones and an envelope running |
 //! | `tape_reads_48k` | a guest reading `0xFE` every 11 T-states — the only case that exercises the **`IN`** path at all, and what `Spectrum::ear_reads`'s counter is priced against |
+//! | `tape_playing_48k` | `drained_48k` **plus a cassette actually turning** — a ROM pilot tone under the same `NOP` frame, so the difference between the two rows is the whole of `Tape::advance` → `Audio::set_tape` → `Audio::render_to` and nothing else |
 //! | `border_48k` | a guest flipping the **border** every 18 T-states — about 3900 bands' worth in a frame |
 //! | `quiet_rendered_48k` / `border_rendered_48k` | the same frames **plus a `render`**, which is the only thing that walks the border record. The gap between the pair is what drawing bands costs over drawing one colour |
 //!
@@ -63,6 +64,26 @@
 //! than one colour costs 3.5 µs**: `border_rendered_48k − border_48k` is 7.2 µs against
 //! `quiet_rendered_48k − quiet_48k`'s 3.7 µs, so the record itself is the difference.
 //!
+//! # And on 2026-09-03, with the tape half landed
+//!
+//! Two changes sit between the dates. M8's tape half routed the `EAR` line to the speaker —
+//! and first shipped a per-T-state timestamp with it, the +23 % regression whose account
+//! `docs/ARCHITECTURE.md` Decision 7's correction carries, reversed the same afternoon and
+//! the reason `tape_playing_48k` exists — and `Memory::is_contended` was folded into a
+//! per-slot cache rebuilt on the paging write instead of walking bank contention per access.
+//! Lowest median of three runs, one-minute load average 12–17 on 16 cores (another job ran
+//! throughout, which could not be arranged otherwise):
+//!
+//! | Case | Median | Share of a frame |
+//! |---|---|---|
+//! | `quiet_48k` | 138.8 µs | 0.69 % |
+//! | `drained_48k` | 146.3 µs | 0.73 % |
+//! | `tape_playing_48k` | 147.1 µs | 0.74 % |
+//!
+//! The row the 2026-09-01 table could not contain, because no case then played a tape: a
+//! cassette actually turning costs **+0.8 µs a frame** over the same frame drained silent.
+//! The paragraph above about that day's numbers stands as its record.
+//!
 //! # Reading it
 //!
 //! The counter column reports **T-states per second**, so the realtime multiple is that figure
@@ -74,7 +95,7 @@
 use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
 use spectrum::memory::PAGE_SIZE;
-use spectrum::{Frame, Spectrum, timing::Timing};
+use spectrum::{Frame, Spectrum, Tape, timing::Timing};
 
 fn main() {
     divan::main();
@@ -278,6 +299,60 @@ fn tape_reads_48k(bencher: Bencher) {
         false,
         FORTY_EIGHT_FRAME,
     );
+}
+
+/// The 48K ROM's pilot-tone half-period, in T-states.
+///
+/// **Transcribed rather than imported, and that is a cost worth naming.** `tape/tap.rs`'s
+/// `PILOT_PULSE` is `pub(super)`, and a bench is an external crate, so this cannot be the same
+/// constant — unlike the two frame lengths below it, which are `pub` and are therefore asserted
+/// against their source. 2168 is the figure `tap.rs` carries and sources; if that file ever
+/// moves it, nothing here goes red, and the row this feeds silently stops being a pilot tone.
+const PILOT_PULSE: u32 = 2168;
+
+/// Half-periods enough to cover one whole frame, with a margin.
+///
+/// Derived rather than chosen: a train that ran out part-way through would make the case measure
+/// a playing tape for some of the frame and a stopped one for the rest, and *which* would depend
+/// on where the frame boundary fell. A bench whose subject changes between iterations is worse
+/// than no bench.
+const PILOT_PULSES: usize = (FORTY_EIGHT_FRAME / PILOT_PULSE) as usize + 2;
+
+// Asserted rather than argued, in the style of the two frame lengths below: the train must
+// outlast the frame, or the case silently becomes half a tape and half an empty drive.
+const _: () = assert!(PILOT_PULSES as u32 * PILOT_PULSE > FORTY_EIGHT_FRAME);
+
+/// The same frame as `drained_48k` **with the cassette turning**, which is the one thing no
+/// other case here does.
+///
+/// # Why this row exists
+///
+/// M7's sound half claims the tape costs nothing on the hot path when no tape is playing, and
+/// `quiet_48k` grades that. Nothing graded the other side. `tape_reads_48k` reads the `EAR` port
+/// hard, but with an **empty drive** — the level never moves, so `Tape::advance` returns on its
+/// first guard and `Audio::set_tape` is never reached. Every case in this file was in that state,
+/// and a **+23 % regression on exactly this path shipped green** because of it: the wiring that
+/// put a `u64` multiply-add on every elapsed T-state was invisible to all eleven rows.
+///
+/// A pilot tone is the honest shape to measure. It is what a real load spends most of its time
+/// in — 8063 half-periods for a header — and at 2168 T-states it flips the `EAR` line about
+/// **32 times a frame**, each flip running the generator forward. A data block is denser (855
+/// T-states a bit, ~82 edges a frame) and would be the upper bound; the pilot is the workload.
+#[divan::bench]
+fn tape_playing_48k(bencher: Bencher) {
+    bencher
+        .counter(ItemsCount::new(FORTY_EIGHT_FRAME))
+        .with_inputs(|| {
+            let mut machine = forty_eight();
+            load(&mut machine, UNCONTENDED, NOPS);
+            machine.insert_tape(Tape::new(vec![PILOT_PULSE; PILOT_PULSES]));
+            machine.tape_mut().play();
+            machine
+        })
+        .bench_local_values(|mut machine| {
+            black_box(one_frame(&mut machine, UNCONTENDED, true));
+            machine
+        });
 }
 
 #[divan::bench]

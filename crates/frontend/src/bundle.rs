@@ -44,6 +44,8 @@
 //! Printing their notice over a ROM they did not write would be a false statement in the one
 //! place this repository is most careful not to make one.
 
+use std::sync::LazyLock;
+
 /// The file name of the embedded ROM, or empty. Set by `build.rs`.
 #[cfg(feature = "bundled")]
 const ROM_NAME: &str = env!("ZX_BUNDLE_ROM_NAME");
@@ -73,16 +75,25 @@ const SINCLAIR: &[u8] = b"Sinclair";
 /// have named them: the ROM first, because the ROM is what the machine is made of.
 #[must_use]
 pub fn entries() -> &'static [(&'static str, &'static [u8])] {
+    // Each arm is the **tail expression** of whichever build survives `cfg`-stripping, rather
+    // than a `return` in the first and a tail in the second.
+    //
+    // *That asymmetry is why `cargo clippy --features bundled` had never passed.* Under
+    // `bundled` the second arm is stripped, the `return` becomes the last thing in the function,
+    // and `clippy::needless_return` — a `-D`-level lint here — fires. Nothing ran it: the
+    // feature needs `ZX_BUNDLE_ROM` or `ZX_BUNDLE_MEDIA` set or `build.rs` refuses the build, so
+    // a bare `cargo clippy --all-features` fails before it lints and `web/gate.sh` never asks.
+    // A lint gate with a build-script precondition nobody satisfies is a gate that does not run.
     #[cfg(feature = "bundled")]
     {
         // `match` on the two emptiness cases rather than building a `Vec`, so the return type
         // stays a `&'static` slice and a bundled build allocates nothing to answer this.
-        return match (ROM_NAME.is_empty(), MEDIA_NAME.is_empty()) {
+        match (ROM_NAME.is_empty(), MEDIA_NAME.is_empty()) {
             (false, false) => &[(ROM_NAME, ROM_BYTES), (MEDIA_NAME, MEDIA_BYTES)],
             (false, true) => &[(ROM_NAME, ROM_BYTES)],
             (true, false) => &[(MEDIA_NAME, MEDIA_BYTES)],
             (true, true) => &[],
-        };
+        }
     }
     #[cfg(not(feature = "bundled"))]
     &[]
@@ -127,24 +138,53 @@ pub fn bytes(name: &str) -> Option<&'static [u8]> {
 ///
 /// [`None`] when nothing is embedded, and when what is embedded is not a Sinclair ROM. See this
 /// module's header for why that distinction is drawn by looking at the bytes.
+///
+/// # Answered once, and it used to be answered fifty times a second
+///
+/// This scanned every embedded payload for the `SINCLAIR` marker on **every call** — that constant
+/// is `#[cfg(feature = "bundled")]`, so a default build's docs cannot link it — and its one caller
+/// is `Status::draw`, inside the frame loop — *above* the `if !self.visible { return; }` guard, so
+/// `F1` did not switch it off either. The answer is a function of `const` data and cannot change
+/// for the life of the process.
+///
+/// The cost was not hypothetical. `Sinclair` first occurs at byte 5440 of `48.rom`, so the best
+/// case — the marker found in the first entry — is 5,441 window comparisons per frame, about
+/// 272,000 a second. The worst case is a non-Sinclair ROM, where `.any` never short-circuits and
+/// falls through to the media slot as well: a full scan of the ROM **plus the whole game**, every
+/// frame, unbounded in the payload's size — for a 500 KB `.tzx` that is roughly 26 million
+/// comparisons a second. It costs nothing in a default build and bites only the `bundled`
+/// artefact, which is the double-clicked standalone the feature exists for and the build nobody
+/// profiles.
+///
+/// [`LazyLock`] rather than [`OnceLock`](std::sync::OnceLock) because there is no argument to
+/// pass and no fallible step, and it needs no `unsafe`, so this crate's `forbid(unsafe_code)` is
+/// untouched. Stable since 1.80; this workspace's MSRV is 1.98.
 #[must_use]
 pub fn acknowledgement() -> Option<&'static str> {
+    /// The permission's own words, not a paraphrase. `testdata/README.md` quotes Cliff Lawson of
+    /// Amstrad plc in full and is the single source for the sourcing; this is the sentence he
+    /// asks the program to carry.
+    const NOTICE: &str = "Amstrad have kindly given their permission for the redistribution of \
+                          their copyrighted material but retain that copyright.";
+
+    static ACKNOWLEDGEMENT: LazyLock<Option<&'static str>> =
+        LazyLock::new(|| embeds_a_sinclair_rom().then_some(NOTICE));
+    *ACKNOWLEDGEMENT
+}
+
+/// Whether any embedded payload carries [`SINCLAIR`]. See [`acknowledgement`] for why it is
+/// asked exactly once.
+fn embeds_a_sinclair_rom() -> bool {
     #[cfg(feature = "bundled")]
     {
-        let sinclair = entries().iter().any(|&(_, bytes)| {
+        entries().iter().any(|&(_, bytes)| {
             bytes
                 .windows(SINCLAIR.len())
                 .any(|window| window == SINCLAIR)
-        });
-        if sinclair {
-            // The permission's own words, not a paraphrase. `testdata/README.md` quotes Cliff
-            // Lawson of Amstrad plc in full and is the single source for the sourcing; this is
-            // the sentence he asks the program to carry.
-            return Some(
-                "Amstrad have kindly given their permission for the redistribution of their \
-                 copyrighted material but retain that copyright.",
-            );
-        }
+        })
     }
-    None
+    #[cfg(not(feature = "bundled"))]
+    {
+        false
+    }
 }

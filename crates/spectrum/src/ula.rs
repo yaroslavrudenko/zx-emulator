@@ -32,15 +32,16 @@
 //! | I/O contention | yes, the four-case ULA port pattern |
 //! | Keyboard | yes |
 //! | Kempston joystick | **yes** — port `0x1F`, five switches, active high; see [`crate::joystick`] |
-//! | The Kempston **decode** | **primary** — `A5 = A6 = A7 = 0` from the Issue 4 (1989) schematic, so the window is `0x00..=0x1F`; see [`crate::joystick::KEMPSTON_PORT_MASK`] |
-//! | Border colour | latched, **and recorded per rendered row** — a tape load shows its bands; see [`crate::screen::BorderTrace`] |
+//! | The Kempston **decode** | **primary** — `A5 = A6 = A7 = 0` from the Issue 4 (1989) schematic, so the window is the whole low byte `0x00..=0x1F` and **no high-byte line is consulted**; see [`crate::joystick::KEMPSTON_PORT_MASK`] |
+//! | Border colour | latched, **and recorded per rendered row** — a tape load shows its bands; see `screen::BorderTrace` |
 //! | Floating bus | **no** — an undecoded port reads [`FLOATING_BUS_BYTE`] |
 //! | Speaker | **yes** — bit 4 of a `0xFE` write drives the beeper; M7 closed this |
-//! | `MIC` | **no** — bit 3 is still discarded, and what that costs is in [`MIC_BIT`] |
+//! | `MIC` | **no** — bit 3 is still discarded, and what that costs is in `MIC_BIT` |
 //! | The `0xFE` port's **four** output levels | **no** — the speaker is two-level. `MIC` shifting it is a magnitude with no source |
 //! | AY-3-8912 | **yes on a 128, absent on a 48K** — `0xFFFD` select and read, `0xBFFD` write; see [`crate::ay`] |
-//! | The AY's **address decode** | **derived, and the weakest claim in M7** — no source states it; see [`AY_PORT_MASK`] |
+//! | The AY's **address decode** | **derived, and the weakest claim in M7** — no source states it; see `AY_PORT_MASK` |
 //! | `EAR` input | **yes** — bit 6 of a `0xFE` read follows [`crate::tape::Tape::level`] |
+//! | `EAR` reaching the **speaker** | **yes** — the same level arrives as [`crate::audio::Sample::tape`], because the socket feeds the amplifier as well as the ULA; M8 closed this |
 //! | Issue 2 / issue 3 `EAR` readback | **no** — writing bit 3 or 4 does not change what bit 6 reads |
 //! | Paging port `0x7FFD` writes | **yes**, on the partial decode — A15 and A1 both reset |
 //! | Paging port `0x7FFD` **reads** | **no** — and on real hardware they are destructive; see below |
@@ -136,10 +137,13 @@
 //!
 //! **It survives the 128 unchanged, and that was re-derived on the 128's own numbers rather
 //! than inherited.** Its window opens at frame T-state 0 exactly as the 48K's does and its
-//! contention begins at 14361, so the gap is ≈14300 T-states on both machines. The conclusion
-//! does not depend on the disputed constant: the offset would have to be **under about forty**
+//! contention begins at **14362**, so the gap is ≈14300 T-states on both machines. The
+//! conclusion never depended on the number: the offset would have to be **under about forty**
 //! for an acknowledge to reach it, and no candidate value for any machine in this family is
-//! near that.
+//! near that. *(This read 14361 and called it "the disputed constant". It is no longer disputed
+//! and it is no longer 14361: the 128 edition of `tests/timing_oracle.rs` was run on 2026-09-02
+//! and 14362 is the unique zero over `14355..=14370`. The margin the paragraph rests on is
+//! unchanged by one T-state, which is the point it was making.)*
 //!
 //! **`NMI` is the exception, and it is why this is now gated rather than merely pinned.** An
 //! `NMI` has no window — nothing stops one being raised at any frame position — so a
@@ -199,8 +203,11 @@ const PAGING_PORT_SELECT: u16 = 0x8002;
 
 // The two decodes select on **disjoint** address lines — A0 against A15 and A1 — so neither
 // constrains the other and the two families genuinely overlap: any address with A0, A1 and A15
-// all reset is claimed by both, and on the hardware both respond. That is why `out_port` is two
-// independent `if`s and never a `match` on the port.
+// all reset is claimed by both, and on the hardware both respond. That is why `out_port` is a
+// run of independent `if`s and never a `match` on the port. It said "**two** independent `if`s"
+// until M7 gave the AY two arms of its own and made it four; the count is left out rather than
+// re-pinned, because it is the *shape* this comment is about and the count has now been wrong
+// once already.
 const _: () = assert!(ULA_PORT_SELECT & PAGING_PORT_SELECT == 0);
 const _: () = assert!(0x7FFD & PAGING_PORT_SELECT == 0, "the paging port decodes");
 const _: () = assert!(0x00FE & ULA_PORT_SELECT == 0, "the ULA port decodes");
@@ -360,12 +367,18 @@ pub struct Ula {
     /// Those two are the cases a drive's own `is_playing` cannot tell apart, and separating
     /// them is the whole of what this field is for.
     ear_reads: u64,
-    /// The machine's sound: the beeper, the AY on a machine that has one, and the samples
-    /// they have produced.
+    /// The machine's sound: the beeper, the tape's `EAR` line, the AY on a machine that has
+    /// one, and the samples they have produced.
     ///
-    /// **Nothing in [`Ula::tick`] touches this**, and that is the whole of M7's sound design
-    /// on the hot path — see [`crate::audio`] for why generating late is not merely cheaper
-    /// but produces an identical stream.
+    /// **This read *"Nothing in `Ula::tick` touches this"*, and `Ula::advance` three hundred
+    /// lines below has touched it since M8 routed the tape to the speaker** — which made the two
+    /// sentences contradict inside one file, the field's doc asserting what its only per-T-state
+    /// caller disproves. What is true now: `tick` reaches this **only through the tape's edge**,
+    /// about 32 times a frame during a load and never at all with an empty drive, at a measured
+    /// **+0.9 µs a frame** against a 20,000 µs budget (`cargo bench -p spectrum --bench frame`,
+    /// 2026-09-03, `tape_playing_48k` against `drained_48k`). Everything else generating late is
+    /// unchanged — see [`crate::audio`] for why that is not merely cheaper but produces an
+    /// identical stream.
     audio: Audio,
 }
 
@@ -401,9 +414,12 @@ impl Ula {
     /// Put the clock back to the start of frame zero, clear the border, and restore the
     /// power-on memory map.
     ///
-    /// RAM, the keyboard and **the tape** are left alone: a reset button does not clear RAM,
-    /// does not lift the keys, and does not rewind a cassette. The ROM's own start-up clears
-    /// what it relies on.
+    /// RAM, the keyboard, **the joystick** and **the tape** are left alone: a reset button does
+    /// not clear RAM, does not lift the keys, does not let go of the stick, and does not rewind
+    /// a cassette. The ROM's own start-up clears what it relies on. *(The joystick was missing
+    /// from this list, which is the kind of omission that reads as a decision: it is a peripheral
+    /// on the far side of an edge connector and a reset cannot reach it, exactly as it cannot
+    /// reach the membrane.)*
     ///
     /// **The map is the M7 addition, and the old sentence was right about RAM and incomplete
     /// about the rest.** Reset is the only thing that clears the paging lock, so it is the only
@@ -507,9 +523,12 @@ impl Ula {
     /// call it once a frame and copy what it returns. It borrows rather than allocating; the
     /// buffer behind it is allocated once, at construction, and refilled in place.
     ///
-    /// The two sources arrive **separate** — [`crate::audio::Sample`] carries the AY's three
-    /// channels and the beeper as distinct numbers — because mixing them is the frontend's
-    /// job and because the AY's own gate must not be falsifiable by the beeper.
+    /// The sources arrive **separate** — [`crate::audio::Sample`] carries the AY's three
+    /// channels, the beeper and the tape's `EAR` line as distinct numbers — because mixing them
+    /// is the frontend's job and because the AY's own gate must not be falsifiable by the
+    /// beeper. *(This said "the two sources … the AY's three channels and the beeper". The tape
+    /// became the third when M8 routed the `EAR` line to the speaker, and this crate's own
+    /// coverage table above has named it since.)*
     ///
     /// Calling it twice in a row yields the second call nothing, which is what taking means.
     /// A consumer that calls it less often than once a frame loses samples and can find out
@@ -622,17 +641,44 @@ impl Ula {
         &mut self.tape
     }
 
-    /// Let `t_states` elapse: the clock moves, and the tape moves with it.
+    /// Let `t_states` elapse: the clock moves, the tape moves with it, and the speaker hears
+    /// the tape if the tape moved far enough to flip.
     ///
-    /// **The one place time passes.** Contention advances the clock by a stall of 0–6
-    /// T-states outside any `tick`, so a tape driven from [`Ula::tick`] alone would run slow
-    /// by exactly the contention a loader suffers — and would do it silently. Every
-    /// `Clock::advance` call site in this file routes through here for that reason;
+    /// **The one place time passes.** *(The summary line above used to name two of the three
+    /// things this does. The third is conditional, which is why it now says so rather than
+    /// being left out.)* Contention advances the clock by a stall of 0–6 T-states outside any
+    /// `Ula::tick`, so a tape driven from `tick` alone would run slow by exactly the contention
+    /// a loader suffers — and would do it silently. Every `Clock::advance` call site in this
+    /// file routes through here for that reason;
     /// `crates/spectrum/tests/tape_signal.rs` asserts that a stalled access moves the tape.
+    ///
+    /// **The edge's timestamp is approximated, and by how much is worth writing down.** The
+    /// clock has already advanced by the whole of `t_states` when the level is read, so an edge
+    /// that fell *inside* the advance is stamped at its **end** — late by up to `t_states`. That
+    /// is 1 for a `tick`, up to 6 for a contention stall and up to 12 across a contended I/O
+    /// cycle, against a 32-T-state sample window: at worst the edge lands one sample later than
+    /// it should. The read side carries the mirror-image approximation and states it to the
+    /// T-state above; this is the write side of the same trade, and it is taken for the same
+    /// reason — a mid-advance timestamp would need the tape to report *when* it flipped rather
+    /// than *that* it did, which is a wider signature for a third of a sample.
     #[inline]
     fn advance(&mut self, t_states: u32) {
         self.clock.advance(t_states);
-        self.tape.advance(t_states);
+        // **And the tape reaches the speaker, not only bit 6.** On a real machine the `EAR`
+        // socket feeds the amplifier as well as the ULA's input, which is why a loading tape is
+        // audible. Routing it to [`Ula::ear_bit`] alone loads tapes correctly and in silence.
+        //
+        // **The `if` is load-bearing and it was measured.** This first read the level
+        // unconditionally and let `Audio::set_tape` compare — the shape `set_beeper` uses, and
+        // the wrong one here, because the *timestamp* argument is evaluated at the call site
+        // before any guard can discard it. `Clock::t_states` is a `u64` multiply-add, and paying
+        // it on every elapsed T-state cost **+21.9% on `benches/frame.rs`'s `quiet_48k`** — a
+        // machine with no tape in the drive. `Tape::advance` already knew when the level moved;
+        // now it says so, and the multiply happens only when there is something to timestamp.
+        if self.tape.advance(t_states) {
+            self.audio
+                .set_tape(self.tape.level(), self.clock.t_states());
+        }
     }
 
     /// Bit 6 of a `0xFE` read: the level the tape is driving the `EAR` line to.
@@ -673,6 +719,7 @@ impl Ula {
     /// Each stall shifts the ones after it, which is why the offsets accumulate. The whole
     /// stall is charged before the cycle's four nominal T-states arrive as ticks; the
     /// clock ends in the same place, and nothing observes it in between.
+    #[inline]
     fn port_delay(&self, port: u16) -> u32 {
         let contended_address = self.memory.is_contended(port);
         let ula_port = port & ULA_PORT_SELECT == 0;
@@ -757,10 +804,19 @@ impl Bus for Ula {
             return ay.read();
         }
         // **The joystick answers before the ULA, and that is a ruling.** Its decode is three
-        // address lines to the ULA's one, so it claims every *even* port from `0x00` to `0x1E`
-        // as well — an overlap that is real on hardware, where a fitted Kempston and the ULA
-        // would both drive the data bus. There is no right answer to find by thinking harder,
-        // so the narrower decode wins, exactly as it does for the AY two arms below.
+        // address lines to the ULA's one, and `KEMPSTON_PORT_MASK` consults **no high-byte line
+        // at all** — which `joystick.rs`'s own tests assert deliberately — so the overlap is
+        // every address with A0, A5, A6 and A7 clear: **8192 of 65536**, `0x7F00` and `0xFE00`
+        // among them. It is real on hardware, where a fitted Kempston and the ULA would both
+        // drive the data bus. There is no right answer to find by thinking harder, so the
+        // narrower decode wins.
+        //
+        // *(This described the overlap as "every even port from `0x00` to `0x1E`" — the low byte
+        // only, 16 addresses, 512 times too few, and a description a mask consulting no high line
+        // cannot have. It also cited "the AY two arms below" as the same ruling. Both halves of
+        // that were wrong: the AY's arm **in this function** is a single `if`, and it is above
+        // rather than below; the only two-arm AY site is in `out_port`, where the arms are
+        // unordered and everything that matches fires, so no decode "wins" there at all.)*
         //
         // Nothing in reach exercises it: the keyboard is scanned at `0xFE` and every
         // "is any key down" idiom is `IN A,(0xFE)` with a high half, whose low byte has A5
@@ -779,12 +835,18 @@ impl Bus for Ula {
         self.keyboard.read(port) | UNDRIVEN_INPUT_BITS | self.ear_bit()
     }
 
-    /// Two independent `if`s, **never a `match` on the port**.
+    /// **Four** independent `if`s, **never a `match` on the port**.
     ///
-    /// The ULA decodes A0 alone and the paging port decodes A15 and A1, so the two families
-    /// overlap — `0x00FE` is claimed by both, and on the hardware both respond. A `match`
-    /// would silently pick one and stop the other answering, which is the kind of defect that
-    /// shows up as "this game works on one emulator and not another" rather than as a failure.
+    /// The ULA decodes A0 alone, the paging port decodes A15 and A1, and the AY's select and
+    /// write ports take an arm each, so the families overlap — `0x00FE` is claimed by two of
+    /// them, and on the hardware every device that matches responds. A `match` would silently
+    /// pick one and stop the others answering, which is the kind of defect that shows up as
+    /// "this game works on one emulator and not another" rather than as a failure.
+    ///
+    /// *(This said **two**, and stopped being true when M7 added the AY's pair — which the
+    /// comment beside those very arms explains at length. The number is what a reader checks
+    /// the function against, so it is corrected here rather than dropped; the shape argument
+    /// under it never depended on the count and is unchanged.)*
     #[inline]
     fn out_port(&mut self, port: u16, value: u8) {
         self.begin_port_cycle(port);

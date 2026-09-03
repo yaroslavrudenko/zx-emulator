@@ -21,10 +21,13 @@
 //!
 //! # What is **not** graded here
 //!
-//! - **Whether 14361 is right.** These gates position themselves at whatever the machine's own
-//!   `first_contended_t_state` is, so they measure the *mechanism* and are silent about the
-//!   *number*. Nothing in this repository can grade the 128's number; see
-//!   [`spectrum::timing::Timing::SPECTRUM_128`].
+//! - **Whether the 128's offset is right.** These gates position themselves at whatever the
+//!   machine's own `first_contended_t_state` is, so they measure the *mechanism* and are silent
+//!   about the *number* — which remains true and is the point of the row. *(It read **"Whether
+//!   14361 is right … nothing in this repository can grade the 128's number"**. Both halves are
+//!   now false: the number is **14362**, and `tests/timing_oracle.rs`'s 128 edition graded it
+//!   against hardware on 2026-09-02. What survives is the scoping claim — that *these* gates do
+//!   not.)* See [`spectrum::timing::Timing::SPECTRUM_128`].
 //! - **Whether banks 1, 3, 5 and 7 are the right set.** Transcribed, and graded against the
 //!   transcription.
 

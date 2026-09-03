@@ -13,13 +13,13 @@
 //!
 //! | | Graded here | By what |
 //! |---|---|---|
-//! | The noise register's **period** | yes | [`tests::the_noise_registers_period_is_maximal`], and the tap sweep beside it, which measures the gate's own blind spot |
-//! | The envelope's **aliasing** — 16 shape values, 8 behaviours | yes | [`tests::the_sixteen_envelope_shapes_are_eight_behaviours`]. It is *derived* rather than tabulated: [`Envelope`] implements the four `CONT`/`ATT`/`ALT`/`HOLD` bits, so the aliasing **emerges** and the test grades the decode |
-//! | **Counter periodicity** over all 4096 tone values | yes | [`tests::every_tone_period_toggles_at_the_rate_its_register_names`] |
-//! | **Mixer polarity** — the enable bits are active low | yes | [`tests::the_mixer_bits_are_active_low`], and it is a boolean rather than a magnitude |
-//! | **Register write masks** | yes, against the transcription | [`tests::the_narrow_registers_drop_the_bits_they_do_not_have`] |
-//! | The **volume table** | **no. Nothing here can.** | [`AMPLITUDE`] |
-//! | The **divisors** — tone, noise, envelope | **no. Nothing here can.** | [`TONE_DIVISOR`] and its neighbours |
+//! | The noise register's **period** | yes | `tests::the_noise_registers_period_is_maximal`, and the tap sweep beside it, which measures the gate's own blind spot |
+//! | The envelope's **aliasing** — 16 shape values, 8 behaviours | yes | `tests::the_sixteen_envelope_shapes_are_eight_behaviours`. It is *derived* rather than tabulated: `Envelope` implements the four `CONT`/`ATT`/`ALT`/`HOLD` bits, so the aliasing **emerges** and the test grades the decode |
+//! | **Counter periodicity** over all 4096 tone values | yes | `tests::every_tone_period_toggles_at_the_rate_its_register_names` |
+//! | **Mixer polarity** — the enable bits are active low | yes | `tests::the_mixer_bits_are_active_low`, and it is a boolean rather than a magnitude |
+//! | **Register write masks** | yes, against the transcription | `tests::the_narrow_registers_drop_the_bits_they_do_not_have` |
+//! | The **volume table** | **no. Nothing here can.** | `AMPLITUDE` |
+//! | The **divisors** — tone, noise, envelope | **no. Nothing here can.** | `TONE_DIVISOR` and its neighbours |
 //! | **That it sounds right** | **no** | a human ear, `docs/M7.md`'s T4 |
 //!
 //! Blurring those two lists is how a gate comes to grade less than it appears to, and a suite
@@ -44,9 +44,9 @@
 //!
 //! # Where the chip's time comes from
 //!
-//! Nothing here reads a clock. [`Ay::step`] advances the chip by one internal step and the
+//! Nothing here reads a clock. `Ay::step` advances the chip by one internal step and the
 //! caller decides when those happen — [`crate::audio`] owns that, and owns the reason the
-//! whole of sound sits **off** [`crate::Ula::tick`]'s path rather than on it.
+//! whole of sound sits **off** `Ula::tick`'s path rather than on it.
 
 use crate::audio::AMPLITUDE_MAX;
 use crate::ula::FLOATING_BUS_BYTE;
@@ -136,6 +136,13 @@ const AMPLITUDE_LEVEL: u8 = 0x0F;
 
 /// Levels the envelope and the amplitude registers both range over.
 const LEVEL_COUNT: u8 = 16;
+
+const _: () = assert!(
+    LEVEL_COUNT.is_power_of_two(),
+    "Envelope::level masks a position against LEVEL_COUNT - 1 to make its range provable to the \
+     compiler, and that mask is only equivalent to the range check while the count is a power of \
+     two"
+);
 
 /// The chip's sixteen output levels, as amplitudes.
 ///
@@ -400,11 +407,28 @@ impl Envelope {
     }
 
     /// The level, 0–15.
+    ///
+    /// # The mask is a no-op that the compiler cannot derive, and it is worth an instruction
+    ///
+    /// [`Envelope::step`] keeps `position` inside `0..LEVEL_COUNT` at every exit, but that is a
+    /// property of a state machine spread over four branches and LLVM does not prove it. So the
+    /// subtraction below carries an **underflow check**, and the `AMPLITUDE[…]` index this feeds
+    /// in [`Ay::channel_amplitude`] carries a **bounds check** — while the fixed-amplitude arm
+    /// beside it, whose range *is* provable, gets neither. That asymmetry is the evidence.
+    ///
+    /// Masking states the invariant in a form the compiler can use. It changes no reachable
+    /// value — `tests/m7_ay_stream.rs`'s frame hash is the gate on that, and it must not move —
+    /// and it removes up to **1.33 M compare-and-branch pairs per second** from a loop that runs
+    /// 664,763 times a second, along with three panic landing pads.
+    ///
+    /// The idiom is not invented here: `crates/spectrum/src/memory.rs` masks a bank index against
+    /// `BANK_COUNT` for the same reason and documents it there.
     const fn level(self) -> u8 {
+        let position = self.position & (LEVEL_COUNT - 1);
         if self.rising {
-            self.position
+            position
         } else {
-            LEVEL_COUNT - 1 - self.position
+            LEVEL_COUNT - 1 - position
         }
     }
 }
@@ -418,7 +442,7 @@ impl Default for Envelope {
 /// The sound chip a 128 has and a 48K does not.
 ///
 /// Holds the register file, the address latch, and the three generators. It reads no clock:
-/// [`Ay::step`] is called by [`crate::audio`], which owns the decision that sound is generated
+/// `Ay::step` is called by [`crate::audio`], which owns the decision that sound is generated
 /// off the emulator's hot path rather than on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ay {
@@ -445,7 +469,7 @@ impl Default for Ay {
     /// mixer and its bits are *active low*, so all zeros enables every tone and every noise
     /// source. What makes a fresh chip silent is `R8`–`R10` being zero, which is amplitude
     /// zero. Those are two independent reasons and only one of them is about the mixer —
-    /// which is exactly the confusion [`tests::the_mixer_bits_are_active_low`] exists to keep
+    /// which is exactly the confusion `tests::the_mixer_bits_are_active_low` exists to keep
     /// out of the model.
     fn default() -> Self {
         Self {
@@ -558,6 +582,15 @@ impl Ay {
     /// The one write path: the guest's `OUT` and the snapshot applier both come through here,
     /// so a snapshot cannot install a register value the chip could never hold. That matters
     /// because a `.z80` is guest-supplied input in every sense that counts.
+    ///
+    /// **An out-of-range `index` is discarded, and in release it is discarded silently.** The
+    /// `debug_assert!` is the whole of the noise it makes. That is deliberate and it is the same
+    /// ruling `Ay::write` carries for a value a guest can actually produce, but it was stated
+    /// only there: no caller can reach this with a bad index — the guest's route masks to four
+    /// bits and the applier's array is `REGISTER_COUNT` long — so the `let … else` exists to
+    /// keep the function total rather than to handle a case. Panicking instead would put a
+    /// guest-reachable abort in a crate built with `panic = "abort"`, which is the trade
+    /// `crates/spectrum/src/memory.rs` makes the same way for a bank index.
     pub(crate) fn set_register(&mut self, index: usize, value: u8) {
         debug_assert!(index < REGISTER_COUNT);
         let Some(register) = self.registers.get_mut(index) else {

@@ -539,7 +539,7 @@ fn bank_for_page_128(page: u8) -> Option<BankIndex> {
 }
 
 /// The page number a 128 `.z80` stores `bank` as.
-fn page_for_bank_128(bank: BankIndex) -> u8 {
+pub(super) fn page_for_bank_128(bank: BankIndex) -> u8 {
     bank.get() + PAGE_128_OFFSET
 }
 
@@ -573,9 +573,18 @@ pub(super) fn pages_of(model: Model) -> Vec<(BankIndex, u8)> {
             .iter()
             .map(|entry| (BankIndex::new(entry.bank), entry.page))
             .collect(),
-        Model::Spectrum128 => (0..BANK_COUNT)
-            .map(|bank| {
-                let bank = BankIndex::new(u8::try_from(bank).unwrap_or(0));
+        // `Model::banks()` rather than `0..BANK_COUNT`: the model is the documented single
+        // source for which banks a machine has, and re-deriving the list from an array length
+        // coincides with it only because a 128 happens to have all eight. It also removes the
+        // fallible `u8::try_from`, whose `unwrap_or(0)` turned an impossible conversion failure
+        // into **bank 0 listed twice** — a corrupt result where an error belonged, and one the
+        // module's own no-panic gate could not see, since it forbids `.unwrap()` by literal
+        // string and `.unwrap_or(` is not that string.
+        Model::Spectrum128 => model
+            .banks()
+            .iter()
+            .map(|&bank| {
+                let bank = BankIndex::new(bank);
                 (bank, page_for_bank_128(bank))
             })
             .collect(),

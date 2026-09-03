@@ -102,6 +102,14 @@ pub trait Bus {
     /// once per `R` increment — prefix bytes included, since `DD`, `FD`, `CB` and `ED` are
     /// each their own M1 cycle with their own refresh.
     ///
+    /// **A fetch is not proof that the byte entered the instruction stream**, and one caller
+    /// makes the difference visible: a halted CPU refetches the `HALT` opcode once per
+    /// [`crate::Cpu::step`] and throws the byte away. It is a real M1 cycle — `/M1` asserted,
+    /// four T-states, `R` refreshed — so reporting it here is right, and it is the reason this
+    /// method promises a *cycle shape* rather than an *instruction byte*. An implementation
+    /// that decodes the stream, rather than only timing it, wants
+    /// [`crate::CpuState::halted`] to tell the two apart.
+    ///
     /// Three neighbours are deliberately **not** fetches:
     ///
     /// - a `DDCB`/`FDCB` instruction's displacement and opcode bytes, which the hardware

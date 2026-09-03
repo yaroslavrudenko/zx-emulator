@@ -14,7 +14,7 @@
 //! a second converter beside this one rather than a rewrite of the ULA side. That was a
 //! prediction when this module was written and it is now a fact: `.tzx` landed without `Tape`
 //! gaining a field, and the two converters share their emitter through
-//! [`signal`](super::signal) rather than each carrying their own copy of what a data block is.
+//! `signal` rather than each carrying their own copy of what a data block is.
 //!
 //! # The parity byte is not checked, deliberately
 //!
@@ -197,7 +197,7 @@ const _: () = assert!(MAX_PLAYABLE_BLOCKS == 2075);
 /// [`Error`], naming the offset that failed. Every failure is a returned value: this function
 /// does not panic on any input, which is a property of its construction rather than of the
 /// inputs it has seen — there is no indexing expression and no slice operation here that is
-/// not total, and the train is bounded by [`MAX_PULSES`](super::signal::MAX_PULSES) rather
+/// not total, and the train is bounded by `MAX_PULSES` rather
 /// than by whatever the file asked for.
 ///
 /// > **[`Error::TapeTooLong`] became reachable here when `.tzx` landed**, and it is a fix rather
@@ -205,8 +205,8 @@ const _: () = assert!(MAX_PLAYABLE_BLOCKS == 2075);
 /// > *"a `.tap` byte is sixteen half-periods, so a 1 GB file used to be a 4 GB allocation"* — was
 /// > wrong by 16× on its own arithmetic (sixteen `u32`s per byte is 64 bytes per byte, so 64 GB)
 /// > and wrong again about its **axis**: what binds is the block count, not the byte count,
-/// > because three bytes of file buy a whole pilot tone. See [`MINIMAL_BLOCK_PULSES`] for that
-/// > derivation and [`MAX_PLAYABLE_BLOCKS`] for the limit it implies — a limit no tape in
+/// > because three bytes of file buy a whole pilot tone. See `MINIMAL_BLOCK_PULSES` for that
+/// > derivation and `MAX_PLAYABLE_BLOCKS` for the limit it implies — a limit no tape in
 /// > `testdata/` comes within two orders of magnitude of, since every one of them is four to six
 /// > blocks. Both are asserted by
 /// > `the_ceiling_is_reached_by_block_count_rather_than_by_file_size`, which is also the failing
@@ -248,25 +248,42 @@ pub fn parse(bytes: &[u8]) -> Result<Tape, Error> {
 /// are the same shape with different numbers — one representation of one piece of knowledge,
 /// rather than three that can drift apart.
 fn append_block(signal: &mut Signal, flag: u8, block: &[u8], at: usize) -> Result<(), Error> {
-    signal.speed_data(
-        &SpeedData {
-            pilot: PILOT_PULSE,
-            pilot_pulses: pilot_pulses(flag),
-            sync_first: SYNC_FIRST,
-            sync_second: SYNC_SECOND,
-            data: Data {
-                bytes: block,
-                used_bits: UsedBits::ALL,
-                zero: BIT_ZERO,
-                one: BIT_ONE,
-            },
-        },
-        at,
-    )?;
+    signal.speed_data(&rom_speed_data(flag, block), at)?;
     // After every block rather than between blocks, so there is no last-one special case and
     // so the final data edge is followed by a defined stretch of silence rather than by the
     // end of the tape.
     signal.pulse(PAUSE_T_STATES, at)
+}
+
+/// The ROM's own parameterisation of a data block: what `SA-BYTES` writes and `LD-BYTES` reads.
+///
+/// # Why this is a function and not two literals
+///
+/// `.tzx`'s standard-speed block **is** a `.tap` block, and until this existed the whole
+/// parameterisation — five timings and the flag-dependent pilot length — was written out
+/// byte-for-byte in both parsers. `signal.rs` and this module's own header each claim the shared
+/// knowledge lives once in `signal`, and that was true of the *emitter* and false of the
+/// *numbers*: `Signal::speed_data` knew the shape while both callers knew the ROM's values. Two
+/// copies of one transcription is the shape `docs/M6.md` refuses, and it is the shape that lets
+/// a correction land in one parser and not the other.
+///
+/// `flag` is taken rather than read off `bytes` because both callers already have it — a `.tap`
+/// block and a `.tzx` standard-speed block each reject an empty block with their own error and
+/// their own offset before they get here, and folding that refusal in would give this function a
+/// `Result` for a case neither caller can reach.
+pub(super) fn rom_speed_data(flag: u8, bytes: &[u8]) -> SpeedData<'_> {
+    SpeedData {
+        pilot: PILOT_PULSE,
+        pilot_pulses: pilot_pulses(flag),
+        sync_first: SYNC_FIRST,
+        sync_second: SYNC_SECOND,
+        data: Data {
+            bytes,
+            used_bits: UsedBits::ALL,
+            zero: BIT_ZERO,
+            one: BIT_ONE,
+        },
+    }
 }
 
 /// How long a pilot tone `flag` calls for.
