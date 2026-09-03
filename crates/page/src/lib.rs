@@ -299,7 +299,7 @@ pub fn query_string() -> String {
     // `zx_page.js` encodes with `TextEncoder`, whose output is valid UTF-8 by construction, so
     // every byte the shim wrote is part of a well-formed sequence. **Two truncations can still
     // cut one of those sequences in half**, and neither is exotic: `Math.min(bytes.length,
-    // capacity)` on the far side, which `zx_page.js:268-271` documents as its defence against
+    // capacity)` on the far side, which `zx_page.js:324-327` documents as its defence against
     // the URL changing between the two calls, and `MAX_QUERY_BYTES` on this side. So the lossy
     // path is *reachable* — it was described here as unreachable, which was true only of the
     // case where nothing truncates — and what it produces is `U+FFFD` at the join. That is the
@@ -323,15 +323,15 @@ pub fn offer_download(name: &str, bytes: &[u8]) -> Handoff {
     // moved while the callee runs. `web/zx_page.js`'s `zx_offer_download` builds one
     // `Uint8Array` view per pointer and retains neither view nor pointer past the call. Each
     // view's contents leave wasm memory before anything else happens to them: `name` through
-    // `DECODER.decode` (`zx_page.js:282`), which returns a fresh JavaScript string, and
-    // `bytes` through `.slice()` (`:287`), which returns a fresh `ArrayBuffer` — so the
+    // `DECODER.decode` (`zx_page.js:338`), which returns a fresh JavaScript string, and
+    // `bytes` through `.slice()` (`:338`), which returns a fresh `ArrayBuffer` — so the
     // `Blob`, whose lifetime outlives this call, holds a copy rather than a window onto a
     // buffer that may later grow and detach.
     //
     // **What discharges the reallocation half is the ordering inside the shim, and it used to
     // be a claim about the whole page.** This comment said *"The shim never calls back into
     // Rust, so no reallocation can occur between the views' construction and their last
-    // read."* That is not a property this side can hold: `anchor.click()` at `zx_page.js:304`
+    // read."* That is not a property this side can hold: `anchor.click()` at `zx_page.js:360`
     // is `HTMLElement.click()`, which **synchronously** dispatches a bubbling `click` through
     // `document`, and any listener on that path may call `wasm_exports.*` and grow wasm
     // memory. No listener does today — `rg 'addEventListener\("click"|onclick' web/` returns
@@ -343,7 +343,7 @@ pub fn offer_download(name: &str, bytes: &[u8]) -> Handoff {
     // checks the stated reason would be checking the wrong thing.
     //
     // The ordering is local and is checkable in one file: both last reads of wasm memory
-    // (`:282` and `:287`) complete before `:304` runs. Everything after that point touches
+    // (`:333` and `:338`) complete before `:355` runs. Everything after that point touches
     // only the copies. So re-entrancy through the click is irrelevant to this block, whether
     // or not it ever happens.
     //
@@ -598,11 +598,15 @@ pub fn audio_push(samples: &[f32]) -> i32 {
     // exactly `samples.len()` `f32`s and cannot be freed or moved while the callee runs.
     // `web/zx_page.js` builds one `Float32Array` view over that range and retains neither the
     // view nor the pointer. The view's contents leave wasm memory before anything else happens
-    // to them, through `.slice()`, which returns a fresh `ArrayBuffer` — the copy is what makes
-    // the transferred buffer independent of wasm memory, which may grow and detach afterwards.
+    // to them, through a `set` copy into a buffer the shim's free-list recycles — the copy is
+    // what makes the transferred buffer independent of wasm memory, which may grow and detach
+    // afterwards. *That copy was `.slice()`, which returned a fresh `ArrayBuffer` per call*;
+    // whether the destination is fresh or pooled changes nothing this comment discharges,
+    // because the property relied on is the ordering of the copy, not the provenance of the
+    // buffer that receives it.
     //
     // The reallocation half is discharged by the ordering inside the shim, for the reason
-    // `offer_download`'s block sets out at length: `.slice()` is this view's last read, and
+    // `offer_download`'s block sets out at length: the `set` copy is this view's last read, and
     // everything the shim does afterwards touches only the copy. That is a local fact about one
     // function, where *"the shim never calls back into Rust"* — which this comment used to say,
     // and which is true of this shim today — is a claim about the whole page that no reviewer
@@ -636,6 +640,22 @@ mod desktop {
     /// what a given sound card actually does with 48,000 is between it and the operating
     /// system. 48 kHz is what macOS, Windows and modern Linux desktops run natively, so asking
     /// for it usually means no resampling happens below this layer either.
+    ///
+    /// `tinyaudio` 1.1.0 cannot report what was granted: its `OutputDevice` is opaque —
+    /// `close()` is the whole public API — and no published version surfaces the negotiated
+    /// rate (read from the vendored registry copy, the way this file reads miniquad's
+    /// sources). On CoreAudio (macOS/iOS) and DirectSound (Windows) the request IS the
+    /// consumption rate by construction: the requested figure is passed as the client
+    /// format's sample rate and the OS resamples to the hardware internally, so the residual
+    /// error is the hardware crystal's tolerance — ±100 ppm class, roughly 50× inside
+    /// `MAX_CORRECTION`'s 0.5%. The uncovered case is Linux with a bare-ALSA, hw-only
+    /// default: *snd_pcm_hw_params_set_rate_near* may grant a different rate and `tinyaudio`
+    /// discards the exact rate it is handed back — though the literal `"default"` it opens
+    /// is, on any desktop Linux, a rate-converting server (Pulse/PipeWire/dmix). A
+    /// 44.1-kHz-only card against a 48 kHz request is −8.1%, 16× the correction loop's whole
+    /// authority: the loop pins at its rail and the desktop ring drops ~8% of samples
+    /// continuously — a steady rasp, not a drifting tick. A bug report matching that symptom
+    /// is this paragraph's reopening event, and the `cpal` question reopens with it.
     const REQUESTED_HZ: u32 = 48_000;
 
     /// Samples per channel the device asks for at a time.
@@ -757,7 +777,16 @@ mod desktop {
         // proof: a blocking lock on a real-time thread is unbounded priority inversion in
         // principle, and the fix that removes the possibility is a single-producer
         // single-consumer lock-free ring. That was weighed and dropped at ~+30 lines for a
-        // window now measured in microseconds. **`try_lock` is not the answer** and is written
+        // window now measured in microseconds — and "measured" became literal on 2026-09-03,
+        // with a standalone harness mirroring [`enqueue`]'s body at steady depth: 63 ns mean
+        // hold, 666 ns for the worst legal shape (a full `CEILING` copy into an empty ring),
+        // 9.9 µs worst observed with the harness preempted mid-hold, against the 10.67 ms
+        // deadline — the worst case is 0.09 % of the budget. The "unbounded in principle" leg
+        // is closed by the platform this figure was taken on: `std::sync::Mutex` on
+        // `aarch64-apple-darwin` lowers to Apple's `pthread_mutex`, one of the two primitives
+        // Apple documents as priority-donating, so a callback that does arrive during a hold
+        // boosts the nanosecond-scale owner ahead of all timeshare work instead of waiting
+        // behind it. **`try_lock` is not the answer** and is written
         // down here because it looks like one: it would convert a rare few-microsecond wait
         // into a rare 10.67 ms hole, which is audibly worse than the thing it avoids.
         let Ok(mut queued) = ring().lock() else {

@@ -130,9 +130,13 @@ class ZxProcessor extends AudioWorkletProcessor {
         };
     }
 
-    // Copy one chunk into the ring, dropping the oldest samples if it does not fit.
+    // Copy one chunk into the ring, dropping the oldest samples if it does not fit, and post
+    // the exhausted buffer back to the page for reuse.
     accept(chunk) {
         if (!chunk || chunk.length === 0) {
+            // Nothing to copy, and nothing posted back. The page's own empty-push guard means
+            // no pooled buffer arrives here; if one ever did, it would become ordinary
+            // main-thread garbage — a degradation to the pre-pool behaviour, never worse.
             return;
         }
         // A chunk larger than the whole ring keeps only its newest `CAPACITY` samples — the same
@@ -159,6 +163,15 @@ class ZxProcessor extends AudioWorkletProcessor {
         }
         this.write = (this.write + taken) & MASK;
         this.queued += taken;
+
+        // The chunk is exhausted: the two `ring.set()` calls above are its last reads. Post
+        // its buffer straight back — transferred, so the return costs no copy either — and the
+        // page reuses it for the next frame. Without this line, ~50 buffers a second become
+        // garbage on this thread, the one with the render deadline (2.667 ms per 128-sample
+        // quantum at 48 kHz); this runs in the port's message dispatch, never in `process`,
+        // whose allocation note below stands as written. After this call `chunk` is detached
+        // and must not be read.
+        this.port.postMessage(chunk.buffer, [chunk.buffer]);
     }
 
     process(inputs, outputs) {

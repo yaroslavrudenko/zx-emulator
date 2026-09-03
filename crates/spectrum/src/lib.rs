@@ -278,6 +278,40 @@ use z80::{Cpu, CpuState, StepError};
 /// generic is worse still: it buys runtime polymorphism nothing needs, since a machine does not
 /// change model mid-run, and pays by monomorphising the whole `Cpu<Ula<M>>` instantiation
 /// twice.
+///
+/// # Two surfaces, and a new accessor lands on exactly one
+///
+/// Nearly everything on this type is a one-line delegate over the [`Ula`] — the keyboard, the
+/// joystick, the border, the chip, the tape, the sample drain, the memory, the model, the
+/// frame count — while [`Spectrum::ula`] hands out the whole ULA anyway. Two public routes to
+/// one machine looks like a facade that failed, so the observed use is worth recording:
+/// measured 2026-09-03, by `rg -n '\.ula\(\)|\.ula_mut\(\)'` over the workspace, **not one
+/// caller outside this crate reaches a delegated accessor through [`Spectrum::ula`]**.
+/// Frontend production code operates the machine through the delegates exclusively, and
+/// reaches through `ula()` for exactly one datum they do not carry — the frame length, via the
+/// `ula().clock().timing().frame_t_states()` chain, in two places — while every other external
+/// `ula()` call sits in this crate's own integration tests and benches, driving ports, ticks,
+/// raw writes and the clock. One operating surface and one white-box hatch, not two parallel
+/// APIs. Three sentences keep it that way:
+///
+/// - **A delegate is a logic-free one-liner and must stay one.** The day a delegate needs a
+///   guard, the guard belongs in [`Ula`] and this ruling is re-opened.
+/// - **A new accessor lands on exactly one surface.** Machine-facing — a thing a frontend
+///   operates or reads — goes on `Spectrum` only; bus-level and white-box — ports, ticks, raw
+///   writes, clock internals — stays on [`Ula`] only, reached through [`Spectrum::ula`]. The
+///   delegated overlap is frozen at the eleven items it holds today — `keyboard`, `joystick`,
+///   `border`, `ay`, `take_samples`, `dropped_samples`, `ear_reads`, `memory`, `tape`,
+///   `model`, `frames`, read/write pairs counted once — because it had been growing by roughly
+///   two items per subsystem, and an enumerated list is what stops the growth without anyone
+///   having to remember a count.
+/// - **The freeze is a drift-prevention ruling, not a semver promise.** These crates are
+///   workspace-internal and unpublished; what the ruling protects is one fact having one
+///   surface, because a second full surface over the same machine is a second place for the
+///   first one to disagree with.
+///
+/// The one accessor already sanctioned as next, should anyone touch that code: collapsing the
+/// three `frame_t_states` chains into a `Spectrum` delegate — machine-facing, so it lands
+/// here, per the second sentence.
 #[derive(Debug)]
 pub struct Spectrum {
     cpu: Cpu<Ula>,
@@ -424,13 +458,21 @@ impl Spectrum {
         self.cpu.fault()
     }
 
-    /// The ULA.
+    /// The ULA — **the white-box surface**.
+    ///
+    /// Port-level driving and clock inspection for gates and benches: this crate's own
+    /// integration tests and benches reach `in_port`, `out_port`, `tick`, `write`,
+    /// `interrupt_asserted` and the raw clock through here, because driving the bus is
+    /// deliberately not something [`Spectrum`] offers. A frontend has no business on this
+    /// surface except the frame-length chain the surface ruling on [`Spectrum`] records. A
+    /// new bus-level accessor lands on [`Ula`] and is reached through here; a machine-facing
+    /// one lands on [`Spectrum`] — never both.
     #[must_use]
     pub fn ula(&self) -> &Ula {
         self.cpu.bus()
     }
 
-    /// The ULA, mutably.
+    /// The ULA, mutably — the writable half of the white-box surface. See [`Spectrum::ula`].
     pub fn ula_mut(&mut self) -> &mut Ula {
         self.cpu.bus_mut()
     }
