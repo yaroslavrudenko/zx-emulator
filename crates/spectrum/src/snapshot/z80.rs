@@ -35,7 +35,8 @@ use ::z80::{CpuState, InterruptMode};
 use super::reader::{Reader, Writer};
 use super::rle;
 use super::{
-    Error, IMAGE_LEN_48K, Snapshot, bank_for_page_of, frame_position, pages_of, store_image,
+    Error, IMAGE_LEN_48K, Snapshot, bank_for_page_of, frame_position, page_for_bank_128, pages_of,
+    store_image,
 };
 use crate::ay::{self, Ay};
 use crate::memory::{BankIndex, PAGE_SIZE};
@@ -54,6 +55,18 @@ const V3_EXTRA_HEADER_LEN: u16 = 54;
 /// The additional-header length a version 3 file declares when it also carries the last
 /// `OUT` to port `0x1FFD`, which only a +3 has.
 const V3_EXTRA_HEADER_LEN_WITH_1FFD: u16 = 55;
+
+/// Everything [`write`] emits before the first page block: the shared header, the two-byte
+/// length field, and the additional header that field declares.
+///
+/// A widening `as` rather than `usize::from`, which is not a `const fn`; `u16` into `usize` is
+/// lossless on every target this builds for, `wasm32` included.
+const HEADER_LEN: usize = V1_HEADER_LEN + 2 + V3_EXTRA_HEADER_LEN as usize;
+
+/// The largest a page block can be: the two-byte length, the page number, and a page stored
+/// **uncompressed**. `write_page_block`'s fallback is what makes this a bound rather than a
+/// guess — nothing it emits can exceed it, so it is what [`write`] sizes its buffer from.
+const BLOCK_LEN: usize = 2 + 1 + PAGE_SIZE;
 
 /// Sound-chip registers the additional header reserves room for, at offsets 39–54.
 ///
@@ -195,7 +208,14 @@ pub fn parse(bytes: &[u8]) -> Result<Snapshot, Error> {
 /// `docs/M6.md` Decision 7.
 #[must_use]
 pub fn write(snapshot: &Snapshot) -> Vec<u8> {
-    let mut bytes = Vec::new();
+    // **Sized once for the worst case rather than grown into.** `Vec::new()` here reached a
+    // 128's ~130 KB across about eleven doublings, copying a quarter of a megabyte to write one
+    // file; and `write_header`'s `reserve` covered only the header, which looked like it had
+    // solved this and had not. The worst case is every page stored uncompressed, which is what
+    // `write_page_block` falls back to, so nothing can exceed it. It is deliberately generous:
+    // a compressible snapshot leaves the tail unused for the moment between here and the caller
+    // writing the bytes out, and that is a better trade than eleven copies.
+    let mut bytes = Vec::with_capacity(HEADER_LEN + pages_of(snapshot.model()).len() * BLOCK_LEN);
     write_header(&mut bytes, snapshot);
     // **Every bank the *model* has, not the three a 48K has.** This iterated `BANKS_48K`
     // unconditionally, so a 128 snapshot was written as a 48K file carrying three of its
@@ -384,37 +404,58 @@ fn parse_v2_or_v3(header: &Header, mut reader: Reader<'_>) -> Result<Snapshot, E
     while !reader.is_empty() {
         read_page_block(&mut reader, &mut snapshot, model)?;
     }
-    // **The bank-set guard, redesigned as `docs/M7.md` Decision 7 says it must be.** M6 closed
-    // the dropped-bank seam by comparing the parser's bank set against *the set the slot map
-    // exposes*, and on a 128 that premise dissolves — banks legitimately exist outside the slot
-    // map, which is what makes `Memory::bank` unavoidable. So the comparison is against the set
-    // the **model** has.
-    //
-    // It is not a formality: a file claiming hardware mode 4 while carrying a 48K's page
-    // numbers parses into a 128 snapshot holding three banks of eight, and a restore would
-    // then leave five banks as whatever the target machine happened to have — the same silent
-    // half-load the `ModelMismatch` refusal exists to prevent, arriving through the parser
-    // instead.
-    //
-    // **Scoped to the machines whose loss nothing else can see, which is the whole argument.**
-    // On a 48K all three banks are always addressable, so a missing one shows up the moment
-    // anything reads that address — M6's slot-map guard is still the right instrument there and
-    // this pass does not move it. On a 128 five of eight banks have no address at all, so a
-    // missing one is invisible by construction. That asymmetry is exactly why `docs/M7.md` says
-    // the guard had to be *redesigned* rather than kept, and it is why this is not simply
-    // applied to both.
-    for &bank in model.banks().iter().filter(|_| model != Model::Spectrum48K) {
+    check_every_bank_is_present(&snapshot, model)?;
+    Ok(snapshot)
+}
+
+/// Refuse a file that declares a machine and then does not carry all of its banks.
+///
+/// **The bank-set guard, redesigned as `docs/M7.md` Decision 7 says it must be.** M6 closed the
+/// dropped-bank seam by comparing the parser's bank set against *the set the slot map exposes*,
+/// and on a 128 that premise dissolves — banks legitimately exist outside the slot map, which is
+/// what makes `Memory::bank` unavoidable. So the comparison is against the set the **model** has.
+///
+/// It is not a formality: a file claiming hardware mode 4 while carrying a 48K's page numbers
+/// parses into a 128 snapshot holding three banks of eight, and a restore would then leave five
+/// banks as whatever the target machine happened to have — the same silent half-load the
+/// `ModelMismatch` refusal exists to prevent, arriving through the parser instead.
+///
+/// **Scoped to the machines whose loss nothing else can see, which is the whole argument.** On a
+/// 48K all three banks are always addressable, so a missing one shows up the moment anything
+/// reads that address — M6's slot-map guard is still the right instrument there and this pass
+/// does not move it. On a 128 five of eight banks have no address at all, so a missing one is
+/// invisible by construction. That asymmetry is exactly why `docs/M7.md` says the guard had to be
+/// *redesigned* rather than kept, and it is why this is not simply applied to both.
+///
+/// It lives here rather than inline in `parse_v2_or_v3` because that function was doing five
+/// jobs across ~88 lines, thirty-five of them this argument wrapped around eleven lines of code.
+/// The seam was already named in prose before it was a function.
+fn check_every_bank_is_present(snapshot: &Snapshot, model: Model) -> Result<(), Error> {
+    // A whole-loop guard written as a whole-loop guard. This read
+    // `model.banks().iter().filter(|_| model != Model::Spectrum48K)`, whose closure ignores its
+    // item and tests a loop invariant — a reader sees `filter` and hunts for a per-item predicate
+    // that is not there, and the machine evaluates it once per bank to learn the same thing
+    // eight times.
+    let must_be_present: &[u8] = match model {
+        Model::Spectrum48K => &[],
+        Model::Spectrum128 => model.banks(),
+    };
+    for &bank in must_be_present {
         let bank = BankIndex::new(bank);
         if snapshot.bank(bank).is_none() {
+            // The page number straight out of the mapping, rather than a linear search of
+            // `pages_of` behind a `map_or(0, …)`. That default was unreachable and it was also
+            // **wrong if it were ever reached**: 0 is not a valid page number for either machine
+            // — a 48K uses 4, 5 and 8, a 128 uses 3 to 10 — so a miss would have put an
+            // impossible number in a message a person reads. It allocated a `Vec` per missing
+            // bank to do it. This arm is 128-only, and `page_for_bank_128` is exactly what
+            // `pages_of` consults, so the answer is total and there is nothing to default.
             return Err(Error::MissingPage {
-                page: pages_of(model)
-                    .into_iter()
-                    .find(|&(carried, _)| carried == bank)
-                    .map_or(0, |(_, page)| page),
+                page: page_for_bank_128(bank),
             });
         }
     }
-    Ok(snapshot)
+    Ok(())
 }
 
 /// The paging byte to record for `model`.
@@ -466,9 +507,6 @@ fn write_header(bytes: &mut Vec<u8>, snapshot: &Snapshot) {
     // The counter divides *this machine's* frame into quarters, and the two machines' frames
     // are different lengths — so the model is read here rather than at offset 34 alone.
     let (low_t_state, high_t_state) = encode_t_states(model, snapshot.frame_t_state);
-    // The shared header, the two-byte length field, and the additional header it declares.
-    bytes.reserve(V1_HEADER_LEN + 2 + usize::from(V3_EXTRA_HEADER_LEN));
-
     bytes.push(high_byte(cpu.af)); // 0: A
     bytes.push(low_byte(cpu.af)); // 1: F
     bytes.extend_from_slice(&cpu.bc.to_le_bytes()); // 2
@@ -504,17 +542,16 @@ fn write_header(bytes: &mut Vec<u8>, snapshot: &Snapshot) {
     bytes.push(0); // 36: no Interface I
     bytes.push(0); // 37: no R or LDIR emulation
     bytes.push(snapshot.ay().map_or(0, |ay| ay.selected)); // 38: last OUT to 0xFFFD
-    for index in 0..AY_REGISTER_COUNT {
-        // Fifteen registers into sixteen bytes: offset 54 describes `R15`, which the chip
-        // does not have, so it is written as zero. See `AY_REGISTER_COUNT`, which carries the
-        // ruling and the reason a round trip is blind to it.
-        bytes.push(
-            snapshot
-                .ay()
-                .and_then(|ay| ay.registers.get(index).copied())
-                .unwrap_or(0),
-        ); // 39-54
-    }
+    // **The chip's fifteen, then the format's sixteenth, written as two statements because they
+    // are two rulings.** A 16-iteration loop over `AY_REGISTER_COUNT` folded both into one
+    // `unwrap_or(0)`, so the same zero meant *"this machine has no chip"* and *"this is `R15`,
+    // which no machine has"* — and `R15` fell out of an array length, which is precisely what
+    // `AY_REGISTER_COUNT`'s own comment says must be decided instead.
+    let registers = snapshot
+        .ay()
+        .map_or([0; ay::REGISTER_COUNT], |ay| ay.registers);
+    bytes.extend_from_slice(&registers); // 39-53
+    bytes.push(0); // 54: `R15`, which the chip does not have
     bytes.extend_from_slice(&low_t_state.to_le_bytes()); // 55
     bytes.push(high_t_state); // 57
     // 58-85: Spectator, MGT, Multiface, the ROM/RAM flags and the joystick maps. All of it

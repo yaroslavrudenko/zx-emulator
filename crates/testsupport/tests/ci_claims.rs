@@ -107,9 +107,28 @@ fn defers_to_the_owner(reason: &str) -> bool {
 ///
 /// A hand-rolled scan rather than a parse, for the reason `crates/frontend/build.rs`'s own
 /// text-reading gate gives: the alternative is not a better instrument, it is no instrument.
-/// It is deliberately shallow and refuses what it does not understand — a bare `#[ignore]`
-/// with no reason is skipped, because the text between the attribute and the next quotation
-/// mark is then not an `=`.
+/// It is deliberately shallow: a bare `#[ignore]` with no reason is passed over, because the
+/// text between the attribute and the next quotation mark is then not an `=`.
+///
+/// # Passing over a reasonless attribute and passing over a reason are not the same act
+///
+/// They used to be. Both took the same `continue`, so an attribute whose reason this scan
+/// could not read left the population **without saying so** — and the shape that does it is
+/// ordinary Rust: `= r"…"` and `= r#"…"#` put an `r` between the `=` and the quote, the trim
+/// comes out `= r#`, and the reason is dropped as silently as if it had never been written.
+///
+/// A gate that declines to grade an input and says nothing is this file's own subject said
+/// backwards — the whole argument of the header above is that a claim nobody re-reads is
+/// worse than no claim. So the cases are separated by what sits between the attribute and the
+/// next quotation mark. An `=` is a reason this scan can read. A `]` is a bare attribute
+/// carrying no reason, and there is nothing to grade. **Nothing at all** is [`ATTRIBUTE`]'s
+/// own text inside a string literal — this file, at the constant, and the quotation mark
+/// found is that literal's closing one — which is likewise not a reason. Anything else is a
+/// reason that exists and cannot be read, and it is refused out loud.
+///
+/// There is no raw-string ignore reason in the tree today, so this is a hole closed before it
+/// is stepped in rather than a defect repaired; the fix, when somebody meets it, is either an
+/// ordinary string literal or teaching this scan the `r#` form deliberately.
 fn ignore_reasons(source: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     let mut cursor = 0;
@@ -119,7 +138,17 @@ fn ignore_reasons(source: &str) -> Vec<(usize, String)> {
         let Some(quote) = source[cursor..].find('"') else {
             break;
         };
-        if source[cursor..cursor + quote].trim() != "=" {
+        let between = source[cursor..cursor + quote].trim();
+        if between != "=" {
+            assert!(
+                between.is_empty() || between.starts_with(']'),
+                "line {} carries an ignore reason spelled `{between}\"`, which this scan \
+                 cannot read — a raw string literal, most likely. Grading it as written would \
+                 grade the wrong text and skipping it would be the silence this file exists \
+                 to argue against, so it is refused. Write the reason as an ordinary string \
+                 literal, or teach ignore_reasons the form on purpose.",
+                source[..attribute].matches('\n').count() + 1,
+            );
             continue;
         }
         let opens = cursor + quote + 1;

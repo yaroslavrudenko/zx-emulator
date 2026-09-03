@@ -24,6 +24,7 @@
 //! contention a loader suffers — silently, because nothing else would move. It is the reason
 //! `Ula::advance` exists.
 
+use spectrum::audio::AMPLITUDE_MAX;
 use spectrum::tape::{Tape, tap};
 use spectrum::timing::{FIRST_CONTENDED_T_STATE, T_STATES_PER_FRAME};
 use spectrum::{Colour, Spectrum};
@@ -404,4 +405,155 @@ proptest::proptest! {
         expected.push(payload.iter().fold(flag, |sum, &byte| sum ^ byte));
         proptest::prop_assert_eq!(decode(tape.pulses()), expected);
     }
+}
+
+#[test]
+fn the_tape_reaches_the_speaker_and_not_only_the_ear_bit() {
+    // The defect this closes: every assertion above passes on a machine that loads tapes in
+    // **silence**. The `EAR` line reached bit 6 of a `0xFE` read and stopped there, so a person
+    // watching a loading screen heard nothing — while a real Spectrum screeches, because the
+    // socket feeds the amplifier as well as the ULA.
+    //
+    // Asserted on `Sample::tape`, which is where the machine now says so, and against a train
+    // driven by real instructions rather than by moving the clock directly.
+    const HALF_PERIOD: u32 = 1_000;
+    const NOPS_PER_HALF_PERIOD: u64 = (HALF_PERIOD / NOP_T_STATES) as u64;
+
+    let mut machine = machine();
+    machine.insert_tape(Tape::new(vec![HALF_PERIOD; 4]));
+    machine.tape_mut().play();
+
+    for _ in 0..NOPS_PER_HALF_PERIOD * 4 {
+        machine.step();
+    }
+    let samples = machine.take_samples();
+
+    assert!(
+        samples.iter().any(|sample| sample.tape > 0),
+        "a playing tape must reach the samples"
+    );
+    assert!(
+        samples.iter().any(|sample| sample.tape == 0),
+        "and the train's other half must too — a level stuck high is not a signal"
+    );
+    // The sources stay apart, which is what `crates/spectrum/src/audio.rs` requires of every one
+    // of them: nothing here drove the speaker bit, so the beeper is silent throughout while the
+    // tape is not.
+    assert!(
+        samples.iter().all(|sample| sample.beeper == 0),
+        "the tape must not be mixed into the beeper inside the machine"
+    );
+}
+
+#[test]
+fn a_tape_that_was_never_started_is_silent() {
+    // **This test was called `a_stopped_tape_is_silent` and its name was broader than its
+    // fixture.** `Tape::new` leaves the level low and the motor off, so what it grades is a
+    // cassette that has never been played — not one that was played and then stopped, which is a
+    // different state and, as the two cases below show, is not silent. The two were conflated in
+    // `Sample::tape`'s own documentation as well, which claimed a stopped tape drives the line
+    // low; both are corrected here rather than quietly, because a test whose name promises more
+    // than its fixture reaches is how a false claim survives a green suite.
+    //
+    // The narrow claim is worth keeping and is the common case: a machine with a cassette sitting
+    // unplayed in the drive must not put a constant offset under everything else the speaker does.
+    let mut machine = machine();
+    machine.insert_tape(Tape::new(vec![1_000; 4]));
+
+    for _ in 0..500 {
+        machine.step();
+    }
+    assert!(
+        machine.take_samples().iter().all(|sample| sample.tape == 0),
+        "a tape that was never started makes no sound"
+    );
+}
+
+#[test]
+fn a_tape_stopped_on_a_high_half_period_holds_the_line_high() {
+    // The vector the test above does not reach. `Tape::stop` is documented to hold *"the signal
+    // where it stands"*, so stopping the motor half-way through a high half-period leaves the
+    // `EAR` line driven high — and, since `Ula::advance` now only tells the generator about a
+    // level it saw **move**, nothing afterwards pulls it back down. That is correct behaviour and
+    // it is what makes "a stopped tape is silent" false as a general statement.
+    //
+    // The offset this leaves is real and is removed downstream: `crates/frontend`'s DC blocker,
+    // not the machine, is what stops a held level being audible.
+    const HALF_PERIOD: u32 = 1_000;
+    const NOPS_PER_HALF_PERIOD: u64 = (HALF_PERIOD / NOP_T_STATES) as u64;
+
+    let mut machine = machine();
+    machine.insert_tape(Tape::new(vec![HALF_PERIOD; 4]));
+    machine.tape_mut().play();
+
+    // One and a half half-periods: past the first flip, so the line is high, and not near the
+    // second, so the stop lands unambiguously inside a high stretch.
+    for _ in 0..NOPS_PER_HALF_PERIOD + NOPS_PER_HALF_PERIOD / 2 {
+        machine.step();
+    }
+    assert!(machine.tape().level(), "the fixture must stop while high");
+    machine.tape_mut().stop();
+    // Drain what the playing half produced, so what follows is only the stopped machine.
+    machine.take_samples();
+
+    for _ in 0..NOPS_PER_HALF_PERIOD * 4 {
+        machine.step();
+    }
+    let samples = machine.take_samples();
+    assert!(!samples.is_empty(), "the fixture must produce samples");
+    assert!(
+        samples.iter().all(|sample| sample.tape == AMPLITUDE_MAX),
+        "a tape stopped while high holds the line high — `Tape::stop` holds the signal where it \
+         stands, and nothing else drives it"
+    );
+}
+
+#[test]
+fn a_cassette_that_runs_out_on_a_high_half_period_holds_the_line_high() {
+    // The same state reached the other way, and the way it is actually reached in use: nobody
+    // presses stop at the end of a tape, the train simply runs out. `Tape::finish_pulse` flips the
+    // level and *then* discovers there is no next half-period, so a train with an **odd** number
+    // of half-periods ends high — half of all tapes, by construction.
+    //
+    // Written with three rather than four for exactly that reason: `vec![n; 4]` ends low and
+    // would pass against a machine that wrongly forced the line low at the end of a tape.
+    const HALF_PERIOD: u32 = 1_000;
+    const NOPS_PER_HALF_PERIOD: u64 = (HALF_PERIOD / NOP_T_STATES) as u64;
+
+    let mut machine = machine();
+    machine.insert_tape(Tape::new(vec![HALF_PERIOD; 3]));
+    machine.tape_mut().play();
+
+    for _ in 0..NOPS_PER_HALF_PERIOD * 3 {
+        machine.step();
+    }
+    assert!(
+        !machine.tape().is_playing(),
+        "the fixture must have run the train out"
+    );
+    assert!(machine.tape().level(), "and it must have ended high");
+    machine.take_samples();
+
+    for _ in 0..NOPS_PER_HALF_PERIOD * 2 {
+        machine.step();
+    }
+    let samples = machine.take_samples();
+    // **The first sample of this batch is not part of the claim, and skipping it is a statement
+    // about the sample grid rather than a fudge.** The grid does not restart at an edge, so the
+    // window that was open when the train ran out is a mean of the low stretch before the final
+    // flip and the held-high level after it — `crates/spectrum/src/audio.rs` documents every
+    // sample as a mean for exactly this reason. It is asserted rather than discarded: it must
+    // carry *some* of the new level, and everything after it must be wholly inside it.
+    let (straddling, held) = samples
+        .split_first()
+        .expect("the fixture must produce samples");
+    assert!(
+        straddling.tape > 0 && straddling.tape < AMPLITUDE_MAX,
+        "the window open at the final flip is a mean of both levels"
+    );
+    assert!(!held.is_empty(), "and there must be samples after it");
+    assert!(
+        held.iter().all(|sample| sample.tape == AMPLITUDE_MAX),
+        "a cassette that runs out while high holds the line high"
+    );
 }

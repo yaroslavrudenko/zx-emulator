@@ -58,6 +58,7 @@
 //! await. `crates/frontend/src/lib.rs` carries the table of what that leaves ungraded, and
 //! *"whether it looks right"* is the first row.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -73,9 +74,6 @@ use frontend::viewport::Viewport;
 use frontend::{host, keymap, palette, viewport};
 use spectrum::screen::{FRAME_HEIGHT, FRAME_WIDTH};
 use spectrum::{Frame, Model, Spectrum};
-
-/// The ROM used when the command line names none.
-const DEFAULT_ROM: &str = "testdata/roms/48.rom";
 
 /// What `F2` writes, before the collision counter and the extension.
 const SAVE_STEM: &str = "snapshot";
@@ -210,7 +208,7 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let arguments = host::arguments();
-    let (rom_paths, media_paths) = host::partition(&arguments, DEFAULT_ROM);
+    let (rom_paths, media_paths) = host::partition(&arguments, media::DEFAULT_ROM);
 
     let mut roms = Vec::with_capacity(rom_paths.len());
     for path in &rom_paths {
@@ -264,6 +262,11 @@ async fn main() {
     let mut resampler: Option<Resampler> = None;
     // Allocated once and refilled in place, like `Video`'s buffers and for the same reason:
     // "a leak-shaped mistake rather than a slow one", fifty times a second.
+    //
+    // Empty rather than sized, because the size is a device's and no device exists yet — the
+    // reserve happens where the rate arrives, below. What that costs is the doubling chain of
+    // the first few frames, about four reallocations once, which is named here rather than left
+    // to look like an oversight.
     let mut mixed: Vec<f32> = Vec::new();
 
     loop {
@@ -273,7 +276,7 @@ async fn main() {
             }
         }
         for file in get_dropped_files() {
-            let message = accept(&mut machine, &file);
+            let message = accept_drop(&mut machine, &file);
             // A dropped cassette replaces what is in the drive, so the tape that was turning a
             // moment ago is simply gone. That is not a tape running out, and without this the
             // next tick would say so over the top of the message naming the file. See
@@ -320,9 +323,27 @@ async fn main() {
         loss.sample(now, pacer.dropped());
 
         // Polled every frame until a device appears, then built once for that exact rate.
+        //
+        // **`audio_rate` is never asked again after that, and the consequence is worth stating.**
+        // A device that changes its rate mid-session — an output switched from speakers to a
+        // 44.1 kHz interface — keeps being resampled to the old one, which is a pitch error and
+        // not a crash. Rebuilding the resampler would discard its phase and its DC-blocker
+        // history, so it is a click at the moment of the switch against a wrong pitch until the
+        // next launch; neither is obviously right and nothing here has measured it.
+        //
+        // What is *not* left to this poll is the device going **away**. A suspended browser
+        // `AudioContext` stops draining, and a push that kept succeeding into it would grow the
+        // backlog and freeze the depth this loop steers on — the loop would then be running
+        // open-loop on a constant while memory and latency climbed for as long as the tab lived.
+        // `zx_audio_push` answers `-1` while the context is not `running`, the same value and the
+        // same reason as `zx_audio_rate`, so `track` sees `None` and leaves the rate alone.
         if resampler.is_none() {
             let device_hz = page::audio_rate();
             if device_hz != 0 {
+                // One frame of output plus slack, now that the rate is known: 50 is the frame
+                // rate to within a fifth of a percent on both machines, and the correction
+                // above can only move the count by 0.5%.
+                mixed.reserve(device_hz as usize / 50 + 64);
                 resampler = Some(Resampler::new(machine_hz, device_hz));
             }
         }
@@ -373,18 +394,45 @@ async fn main() {
         {
             mixed.clear();
             resampler.feed(produced, &mut mixed);
-            // **The ceiling is enforced here, on the returned depth, for both targets.**
+            // **The backlog is closed as a loop, on the returned depth, for both targets.**
             // Observed in a browser on 2026-09-01: `snd 10080` after four minutes — 210 ms of
             // backlog and still climbing, because the emulator was running at 50.2 Hz against a
             // device consuming exactly one second per second. A fifth of a percent is nothing
             // per frame and is an unbounded latency over a session, which is the same
             // self-amplifying shape `crate::pacing` refuses for frames.
             //
-            // The desktop device caps its own ring as well; this cap is what gives the browser
-            // the same bound without a second copy of the number in JavaScript. Exceeding it
-            // drops one frame of audio — a click — which is the honest trade against a delay
-            // that grows for as long as the emulator is left running.
-            let ceiling = resampler.device_hz() * page::BUFFER_MILLISECONDS / 1000;
+            // This used to be a ceiling: past it the frame was not pushed at all. That bounded
+            // the latency and **it is what a person heard as a tick every few seconds** — a
+            // discarded frame is 20 ms missing from the middle of a waveform, which is a
+            // discontinuity, which is a click, recurring on a period set by the drift. The
+            // ceiling was doing its job and the job was the wrong shape.
+            //
+            // `Resampler::track` closes the same loop by moving the output rate a fraction of a
+            // percent instead, which is inaudible as pitch and continuous by construction.
+            //
+            // **The setpoint moved out of this line and into `audio::queue_target`.** It was
+            // `device_hz() * page::BUFFER_MILLISECONDS / 2000` written here, and `2000` fused a
+            // unit conversion to a ruling — half the buffer — inside a function this file's own
+            // header holds *"to plumbing: poll, upload, draw, await"* precisely because nothing
+            // in it can be graded. It is a named function with a test now, for the same reason
+            // `ink`, `speed_message` and `report_a_finished_tape` are.
+            let target = audio::queue_target(resampler.device_hz());
+            resampler.track(u32::try_from(status.audio_queued).ok(), target);
+            // **The bound survives, as a backstop rather than as the mechanism.** The loop above
+            // holds the queue near `target` — half the buffer — and while it is working this
+            // branch never fires. What it covers is the case the loop *cannot*: a machine so far
+            // behind that 0.5% of rate correction never catches up, where without a ceiling the
+            // latency grows for as long as the session lasts. Twice the target is a full buffer,
+            // so a frame is only ever discarded after the correction has had the whole of its
+            // range and lost.
+            //
+            // **This is the only bound the two targets share, and it is the one that must not be
+            // removed.** Each device has a last-resort bound of its own below it — `desktop::push`
+            // drops at the ring's capacity, `zx_audio_worklet.js` drops its oldest samples when
+            // its ring fills — but those are the device's own self-defence and they are reached
+            // only after this branch has already declined to feed it. Deleting this line moved
+            // the browser from *bounded* to *unbounded* once before.
+            let ceiling = target * 2;
             if status.audio_queued < 0 || status.audio_queued < ceiling as i32 {
                 status.audio_queued = page::audio_push(&mixed);
             } else {
@@ -471,7 +519,7 @@ async fn load(path: &str) -> Result<Vec<u8>, String> {
 /// debug it owes 36, loses 32, and the bar goes red — and then, since 2026-09-01, **goes back to
 /// grey a second or two later**. Before that fix a single hostile drop would have left the status
 /// bar red for the rest of the session.
-fn accept(machine: &mut Spectrum, file: &DroppedFile) -> String {
+fn accept_drop(machine: &mut Spectrum, file: &DroppedFile) -> String {
     let name = file
         .path
         .as_deref()
@@ -541,7 +589,7 @@ fn run_tick(tick: Tick, machine: &mut Spectrum, pacer: &mut Pacer) {
 /// cassette; asking first would report every tape one tick late.
 fn report_a_finished_tape(machine: &Spectrum, status: &mut Status) {
     if let Some(message) = status.drive.ran_out(machine.tape()) {
-        status.report(message.to_owned());
+        status.report(message);
     }
 }
 
@@ -560,21 +608,21 @@ fn act(action: Hotkey, machine: &mut Spectrum, status: &mut Status) {
         Hotkey::PlayTape => {
             machine.tape_mut().play();
             let message = status.drive.played(machine.tape());
-            status.report(message.to_owned());
+            status.report(message);
         }
         Hotkey::StopTape => {
             machine.tape_mut().stop();
             let message = status.drive.stopped(machine.tape());
-            status.report(message.to_owned());
+            status.report(message);
         }
         Hotkey::RewindTape => {
             machine.tape_mut().rewind();
             let message = status.drive.rewound(machine.tape());
-            status.report(message.to_owned());
+            status.report(message);
         }
         Hotkey::Reset => {
             machine.reset();
-            status.report("reset".to_owned());
+            status.report("reset");
         }
         // The arrows are a choice, so the choice needs a key and the current one has to be on
         // the screen. A person who presses an arrow and sees nothing move concludes the
@@ -734,11 +782,22 @@ impl Video {
 struct Status {
     visible: bool,
     /// Which of [`keymap::ARROW_SCHEMES`] the arrow keys currently press.
+    ///
+    /// INVARIANT: in range for that slice. Starts at `0` and is only ever written as
+    /// `(x + 1) % ARROW_SCHEMES.len()`, in [`act`] and nowhere else. Six sites index these two
+    /// fields raw — three of them in [`Status`]'s own methods, which is a *different type* from
+    /// the one enforcing the bound — so the enforcement and the consumption are apart and the
+    /// invariant is written down where the reader is, per this crate's own rule. A newtype would
+    /// make it structural for about ten lines against a bound that is already true; the comment
+    /// is the smaller answer and the finding stays open behind it.
     arrows: usize,
     /// Which of [`pacing::RUNGS`] the machine is being run at.
     ///
     /// The **only** copy of that choice. [`Pacer`] is handed it every frame rather than keeping
     /// its own, so there is nowhere for the two to disagree — the frame loop says why.
+    ///
+    /// INVARIANT: in range for [`pacing::RUNGS`], on the same terms as [`Status::arrows`] above
+    /// and enforced at the same single site.
     speed: usize,
     /// Samples the device still has to play, or a negative number when there is none.
     ///
@@ -754,8 +813,19 @@ struct Status {
     /// question only the thing doing the saying can answer. [`drive::Drive`] carries the argument
     /// for why that is not the shadow copy `keymap` warns about.
     drive: drive::Drive,
-    message: String,
-    /// Reused so the per-frame path formats without allocating.
+    message: Cow<'static, str>,
+    /// Reused so the per-frame path formats into one buffer rather than building a new one.
+    ///
+    /// *This said "without allocating", and one argument in that `write!` still does.*
+    /// [`Status::queue`] returns a `String` — 2 to 11 bytes, one malloc and one free per frame —
+    /// so the invariant the buffer was engineered for is true of the buffer and false of the
+    /// line. It is recorded rather than fixed because every repair measured is worse than the
+    /// defect: a `Cow` still allocates in the live case (a number); a `Display` newtype is the
+    /// sibling pattern [`pacing::Rung`] uses and costs +11 lines and +3 branches for 11 bytes;
+    /// and a `write!`-into-`&mut String` signature would split the single `write!` into three,
+    /// destroying the exact property the buffer exists to give. **The finding stays open** —
+    /// what is not acceptable is the sentence that was here, because it is the one a future
+    /// reader consults when deciding whether a per-frame `format!` is allowed on this path.
     line: String,
 }
 
@@ -774,14 +844,19 @@ impl Status {
             speed: 0,
             audio_queued: -1,
             drive: drive::Drive::new(),
-            message: OPENING_MESSAGE.to_owned(),
+            message: Cow::Borrowed(OPENING_MESSAGE),
             line: String::with_capacity(128),
         }
     }
 
     /// Replace the message shown alongside the readout.
-    fn report(&mut self, message: String) {
-        self.message = message;
+    /// Takes `impl Into<Cow<'static, str>>` rather than `String`, so the call sites whose message
+    /// is a `&'static str` stop allocating a copy of it to hand over. Each was 12 to 48 bytes on a
+    /// keypress path, which is not the point — the point is that `.to_owned()` on a literal reads
+    /// as required by the signature when it is required by nothing. A `String` from
+    /// `write_snapshot` or `speed_message` still converts, as `Cow::Owned`, at no cost.
+    fn report(&mut self, message: impl Into<Cow<'static, str>>) {
+        self.message = message.into();
     }
 
     /// What the `snd` field says.

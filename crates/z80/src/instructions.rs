@@ -1,4 +1,10 @@
-//! The un-prefixed instruction set: the decode table and one handler per instruction.
+//! The instruction set: the decode tables and one handler per instruction.
+//!
+//! **This title used to read "the un-prefixed instruction set", which stopped being true at
+//! M2 and stayed on the file for five milestones.** The `ED` page ([`Cpu::execute_ed`], forty
+//! arms) and the `CB` page ([`Cpu::execute_cb`]) both live here, which is the right place for
+//! them — the three decoders share `Operand`, `Target` and every timing helper below — but a
+//! reader looking for `NEG` or `SLL` had been told by line one that they were somewhere else.
 //!
 //! # The table is a table
 //!
@@ -9,18 +15,30 @@
 //! the explicitness costs nothing at runtime, and unlike a table of function pointers it
 //! leaves every handler inlinable.
 //!
-//! Every arm is one call. The regular blocks of the opcode map are matched as ranges or
-//! or-patterns and their operand fields decoded by [`crate::decode`], because the
-//! regularity is real — `LD r,r'` genuinely is one instruction with two operand fields,
-//! and writing its sixty-three encodings out separately would be sixty-three chances to
-//! mistype a register rather than one.
+//! **That paragraph is about `execute` and only `execute`.** [`Cpu::execute_ed`] ends in
+//! `_unassigned => {}` — the one catch-all in the file — because three quarters of the `ED`
+//! page is unassigned and the hardware's own rule for those encodings is a two-byte `NOP`.
+//! Enumerating a hundred and ninety encodings that all do nothing would buy no
+//! exhaustiveness worth having, and the arm is the rule rather than a fallback.
 //!
-//! # The `base` parameter
+//! The regular blocks of the opcode map are matched as ranges or or-patterns and their
+//! operand fields decoded by [`crate::decode`], because the regularity is real — `LD r,r'`
+//! genuinely is one instruction with two operand fields, and writing its sixty-three
+//! encodings out separately would be sixty-three chances to mistype a register rather than
+//! one. **Nearly** every arm is then one call: `0x00` (`NOP`) and the unreachable prefix arm
+//! are empty, and `0x08`, `0xD9` and `0xEB` — the three exchanges — reach `self.regs`
+//! directly, because a handler wrapping one register-file method would name nothing the
+//! method does not already name.
 //!
-//! Every handler that touches `HL` takes a [`PairBase`] rather than assuming `pair::HL`.
-//! Un-prefixed instructions pass `pair::HL`; M2's `DD` and `FD` prefixes will pass
-//! `pair::IX` and `pair::IY` to this same table, so the entire index-register instruction
-//! set costs one extra argument rather than a second copy of the decoder.
+//! # The `index` parameter
+//!
+//! Every handler that touches `HL` takes a [`PairBase`] rather than assuming `pair::HL`, and
+//! [`Cpu::execute`] itself takes an [`Index`]. Un-prefixed instructions arrive as
+//! [`Index::Hl`]; `DD` and `FD` arrive as [`Index::Ix`] and [`Index::Iy`] through the same
+//! table, so the entire index-register instruction set costs one extra argument rather than a
+//! second copy of the decoder. (This section was written before M2 shipped and still said
+//! *"M2's `DD` and `FD` prefixes **will** pass"* — and named the argument `base`, which is
+//! what the *handlers* take, not what `execute` takes.)
 //!
 //! # Timing
 //!
@@ -28,13 +46,16 @@
 //! cycle, and cycles in which the Z80 computes rather than transfers are charged
 //! explicitly by [`Cpu::internal_cycles`]. Each such call carries the published
 //! machine-cycle breakdown in a comment, because those extra cycles are otherwise the
-//! least obvious part of the code and the easiest to get wrong.
+//! least obvious part of the code and the easiest to get wrong. **Six calls did not, all six
+//! in the `ED` group whose split is the least obvious in the crate** — the two special-register
+//! loads and the four block families. They do now, each against the corpus vector that shows
+//! it, which is the standard the rest of the file was already holding to.
 
 use crate::bus::Bus;
 use crate::decode::{AluOp, CbOp, Condition, Index, Operand, ShiftOp, Target, ed_pair};
 use crate::flags;
 use crate::registers::{PairBase, RegIndex, index, pair};
-use crate::{Cpu, InterruptMode, PREFIX_CB, PREFIX_DD, PREFIX_ED, PREFIX_FD};
+use crate::{Cpu, InterruptMode, PREFIX_CB, PREFIX_DD, PREFIX_ED, PREFIX_FD, RESTART_TARGET_MASK};
 
 /// T-states the Z80 spends adding a displacement to an index register.
 const INDEX_COMPUTATION: u8 = 5;
@@ -43,7 +64,8 @@ const INDEX_COMPUTATION: u8 = 5;
 /// spent three of its T-states.
 const INDEX_COMPUTATION_AFTER_FETCH: u8 = 2;
 
-/// T-states the 16-bit `ADC`/`SBC` pair arithmetic spends after its opcode fetch.
+/// T-states the 16-bit pair arithmetic — `ADD`, `ADC` and `SBC` alike — spends after its
+/// opcode fetch.
 const PAIR_ARITHMETIC: u8 = 7;
 
 /// T-states `RRD`/`RLD` spend shuffling nibbles between memory and the accumulator.
@@ -51,6 +73,9 @@ const DIGIT_ROTATE: u8 = 4;
 
 /// T-states a repeating block instruction spends before re-running itself.
 const BLOCK_REPEAT: u8 = 5;
+
+/// T-states a **taken** relative branch spends computing its target.
+const RELATIVE_JUMP_COMPUTATION: u8 = 5;
 
 /// What a block instruction leaves behind for the repeat machinery.
 ///
@@ -106,8 +131,10 @@ fn accumulator_store_memptr(address: u16, a: u8) -> u16 {
 impl<B: Bus> Cpu<B> {
     /// Execute one already-fetched opcode.
     ///
-    /// `base` is the pair standing in for `HL`, which is always [`pair::HL`] for the
-    /// un-prefixed set.
+    /// `index` names the register a `DD`/`FD` prefix has substituted for `HL` — and is
+    /// emphatically **not** always `HL`, which is what this used to say about a parameter
+    /// called `base` that the signature has not had since M2. The whole index-register set
+    /// flows through this one table on the strength of that argument.
     ///
     /// The prefix bytes never reach here: [`Cpu::dispatch`] consumes them first.
     pub(crate) fn execute(&mut self, opcode: u8, index: Index) {
@@ -328,10 +355,9 @@ impl<B: Bus> Cpu<B> {
     /// because `ED` ignores an index prefix. See [`Cpu::add_pair`], which takes the same rule
     /// with a destination the prefix *can* move.
     fn add_pair_with_carry(&mut self, operand: PairBase) {
-        let addend = self.regs.pair(operand);
         let carry = self.carry_flag();
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, PAIR_ARITHMETIC);
+        self.internal_cycles_on_refresh(PAIR_ARITHMETIC);
+        let addend = self.regs.pair(operand);
         let augend = self.regs.pair(pair::HL);
         self.set_memptr(augend.wrapping_add(1));
         let (result, flags) = flags::prefixed::adc16(augend, addend, carry);
@@ -345,10 +371,9 @@ impl<B: Bus> Cpu<B> {
     /// rule, and subtraction is no exception to it: the latch takes the *minuend* plus one,
     /// not the difference.
     fn subtract_pair_with_carry(&mut self, operand: PairBase) {
-        let subtrahend = self.regs.pair(operand);
         let carry = self.carry_flag();
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, PAIR_ARITHMETIC);
+        self.internal_cycles_on_refresh(PAIR_ARITHMETIC);
+        let subtrahend = self.regs.pair(operand);
         let minuend = self.regs.pair(pair::HL);
         self.set_memptr(minuend.wrapping_add(1));
         let (result, flags) = flags::prefixed::sbc16(minuend, subtrahend, carry);
@@ -385,16 +410,30 @@ impl<B: Bus> Cpu<B> {
 
     /// `LD I,A` and `LD R,A`. Neither affects the flags.
     fn load_special_from_a(&mut self, register: RegIndex) {
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 1);
+        // Nine T-states: the `ED` fetch, then a second M1 that runs to five (4 + 1) while the
+        // transfer happens, the extra T-state on IR — corpus vector `ed47`, whose last cycle
+        // is `8 MC 0002` at the pre-load `{I, R}`.
+        self.internal_cycles_on_refresh(1);
         let value = self.regs.a();
         self.regs.set(register, value);
     }
 
     /// `LD A,I` and `LD A,R` — the only way software can read `IFF2`.
+    ///
+    /// # An unlisted deviation, now listed
+    ///
+    /// On NMOS silicon an interrupt accepted during this instruction's final M-cycle
+    /// **clears** P/V instead of reporting `IFF2` — the bug that makes the naive
+    /// `LD A,I` / `JP PO` probe unreliable, and the reason CMOS parts are the ones that pass
+    /// it. This core does not model it, which is a defensible choice; leaving it off
+    /// `crate`'s *Known deviations from real silicon* list was not, and it is now the third
+    /// entry there. Modelling it needs the acceptance test to reach back into an instruction
+    /// already in flight, and nothing in this emulator asks for that.
     fn load_a_from_special(&mut self, register: RegIndex) {
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 1);
+        // Nine T-states, exactly as `LD I,A` above: the second M1 runs to five (4 + 1), the
+        // extra T-state on IR — corpus vector `ed57`, whose last cycle is `8 MC 1e19` against
+        // `I = 0x1e`, `R = 0x19`.
+        self.internal_cycles_on_refresh(1);
         let value = self.regs.get(register);
         self.regs.set_a(value);
         let flags = flags::prefixed::load_a_from_interrupt_register(
@@ -454,6 +493,9 @@ impl<B: Bus> Cpu<B> {
         let value = self.read_byte(source);
         let destination = self.regs.pair(pair::DE);
         self.write_byte(destination, value);
+        // Sixteen T-states: 4 + 4 for the two M1 cycles, 3 to read `(HL)`, then a write cycle
+        // stretched from 3 to 5 — corpus vector `eda0` ends `14 MC 95c1`, `15 MC 95c1`, both
+        // extra T-states on the destination the write just drove.
         self.internal_cycles(destination, 2);
 
         self.regs
@@ -487,6 +529,9 @@ impl<B: Bus> Cpu<B> {
         let step = block_step(opcode);
         let source = self.regs.pair(pair::HL);
         let value = self.read_byte(source);
+        // Sixteen T-states: 4 + 4 for the two M1 cycles, 3 to read `(HL)`, then five internal
+        // cycles for the comparison — corpus vector `eda1` shows all five as `MC 3bc3`, the
+        // read's own address, because nothing else goes on the bus.
         self.internal_cycles(source, 5);
 
         self.regs
@@ -514,8 +559,10 @@ impl<B: Bus> Cpu<B> {
     /// overwrites the latch again from the instruction address. See [`Cpu::repeat_block`].
     fn block_input(&mut self, opcode: u8) -> BlockOutcome {
         let step = block_step(opcode);
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 1);
+        // Sixteen T-states: 4, then a second M1 stretched to five (4 + 1) on IR, then 4 for
+        // the port read and 3 for the write — corpus vector `eda2`, whose `8 MC 0002` is that
+        // single extra T-state at the pre-load `{I, R}`.
+        self.internal_cycles_on_refresh(1);
 
         let port = self.regs.pair(pair::BC);
         let value = self.read_port(port);
@@ -546,8 +593,10 @@ impl<B: Bus> Cpu<B> {
     /// and neither handler states it twice: each writes the port it actually drove.
     fn block_output(&mut self, opcode: u8) -> BlockOutcome {
         let step = block_step(opcode);
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 1);
+        // Sixteen T-states, the mirror of `INI`: 4, a second M1 stretched to five (4 + 1) on
+        // IR, then 3 to read `(HL)` and 4 to write the port — corpus vector `eda3`, which
+        // shows the same `8 MC 0002` and then puts the transfer cycles the other way round.
+        self.internal_cycles_on_refresh(1);
 
         let source = self.regs.pair(pair::HL);
         let value = self.read_byte(source);
@@ -679,8 +728,7 @@ impl<B: Bus> Cpu<B> {
             let opcode = self.fetch_byte();
             let effective = self.indexed_address(index, displacement);
             // The opcode fetch has already spent three of the five computation T-states.
-            let last_fetched = self.regs.pc().wrapping_sub(1);
-            self.internal_cycles(last_fetched, INDEX_COMPUTATION_AFTER_FETCH);
+            self.internal_cycles(self.last_fetched_address(), INDEX_COMPUTATION_AFTER_FETCH);
             (opcode, Target::Memory(effective))
         } else {
             let opcode = self.fetch_opcode();
@@ -695,7 +743,10 @@ impl<B: Bus> Cpu<B> {
                 self.write_flags(flags);
                 self.store_cb_result(target, result, index, opcode);
             }
-            // `RES` and `SET` define no flags at all.
+            // `RES` and `SET` define no flags at all, which is why neither reaches `flags`.
+            // INVARIANT: `CbOp`'s bit index is `(opcode >> 3) & 0x07` at
+            // `decode.rs`'s `CbOp::from_opcode`, so it is 0..=7 and neither shift can
+            // overflow. Stated the way `decode.rs` states its five, rather than re-masked.
             CbOp::Reset(bit_index) => {
                 self.store_cb_result(target, value & !(1 << bit_index), index, opcode);
             }
@@ -767,9 +818,16 @@ impl<B: Bus> Cpu<B> {
     /// `register_base` is separate from `index` because the prefix reaches the register
     /// halves and the memory operand independently — see [`Index::for_register_half`].
     ///
-    /// Deliberately charges **no** T-states: the address computation costs five, but an
-    /// operand byte fetched after the displacement spends three of them, so only the
-    /// caller knows how many are left. See [`Cpu::tick_index_computation`].
+    /// Deliberately charges **none of the five address-computation T-states**: an operand byte
+    /// fetched after the displacement spends three of them, so only the caller knows how many
+    /// are left. See [`Cpu::tick_index_computation`].
+    ///
+    /// **That sentence used to read "charges **no** T-states", full stop, and was the opposite
+    /// of true for the case it is about.** The displaced branch calls
+    /// [`Cpu::fetch_signed_byte`], which is a `Bus::read` and three T-states, and advances
+    /// `PC`; [`Cpu::indexed_address`] then writes `MEMPTR`. So this is neither free nor
+    /// side-effect-free — it is *free of the address-computation cycles specifically*, which
+    /// is the only claim the caller needs and the only one now made.
     fn resolve(&mut self, operand: Operand, index: Index, register_base: PairBase) -> Target {
         match operand.register_index(register_base) {
             Some(register) => Target::Register(register),
@@ -811,8 +869,7 @@ impl<B: Bus> Cpu<B> {
     /// address) are the two shapes; both put the cycles on the last byte fetched.
     fn tick_index_computation(&mut self, index: Index, touches_memory: bool, count: u8) {
         if index.is_displaced() && touches_memory {
-            let last_fetched = self.regs.pc().wrapping_sub(1);
-            self.internal_cycles(last_fetched, count);
+            self.internal_cycles(self.last_fetched_address(), count);
         }
     }
 
@@ -830,6 +887,38 @@ impl<B: Bus> Cpu<B> {
             Target::Register(register) => self.regs.set(register, value),
             Target::Memory(address) => self.write_byte(address, value),
         }
+    }
+
+    /// The address of the last byte fetched from the instruction stream.
+    ///
+    /// The Z80 holds it on the bus through the internal cycles that follow, so this is the
+    /// address five separate handlers need: the `DDCB` operand, an `(IX+d)` displacement, a
+    /// taken relative branch's own displacement, and both `CALL` forms' second operand byte.
+    /// It was written out at each of them, under three different local names — `last_fetched`,
+    /// `displacement`, `last_operand` — which read as three rules where there is one.
+    ///
+    /// `PC` has already advanced past the byte, hence the subtraction; the wrap is the Z80's,
+    /// not a guard.
+    #[inline]
+    fn last_fetched_address(&self) -> u16 {
+        self.regs.pc().wrapping_sub(1)
+    }
+
+    /// Charge `count` internal T-states with the refresh address `IR` on the bus.
+    ///
+    /// Thirteen handlers stretch M1 rather than adding a machine cycle, and the Z80 leaves
+    /// `{I, R}` on the bus for the extra T-states because M1 is where it drove it. Written
+    /// out, that is `let refresh = self.regs.refresh_address();` followed by
+    /// `self.internal_cycles(refresh, n)` — one concept in two lines, thirteen times, with
+    /// twelve comments restating in prose what the pair does. Here it has a name.
+    ///
+    /// The sites that pass an address of their own — an operand's, a port's, the last byte
+    /// fetched — are the ones where the Z80 is **not** driving `IR`, and they stay explicit
+    /// for exactly that reason.
+    #[inline]
+    fn internal_cycles_on_refresh(&mut self, count: u8) {
+        let refresh = self.regs.refresh_address();
+        self.internal_cycles(refresh, count);
     }
 
     /// The extra T-state the read-modify-write forms spend holding a value between the read
@@ -969,8 +1058,7 @@ impl<B: Bus> Cpu<B> {
     fn load_sp_from_pair(&mut self, base: PairBase) {
         // M1 runs to six T-states while the pair is transferred (4 + 2), on IR — corpus
         // vector `f9`.
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 2);
+        self.internal_cycles_on_refresh(2);
         let value = self.regs.pair(base);
         self.regs.set_sp(value);
     }
@@ -978,8 +1066,7 @@ impl<B: Bus> Cpu<B> {
     /// `PUSH qq`.
     fn push_pair(&mut self, base: PairBase) {
         // M1 runs to five T-states before the two writes begin (4 + 1), on IR.
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 1);
+        self.internal_cycles_on_refresh(1);
         let value = self.regs.pair(base);
         self.push_word(value);
     }
@@ -1165,9 +1252,9 @@ impl<B: Bus> Cpu<B> {
     /// a line later, and it is why `augend` is bound rather than the pair being read twice.
     fn add_pair(&mut self, destination: PairBase, operand: PairBase) {
         // The 16-bit add occupies two internal machine cycles (4 + 3) after M1, all seven
-        // T-states on IR — corpus vector `09`.
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 7);
+        // T-states on IR — corpus vector `09`. Same quantity as the `ED` pair arithmetic, so
+        // the same name: this site spelled it `7` while its two siblings used the constant.
+        self.internal_cycles_on_refresh(PAIR_ARITHMETIC);
         let addend = self.regs.pair(operand);
         let augend = self.regs.pair(destination);
         self.set_memptr(augend.wrapping_add(1));
@@ -1181,17 +1268,18 @@ impl<B: Bus> Cpu<B> {
     fn increment_pair(&mut self, base: PairBase) {
         // M1 runs to six T-states while the incrementer works (4 + 2), on IR — corpus
         // vector `03`.
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 2);
+        self.internal_cycles_on_refresh(2);
         let value = self.regs.pair(base).wrapping_add(1);
         self.regs.set_pair(base, value);
     }
 
     /// `DEC ss`. Affects no flags, as [`Cpu::increment_pair`] does not.
     fn decrement_pair(&mut self, base: PairBase) {
-        // M1 runs to six T-states while the incrementer works (4 + 2), on IR.
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 2);
+        // M1 runs to six T-states while the increment/decrement unit works (4 + 2), on IR —
+        // corpus vector `0b`. The Z80 has one IDU serving both directions, which is why the
+        // sibling above says "the incrementer" of the same hardware; this comment was copied
+        // from it and arrived without either the widened name or its own vector.
+        self.internal_cycles_on_refresh(2);
         let value = self.regs.pair(base).wrapping_sub(1);
         self.regs.set_pair(base, value);
     }
@@ -1279,10 +1367,6 @@ impl<B: Bus> Cpu<B> {
     /// `JR e`.
     fn jump_relative_unconditional(&mut self) {
         let offset = self.fetch_signed_byte();
-        // Five internal T-states while the target address is computed, all on the
-        // displacement byte's own address — corpus vector `18`.
-        let displacement = self.regs.pc().wrapping_sub(1);
-        self.internal_cycles(displacement, 5);
         self.jump_relative(offset);
     }
 
@@ -1291,8 +1375,6 @@ impl<B: Bus> Cpu<B> {
     fn jump_relative_conditional(&mut self, condition: Condition) {
         let offset = self.fetch_signed_byte();
         if condition.holds(self.regs.f()) {
-            let displacement = self.regs.pc().wrapping_sub(1);
-            self.internal_cycles(displacement, 5);
             self.jump_relative(offset);
         }
     }
@@ -1301,15 +1383,12 @@ impl<B: Bus> Cpu<B> {
     fn decrement_and_jump(&mut self) {
         // M1 runs to five T-states while B is decremented (4 + 1), on IR — corpus
         // vector `10`.
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 1);
+        self.internal_cycles_on_refresh(1);
         // `B` falls during M1, before the displacement cycle begins.
         let counter = self.regs.get(index::B).wrapping_sub(1);
         self.regs.set(index::B, counter);
         let offset = self.fetch_signed_byte();
         if counter != 0 {
-            let displacement = self.regs.pc().wrapping_sub(1);
-            self.internal_cycles(displacement, 5);
             self.jump_relative(offset);
         }
     }
@@ -1326,6 +1405,11 @@ impl<B: Bus> Cpu<B> {
     /// *"(jumping to addr)"* qualification asks for. A not-taken `JR cc` leaves the latch
     /// untouched, and that is the whole difference from `JP cc,nn` a few lines above.
     fn jump_relative(&mut self, offset: i8) {
+        // Five internal T-states while the target address is computed, all on the
+        // displacement byte's own address — corpus vector `18`. All three callers charged
+        // these two lines themselves, guarded by their own taken-test; here the invariant the
+        // paragraph above states is structural instead of triplicated.
+        self.internal_cycles(self.last_fetched_address(), RELATIVE_JUMP_COMPUTATION);
         let target = self.regs.pc().wrapping_add_signed(i16::from(offset));
         self.regs.set_pc(target);
         self.set_memptr(target);
@@ -1335,8 +1419,7 @@ impl<B: Bus> Cpu<B> {
     fn call_unconditional(&mut self) {
         let target = self.fetch_branch_target();
         // Corpus vector `cd`: the internal cycle holds the last operand byte's address.
-        let last_operand = self.regs.pc().wrapping_sub(1);
-        self.call_to(target, last_operand);
+        self.call_to(target, self.last_fetched_address());
     }
 
     /// `CALL cc,nn`.
@@ -1348,8 +1431,7 @@ impl<B: Bus> Cpu<B> {
     fn call_conditional(&mut self, condition: Condition) {
         let target = self.fetch_branch_target();
         if condition.holds(self.regs.f()) {
-            let last_operand = self.regs.pc().wrapping_sub(1);
-            self.call_to(target, last_operand);
+            self.call_to(target, self.last_fetched_address());
         }
     }
 
@@ -1364,12 +1446,10 @@ impl<B: Bus> Cpu<B> {
     /// not in the shared [`Cpu::call_to`], where it would be a second writer for a `CALL` that
     /// has already latched the same value at its operand fetch.
     fn restart(&mut self, opcode: u8) {
-        /// Bits 5–3 scaled by eight — already in place in the opcode.
-        const TARGET_MASK: u8 = 0x38;
         // `RST` has no operands, so its internal cycle holds IR instead — corpus
         // vector `ff`.
         let refresh = self.regs.refresh_address();
-        let target = u16::from(opcode & TARGET_MASK);
+        let target = u16::from(opcode & RESTART_TARGET_MASK);
         self.set_memptr(target);
         self.call_to(target, refresh);
     }
@@ -1410,8 +1490,7 @@ impl<B: Bus> Cpu<B> {
     /// fetch their operand either way.
     fn return_conditional(&mut self, condition: Condition) {
         // The condition test extends M1 by one T-state, on IR.
-        let refresh = self.regs.refresh_address();
-        self.internal_cycles(refresh, 1);
+        self.internal_cycles_on_refresh(1);
         if condition.holds(self.regs.f()) {
             let target = self.pop_word();
             self.regs.set_pc(target);

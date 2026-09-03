@@ -4,7 +4,7 @@
 //!
 //! The Spectrum's hue bits drive the three guns directly — **bit 0 blue, bit 1 red, bit 2
 //! green** — which is why its palette runs black, blue, red, magenta, green, cyan, yellow,
-//! white rather than in a designer's order. [`Colour::rgb`] already applies that, and
+//! white rather than in a designer's order. [`Colour::rgb`](spectrum::Colour::rgb) already applies that, and
 //! `crates/spectrum`'s own `the_palette_drives_the_guns_in_hardware_order` grades it. This
 //! module does not repeat that work and must not: a second copy of the gun order is a second
 //! thing to get wrong.
@@ -14,7 +14,7 @@
 //! surface the GPU reads as `RGBA` swaps exactly blue and red — which on a Spectrum turns the
 //! sky yellow and nothing panics, nothing fails to compile, and no test in `crates/spectrum`
 //! can see it. That is the whole reason `tests/palette_texture.rs` asserts against **literal
-//! RGBA quadruples** rather than against [`Colour::rgb`]: comparing this module's output to
+//! RGBA quadruples** rather than against [`Colour::rgb`](spectrum::Colour::rgb): comparing this module's output to
 //! the function it calls is a tautology, and this project has a name for that.
 //!
 //! # It cannot re-read memory, and that is a property of the signature

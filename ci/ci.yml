@@ -130,12 +130,19 @@ jobs:
           curl -fsSL -o "$snap/fire.z80"          https://raw.githubusercontent.com/remogatto/gospeccy/master/src/formats/testdata/fire.z80
           curl -fsSL -o "$snap/fire.sna"          https://raw.githubusercontent.com/remogatto/gospeccy/master/src/formats/testdata/fire.sna
 
-          # Richard Butler's 48K timing suite — the machine-level oracle, whose expected
-          # numbers were measured on real Spectrums. Only the 48K file is read by anything:
-          # timing_tests-128k_v1.0.z80 is documented in docs/M7.md and read by no gate, so it
-          # is not fetched here.
+          # Richard Butler's timing suites — the machine-level oracle, whose expected
+          # numbers were measured on real Spectrums. Both editions are read by
+          # crates/spectrum/tests/timing_oracle.rs, so both are fetched. This block said the
+          # 128 file was "read by no gate, so it is not fetched here" — true until
+          # 2026-09-02, when the 128 gate was added (and was red on 62 of 70 rows; the whole
+          # story is in testdata/README.md). Left as written, this workflow would have gone
+          # red on its first installed run: an absent corpus does not skip under CI, it
+          # panics — the corpus-required guard below refuses the opt-out — so the missing
+          # fetch would have been discovered as a broken pipeline instead of read here.
           curl -fsSL -o testdata/timing/timing_tests_48k_v1.0.z80 \
             https://raw.githubusercontent.com/MrKWatkins/EmulatorTestSuites/main/src/MrKWatkins.EmulatorTestSuites.ZXSpectrum/Timing/timing_tests_48k_v1.0.z80
+          curl -fsSL -o testdata/timing/timing_tests-128k_v1.0.z80 \
+            https://softspectrum48.weebly.com/uploads/6/6/7/5/66753101/timing_tests-128k_v1.0.z80
 
           # Third-party .tap tapes. The sweep checks each recovered block against a parity byte
           # somebody else's tool wrote, which is the one assertion here that owes nothing to
@@ -155,6 +162,7 @@ jobs:
                    testdata/snapshots/3dshow_demo.z80 testdata/snapshots/spectral_test.z80 \
                    testdata/snapshots/fire.z80 testdata/snapshots/fire.sna \
                    testdata/timing/timing_tests_48k_v1.0.z80 \
+                   testdata/timing/timing_tests-128k_v1.0.z80 \
                    testdata/tapes/z80doc.tap testdata/tapes/z80memptr.tap \
                    testdata/tapes/z80tests.tap; do
             test -s "$f" || { echo "::error::$f is missing or empty"; exit 1; }
@@ -170,6 +178,7 @@ jobs:
           1bdd66e2fa456a383f2d97685b5ff9ada3b027390f5d05b576ae4d6bc3c3df4a  testdata/snapshots/fire.z80
           54f890f3b5509f08bc98b81b2b8ef5d5591f2ff6ba102a69c262b0bab7daacb9  testdata/snapshots/fire.sna
           1e66230a7b23737294f35d2778b8384ce3f81412b98883d35e564091377382af  testdata/timing/timing_tests_48k_v1.0.z80
+          fedc228ddef76cefb7b81dd6e18600cca2fd826fc18b4bc3f773cfdf2e7fffc4  testdata/timing/timing_tests-128k_v1.0.z80
           4b06ce9fd517fd5f5a86d4ff2ef05a3f0ab7ed20eb075b87b0623d42fbd3e4bd  testdata/tapes/z80doc.tap
           444582ddfa4d05711b6235e743ddf68295231e97ba92cc838c5d09a106c9a10f  testdata/tapes/z80memptr.tap
           42ce7fc8393de83876b89015be54f7d0da3c8c5b07a075981c12dd9d84c8b95d  testdata/tapes/z80tests.tap
@@ -191,11 +200,18 @@ jobs:
       # gate.sh prints only the last three lines of the suite log, which is right for a
       # terminal and not enough for a run nobody was watching. On failure the whole thing goes
       # into the job log, where the person reading the red tick is already looking.
+      #
+      # *This step listed four fixed /tmp/zx-m8-gate-*.txt paths*, which is where the logs
+      # lived before gate.sh moved them into a per-run `mktemp -d` directory — so on a red
+      # gate this step would have found nothing, silently, which for a failure-diagnosis step
+      # is the vacuous shape gate.sh itself exists to hunt. The directory's name is only
+      # knowable at runtime, but its template is fixed at gate.sh's mktemp call, and a fresh
+      # runner has exactly one directory matching it: this run's. The glob also picks up every
+      # log the gate writes — doc, bench and all — rather than the four this step used to name.
       - name: The captured logs, when the gate went red
         if: failure()
         run: |
-          for log in /tmp/zx-m8-gate-tests.txt /tmp/zx-m8-gate-clippy.txt \
-                     /tmp/zx-m8-gate-clippy-wasm.txt /tmp/zx-m8-gate-build.txt; do
+          for log in "${TMPDIR:-/tmp}"/zx-m8-gate.*/*.txt; do
             if [ -f "$log" ]; then
               printf '\n===== %s =====\n' "$log"
               cat "$log"

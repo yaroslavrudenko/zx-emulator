@@ -1,6 +1,6 @@
 # Images
 
-Nine files, and which of them the repository's [`README.md`](../../README.md) shows is that file's
+Twelve files, and which of them the repository's [`README.md`](../../README.md) shows is that file's
 business rather than this one's — a tally here of how many it links would be a second copy of a
 fact it owns, and the tally this page used to carry went stale the same day it was written. They
 are all **produced by running the emulator**, not drawn, and this page is the commands that produce
@@ -17,9 +17,13 @@ them — so that a picture making a claim about the machine can be re-taken rath
 | `128-menu.png` | gallery | the 128's own boot menu, unassisted |
 | `tape-loading.png` | gallery | the tape three thousand frames in, mid-load |
 | `title.png` | gallery | what that tape produced |
+| `tape-loading-sound.png` | campaign | *Exolon*'s header just read — the frame the tape-sound work shows |
+| `rtype-loader.png` | campaign | *R-Type*'s Torasoft loader on the **128**, its `.tzx` mid-play |
+| `rtype-spec.png` | campaign | *R-Type*'s attract screen, mid-way through typing its specification |
 
-Four games: *Cybernoid*, *Manic Miner*, *Cybernoid II*, *Exolon*. Two machines. One of the nine
-frames is a **128** and the rest are 48Ks, named per command below.
+Five games: *Cybernoid*, *Manic Miner*, *Cybernoid II*, *Exolon*, *R-Type*. Two machines. Three of
+the twelve frames are **128**s — *Cybernoid* and both *R-Type*s — and the rest are 48Ks, named per
+command below.
 
 > **The two `-playing` files were added on 2026-09-01 and they close a gap this page named
 > itself.** *What could not be photographed* said, correctly at the time, that *"a tape-loaded game
@@ -34,7 +38,7 @@ frames is a **128** and the rest are 48Ks, named per command below.
 
 ## Which pixels are the machine's
 
-**All of them, in all nine files. There is no surround, no margin, no gutter and no caption
+**All of them, in all twelve files. There is no surround, no margin, no gutter and no caption
 baked into any image**, so the question the first version of this page had to argue — *where
 does the emulator's output stop?* — does not arise. Each file is one 320 × 256 frame and nothing
 else.
@@ -94,6 +98,15 @@ docs/images/exolon-playing.png: 13 distinct colours, 0 foreign
 docs/images/cybernoid-ii-playing.png: 13 distinct colours, 0 foreign
 ```
 
+And over the three added on 2026-09-03 — the two *R-Type* frames and the *Exolon* header frame
+the audio work brought in — run the day they were added to this page:
+
+```
+docs/images/rtype-loader.png: 2 distinct colours, 0 foreign
+docs/images/rtype-spec.png: 6 distinct colours, 0 foreign
+docs/images/tape-loading-sound.png: 4 distinct colours, 0 foreign
+```
+
 `cybernoid-ii.png` uses **fifteen**, which is every value the hardware has.
 
 ### The checker was broken on purpose, three times, because a green that cannot go red proves nothing
@@ -146,7 +159,9 @@ that **the commands on this page still produce the files in this directory** —
 each file was honest when it was made. `pamenlarge` replicates each pixel into an N × N block: it
 does not filter, interpolate or average, so every pixel of the PNG is a bit-for-bit copy of a
 pixel `palette::write_rgba` wrote. `pamtopng` is lossless and round-trips back to the same P6,
-which is what the second `cmp` shows.
+which is what the second `cmp` shows. Both checks were run a third time on 2026-09-03, for the
+three frames added that day: each command re-ran to a byte-identical `.ppm`, and each published
+file round-tripped to exactly `pamenlarge 2` of it.
 
 ---
 
@@ -181,8 +196,10 @@ rather than enlarged, because enlarging a dull picture makes a larger dull pictu
 ## The commands
 
 Taken 2026-09-01, from `crates/frontend`'s `zx-shot`, built at commit `1945c2e` plus the
-working tree of that day. Every image below is one command; none was composed, cropped or
-retouched, and the `--settle` numbers are the whole of what distinguishes several of them.
+working tree of that day — except the three frames added on 2026-09-03, which were taken by
+*that* day's working tree and are dated at their commands below. Every image below is one
+command; none was composed, cropped or retouched, and the `--settle` numbers are the whole of
+what distinguishes several of them.
 
 > **A `--settle` number is a reading, not a constant, and the tape model was rewritten underneath
 > these within the hour.** The timeline is recorded rather than summarised, because *"taken on
@@ -270,6 +287,33 @@ $ZX --rom testdata/roms/48.rom --media testdata/games/ManicMiner.tap \
 $ZX --rom testdata/roms/48.rom --media testdata/games/ManicMiner.tap \
     --keys "$LOAD" --play-tape --settle 10750 --out title.ppm
 
+# --- the three added 2026-09-03: the loading screech's frame, and the game that takes ---
+# --- nine minutes of cassette ---------------------------------------------------------
+# Their --settle values were not written down when they were first taken — this page's own
+# standard, failed and then met the same day: each number below was re-read by the sweep
+# procedure above, and each command was verified to reproduce its committed frame to the
+# byte before it was published here.
+$ZX --rom testdata/roms/48.rom --media testdata/games/Exolon.tap \
+    --keys "$LOAD" --play-tape --settle 400 --out tape-loading-sound.ppm
+
+# R-Type is a 128 game on a .tzx: two --rom make the 128, whose boot menu takes Enter as
+# Tape Loader, so LOAD "" is never typed. The Torasoft screen holds still mid-tape —
+# every --settle from 600 to 900 produces this identical frame.
+$ZX --rom testdata/roms/128-0.rom --rom testdata/roms/128-1.rom \
+    --media testdata/games/RType.tzx --frames 120 --keys Enter --play-tape --settle 600 \
+    --out rtype-loader.ppm
+
+# The attract screen is on the far side of the whole cassette and of the crack's own
+# trainer menu: --keys-after presses 3 — START GAME — once the tape runs out, and the
+# attract's typing is 400 frames along when the frame is taken. This invocation prints
+# "the tape ran out at frame 28399"; the 28,429 the repository's README quotes is the
+# same reading off a run with thirty more warm-up frames before PLAY — the cassette
+# itself is 28,259 frames long from PLAY, and either printed figure adds its own run's
+# warm-up to that.
+$ZX --rom testdata/roms/128-0.rom --rom testdata/roms/128-1.rom \
+    --media testdata/games/RType.tzx --frames 120 --keys Enter --play-tape \
+    --keys-after Key3 --settle 400 --out rtype-spec.ppm
+
 # every .ppm the commands above just wrote — the stems are read off what they produced rather
 # than retyped, for the reason below.
 for f in *.ppm; do
@@ -282,7 +326,7 @@ nor interpolates, so neither can alter a machine pixel; the `cmp` above is what 
 than the sentence.
 
 **That loop used to name seven stems, and for as long as it did, this page was a recipe that
-reproduced seven of the nine files beside it.** The two `-playing` frames were photographed by the
+reproduced seven of the then-nine files beside it.** The two `-playing` frames were photographed by the
 commands above and then converted by a hand the page never described, so somebody following it end
 to end finished holding two `.ppm`s with no instruction and no explanation — which is this
 directory's own subject failing on itself. An image whose published path stops short of the file is
@@ -296,7 +340,8 @@ these.** No game file in `testdata/games/` is committed — `git check-ignore -v
 is the proof, and [`testdata/games/PROVENANCE.md`](../../testdata/games/PROVENANCE.md) carries it
 for each, along with the reason that record is the one file in that directory which does ship.
 SHA-1
-of the four used above, taken from the bytes on disk on 2026-09-01, so that somebody with the same
+of the five used above — the first four taken from the bytes on disk on 2026-09-01, `RType.tzx`
+from the bytes on disk on 2026-09-03 — so that somebody with the same
 files can tell whether they have the same files:
 
 ```
@@ -305,6 +350,7 @@ e4cca809aed052fbc04ac52222e593a41190f9cc  Cybernoid.z80
 aed4265e8253fa01fab9f151637528084a596162  CybernoidII.tap
 2678271cccc4b2485a8fe5ea05c3ac781e1f421b  Exolon.tap
 84808c20566aa65e9308c3f8910a16bacfa1b982  ManicMiner.tap
+974c93546aac114b622dc952f459527437608fc5  RType.tzx
 ```
 
 ### The four taps of `LOAD ""`, and the keymap's documented limits
@@ -610,7 +656,8 @@ code were all working the whole time.
 
 **No Mario Bros frame is published here, and the reason is provenance rather than the picture.**
 The licensing section below sets out a separate case for each rights-holder, resting on searches
-that were actually performed; Ocean Software is a fourth publisher and no such search has been done
+that were actually performed; Ocean Software is a fifth publisher — fourth when this was written,
+before *R-Type*'s search was performed on 2026-09-03 — and no such search has been done
 for it. A screenshot is cheap to take and a claim about permission is not, so what is recorded is
 the finding and not the frame.
 
@@ -711,7 +758,7 @@ in the half of it that says so out loud.
 
 ---
 
-## Licensing — three different cases, and they are not the same
+## Licensing — four different cases, and they are not the same
 
 ### 1. ROM output, and it is covered
 
@@ -736,11 +783,14 @@ resolved.
 ### 3. The three Hewson games, where something was found — and it is not a permission for this
 
 **`cybernoid.png` is *Cybernoid — The Fighting Machine*, `cybernoid-ii.png` and
-`cybernoid-ii-playing.png` are *Cybernoid II — The Revenge*, and `exolon.png` and
-`exolon-playing.png` are *Exolon*. All five are by Raffaele Cecco and published by Hewson
-Consultants Ltd** — *Exolon* in 1987, both *Cybernoid*s in 1988. The two `-playing` frames are the
+`cybernoid-ii-playing.png` are *Cybernoid II — The Revenge*, and `exolon.png`,
+`exolon-playing.png` and `tape-loading-sound.png` are *Exolon*. All six are by Raffaele Cecco
+and published by Hewson Consultants Ltd** — *Exolon* in 1987, both *Cybernoid*s in 1988. The two `-playing` frames are the
 same three titles and the same rights-holder as the frames beside them, so they add a file to this
-case and nothing to its reasoning. *Cybernoid II*'s own title screen,
+case and nothing to its reasoning. `tape-loading-sound.png`, added 2026-09-03, is the sixth and
+the thinnest: the ROM's own header screen during an *Exolon* load, whose only game-originated
+pixels are the tape header's own name, `EXOLON`, printed by the ROM — same title, same
+rights-holder, and still nothing new to the reasoning. *Cybernoid II*'s own title screen,
 visible in `cybernoid-ii.png`, credits *"BY RAFFAELE CECCO / GRAPHICS BY HUGH BINNS / MUSIC BY DAVE
 ROGERS"* and carries `CYBERNOID II (C) 1988 HEWSON` unaltered.
 
@@ -757,6 +807,41 @@ a permission covering these three files.** It was given to a named third party, 
 game available for download*, and these are screenshots taken by somebody else. Reading it as
 cover for this repository would be stretching a sentence past what it says — which is the one move
 `testdata/README.md` exists to prevent.
+
+### 4. *R-Type*, and the answer this time is a denial — of a copy that is a crack besides
+
+**`rtype-loader.png` and `rtype-spec.png` are *R-Type*, by Bob Pape, Mark A. Jones and Robert L.
+Hylands, published by Electric Dreams Software in 1988** — the Spectrum conversion of Irem's 1987
+arcade game. There is no permission for them, and the record found is flatly worse than *Manic
+Miner*'s: where that case reports two archives disagreeing, here they agree, and what they agree
+on is a denial.
+
+Fetched and read directly on 2026-09-03, not relayed:
+
+| Source | What it says, verbatim | What that is |
+|---|---|---|
+| **Spectrum Computing**, entry [4256](https://spectrumcomputing.co.uk/entry/4256/ZX-Spectrum/R-Type) | *"Unfortunately these files are distribution denied and you can't download them."* | A **distribution denial**, applied by the archive to its own downloads |
+| **World of Spectrum / ZXDB** API, record `0004256` | `"availability": "Distribution denied"` | The same denial, as the database's **classification** |
+
+**A denial of distribution is a statement about game files, and this repository distributes
+none** — the bullets below hold for these two frames exactly as for every other game frame here.
+It is still the least permissive record on this page, and it is reported rather than reasoned
+around: if a rights-holder objects, the response is the one already written below — remove the
+files, not argue about them.
+
+**And the copy photographed is not Electric Dreams' release, which the *Batty* ruling above makes
+worth stating plainly.** The tape to hand is Torasoft's 1993 128K remix — trained, `+3` pack,
+turbo loader, its own construction-poke menu — and `rtype-loader.png` **is the cracker's
+screen**, printing `ELECTRIC DREAMS ©1987` in Torasoft's rendering (a year the 1988 release sits
+oddly beside, and whose hand — the publisher's original loader or the cracker's retyping — the
+frame cannot decide). *Batty* was rejected because its crack stopped at a warez advertisement and
+the game was never seen running, so publishing it would have attributed a crack screen to this
+emulator while showing no game at all. This tape is the other case: the cassette goes on to load
+and run the actual game, `rtype-spec.png` is the game's own attract screen, and the loader frame
+is published *as* what the commands section names it — a crack intro, shown because the
+28,259-frame turbo load behind it is the harshest `EAR`-path test in this repository. The third
+hand this adds — Torasoft's own screen, a party no permission could even be sought from — is
+recorded, not resolved.
 
 ### What is true of every game frame here, and the whole of it
 
@@ -775,11 +860,16 @@ cover for this repository would be stretching a sentence past what it says — w
   the tidy, wrong provenance that record exists to prevent — so where those four came from is not
   something this page knows. Their SHA-1s are listed above, and that is the part a reader can use:
   it tells them whether they hold the same bytes, which is all that can honestly be said.
+  `RType.tzx`, which arrived on 2026-09-03, makes it five of the same shape, checked the day it
+  was used: a Chrome quarantine attribute dates the download to the second, `kMDItemWhereFroms`
+  is absent, and its origin joins the other four in not being something this page knows.
 - **These are screenshots, and screenshots are the ordinary practice of emulator projects.** They
   are here because a picture of a real game is the only honest way to show that one runs.
 - **`title.png` carries the game's own `© BUG-BYTE ltd. 1983` line, and `cybernoid-ii.png` carries
   `CYBERNOID II (C) 1988 HEWSON`, both unaltered** — the condition the ROM permission attaches to
   ROM images. No comparable permission has been granted for either game, so that is a courtesy
-  rather than a compliance.
+  rather than a compliance. `rtype-loader.png` shows `ELECTRIC DREAMS ©1987` unaltered too — but
+  as the Torasoft loader prints it, a cracker relaying a publisher's line; case 4 above says what
+  that is worth.
 - **No permission is claimed for any of them.** If a rights-holder objects, the right response is
   to remove the files, not to argue about them.

@@ -271,8 +271,13 @@ mod tests {
 
     #[test]
     fn every_bank_list_is_ascending_and_in_range() {
-        // Both consumers — the snapshot writer and the applier — iterate this, so the order
-        // is part of the contract rather than an accident of how it was typed.
+        // **Neither of this list's two real consumers depends on the order**, and the comment
+        // here used to say both did — naming "the snapshot writer and the applier", where the
+        // applier in fact iterates `Snapshot::banks()` and the writer's use is a presence check.
+        // The order is asserted anyway, and the reason is the honest one: `snapshot::pages_of`
+        // *is* order-dependent, it feeds the `.z80` writer's page blocks, and its 48K order is
+        // the opposite of this one — so a reader comparing the two needs each to be pinned
+        // rather than incidental. Ascending here, address order there, both on purpose.
         for model in MODELS {
             let banks = model.banks();
             assert!(banks.is_sorted(), "{model} lists its banks out of order");

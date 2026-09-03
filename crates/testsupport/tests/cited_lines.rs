@@ -109,6 +109,23 @@
 //! `lib.rs`. Both are declared in [`THE_GATE_CANNOT_FOLLOW`] with the reason, so that the
 //! set cannot grow quietly: a *new* unfollowable citation reddens
 //! [`every_citation_the_gate_cannot_follow_is_declared`].
+//!
+//! ## That paragraph described half the population, and the half it left out was ungraded
+//!
+//! It said "a citation", and every gate in this file meant by that *a path with a `:NNN`
+//! after it*. A backticked path written without a line number reached none of them:
+//! [`citations`] never saw it, and `cited_names.rs`'s path gate looks only under `tests/`.
+//! So the declaration requirement — the thing this section is about — was enforced on a
+//! citation when a number happened to follow it and on nothing otherwise, and the register
+//! below looked complete because the population it was complete *for* was the smaller one.
+//!
+//! Two keycode files, siblings in the same dependency, cited for the same reason, settled it:
+//! the X11 one was declared and the Wayland one was not, and no fact about either file
+//! explained the difference. [`cited_paths`] closes that, and the register grew from
+//! three groups to seven the moment it did — which is the honest measure of how much was
+//! going ungraded, and why the growth arrived together with a second end on
+//! [`every_declared_unfollowable_path_is_still_unfollowable`] to keep the register from
+//! becoming somewhere to put findings.
 
 mod common;
 
@@ -132,7 +149,7 @@ struct Unfollowable {
 /// the alternative to writing it down is skipping it in a `println!`, which libtest captures
 /// on success. This project has already paid for that once: with a corpus moved aside the
 /// suite exited 0 with the same test count, because the notice was a captured line of text.
-const THE_GATE_CANNOT_FOLLOW: [Unfollowable; 3] = [
+const THE_GATE_CANNOT_FOLLOW: [Unfollowable; 7] = [
     Unfollowable {
         paths: &[
             "src/native/windows.rs",
@@ -142,24 +159,77 @@ const THE_GATE_CANNOT_FOLLOW: [Unfollowable; 3] = [
             "apple_util.rs",
             "src/native/linux_x11/keycodes.rs",
             "linux_x11/keycodes.rs",
+            "src/native/linux_wayland/keycodes.rs",
             "src/native/wasm/fs.rs",
             "src/native/wasm/webgl.rs",
         ],
         why: "miniquad's own sources, cited by docs/M8.md while working out what the host \
               seam had to provide. They are a dependency's files, not this repository's, and \
-              their line numbers move when the dependency moves rather than when we commit.",
+              their line numbers move when the dependency moves rather than when we commit. \
+              The Wayland keycode file joined this list when the gate widened to bare paths: \
+              it had been cited twice with no line number while the X11 file beside it was \
+              declared, and the only difference between the two was the punctuation.",
     },
     Unfollowable {
-        paths: &["gl.js", "js/gl.js"],
-        why: "miniquad's JavaScript shim, cited for the same reason and with the same \
-              standing: a file in a crate we depend on.",
+        paths: &["gl.js", "js/gl.js", "js/mq_js_bundle.js", "js/README.md"],
+        why: "miniquad's JavaScript shim and the directory it ships in, cited for the same \
+              reason and with the same standing: files in a crate we depend on. The bundle is \
+              vendored into web/ by web/build.sh, so web/mq_js_bundle.js does resolve here — \
+              the js/ spelling names the copy upstream, which is the one the surrounding \
+              sentences are about.",
     },
     Unfollowable {
-        paths: &["lib.rs"],
-        why: "Five files in this workspace are called lib.rs, so a citation spelled this way \
-              names none of them. It is followed here rather than hidden because writing it \
-              down is the only way the set stops growing: this is a citation with even less \
-              redundancy than a bare line number, and the honest fix is to spell the crate.",
+        paths: &["macroquad-0.4.16/src/audio.rs"],
+        why: "macroquad's source, read out of the vendored registry copy while working out \
+              how the desktop audio backend behaves. Unfollowable twice over: it is a \
+              dependency's file, and the version is spelled into the path, so it names one \
+              checkout on one machine rather than anything this repository can hold.",
+    },
+    Unfollowable {
+        paths: &[".github/workflows/ci.yml"],
+        why: "The place a workflow would have to sit before GitHub would run it, and there is \
+              nothing there: the workflow was written and could not be pushed, so it sits at \
+              ci/ci.yml instead, which is the whole subject of ci/README.md. Every sentence \
+              citing this path is describing the absence rather than pointing at a file. It \
+              would be unfollowable even if it existed — the walk prunes dotted directories \
+              as tooling state, which is why ci_claims.rs asks the filesystem about this one \
+              directly rather than asking the walk.",
+    },
+    Unfollowable {
+        paths: &["z00m128/zxs-rom/LICENSE.md"],
+        why: "An upstream repository's path, not a path in this tree: it names where the \
+              Sinclair ROM's licence lives on GitHub, which is the address a reader needs and \
+              is not something any walk of this workspace can reach.",
+    },
+    Unfollowable {
+        paths: &["machine_cycle.rs", "crates/spectrum/src/machine_cycle.rs"],
+        why: "A file deleted on purpose, discussed in the past tense in four documents that \
+              have to be able to name it. Recorded here rather than in a sibling of \
+              cited_names.rs's DELETED_ON_PURPOSE register, and the choice is worth stating: \
+              that register grades its entries from both ends, and the end that matters for a \
+              deleted file — that it is still absent, so the entry is not hiding a real \
+              citation — is exactly what \
+              every_declared_unfollowable_path_is_still_unfollowable already asserts about \
+              every path here. The end it does not have is that somebody still discusses the \
+              name, and a second struct, a second constant and a second test for one entry \
+              buys that at the price of two places to look. So the end was added to the \
+              register that exists instead, where it grades all seven groups.",
+    },
+    Unfollowable {
+        paths: &[
+            "lib.rs",
+            "src/lib.rs",
+            "tests/common/mod.rs",
+            "flags.rs",
+            "reader.rs",
+            "boot.rs",
+        ],
+        why: "A filename that two or more files in this workspace answer to, so a citation \
+              spelled this way names none of them: five crates have a lib.rs and a src/lib.rs, \
+              four have a tests/common/mod.rs, and flags.rs, reader.rs and boot.rs each name \
+              two. They are followed here rather than hidden because writing them down is the \
+              only way the set stops growing: this is a citation with even less redundancy \
+              than a bare line number, and the honest fix is to spell the crate.",
     },
 ];
 
@@ -395,6 +465,48 @@ fn following_anchor(line: &str, spans: &[common::Span<'_>], position: usize) -> 
     let between = &line[spans[position].end..next.start];
     let starts_a_new_clause = between.contains([',', ';', '.', '|']);
     (between.len() <= ANCHOR_REACH && !starts_a_new_clause).then(|| next.body.to_owned())
+}
+
+/// Every backticked path in `text` that carries no coordinate, with its line number.
+///
+/// # A path with no number used to be graded by nothing at all
+///
+/// [`citations`] sees a path only when a `:NNN` follows it, and `cited_names.rs` grades a
+/// bare path only when it sits under a `tests/` directory. Between those two rules lay a
+/// population neither reached: a backticked source path, written without a line number,
+/// outside `tests/`. The specimen that made the gap impossible to argue with is
+/// `src/native/linux_wayland/keycodes.rs` — miniquad's, cited twice, resolving to nothing and
+/// declared nowhere — sitting beside `src/native/linux_x11/keycodes.rs`, which is declared in
+/// [`THE_GATE_CANNOT_FOLLOW`] below. Nothing separates the two files. What separated them was
+/// that somebody happened to write a number after the X11 one, and a gate that grades a path
+/// when a number follows it and lets it through when one does not is grading the punctuation.
+///
+/// A struck span is dropped for the reason [`citations_on`] drops one: a path quoted because
+/// it is gone is not a pointer, and asking for it to be repointed re-issues the wrong
+/// exoneration.
+fn cited_paths(text: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        for span in backtick_spans(line) {
+            if is_bare_path(span.body) && !is_retracted(line, &span) {
+                found.push((index + 1, span.body.to_owned()));
+            }
+        }
+    }
+    found
+}
+
+/// Whether a span's body is a path written without a coordinate.
+///
+/// A suffix on its own — `` `.rs` ``, `` `.md` ``, which this repository's prose writes when
+/// it means the extension rather than a file — is refused by requiring a stem in front of it.
+/// A `:` is not a path byte, so a coordinate can never reach here and one citation cannot be
+/// counted by both populations.
+fn is_bare_path(body: &str) -> bool {
+    CITED_SUFFIXES
+        .iter()
+        .any(|suffix| body.len() > suffix.len() && body.ends_with(suffix))
+        && body.bytes().all(common::is_path_byte)
 }
 
 /// Parse one backtick span's contents as a coordinate.
@@ -683,18 +795,21 @@ fn every_citation_the_gate_cannot_follow_is_declared() {
 
     let mut undeclared = Vec::new();
     for document in repository.documents() {
-        for citation in citations(&document.text).iter().filter(|c| !c.inherited) {
-            let followed = repository.resolve(&document.path, &citation.path);
-            if matches!(followed, Resolution::Exact(_))
-                || declared.contains(&citation.path.as_str())
-            {
+        // Both populations, through one rule. A coordinate's path and a path written with no
+        // coordinate are the same claim about the same file, and grading only the first is
+        // what left `cited_paths`'s specimen undeclared for as long as it was.
+        let coordinates = citations(&document.text)
+            .into_iter()
+            .filter(|citation| !citation.inherited)
+            .map(|citation| (citation.at, citation.path));
+        for (at, path) in coordinates.chain(cited_paths(&document.text)) {
+            let followed = repository.resolve(&document.path, &path);
+            if matches!(followed, Resolution::Exact(_)) || declared.contains(&path.as_str()) {
                 continue;
             }
             undeclared.push(format!(
-                "{}:{} cites `{}`, which is {}",
+                "{}:{at} cites `{path}`, which is {}",
                 document.path,
-                citation.at,
-                citation.path,
                 match followed {
                     Resolution::Ambiguous(candidates) => format!("{} files here", candidates.len()),
                     _ => "no file here".to_owned(),
@@ -716,6 +831,13 @@ fn every_citation_the_gate_cannot_follow_is_declared() {
 fn every_declared_unfollowable_path_is_still_unfollowable() {
     // The other end of the allowlist, for the reason `cited_names.rs` gives about its own: a
     // declaration that has become false is an exemption hiding a real citation.
+    //
+    // There are two ends, and the register carried only the first until the gate widened to
+    // bare paths and the register went from three groups to seven. A list that can only grow
+    // is the quiet place a real finding goes to be silenced, and quadrupling it is exactly
+    // when that stops being theoretical — so the second end came in with the growth rather
+    // than after it. `cited_names.rs`'s DELETED_ON_PURPOSE has graded both ends of its own
+    // list since it was written; this is the same discipline, on the list that just grew.
     let repository = Repository::walk();
     for group in &THE_GATE_CANNOT_FOLLOW {
         assert!(!group.paths.is_empty() && group.why.len() > 40);
@@ -727,6 +849,30 @@ fn every_declared_unfollowable_path_is_still_unfollowable() {
                 ),
                 "`{path}` is declared unfollowable and now resolves to exactly one file. {}",
                 group.why,
+            );
+            // And that somebody still cites it. One mention is this file's own declaration,
+            // so the floor is two: an entry nobody cites any more is a record of nothing, and
+            // leaving it here is how the register becomes a place to put findings.
+            //
+            // What this end can and cannot see, since a floor that is quietly blind is worse
+            // than no floor: it is a substring count, so it catches a dead entry whose
+            // spelling is unique — every miniquad path, the upstream licence, the workflow —
+            // and it is blind to a dead entry in the bare-filename group, because correcting
+            // `flags.rs` to the crate-qualified spelling leaves the substring behind in the
+            // corrected path. That group's entries are therefore held only by the first end.
+            // Making the second reach them needs the mention counted as a whole cited token
+            // rather than as text, which is the extraction `cited_paths` already performs and
+            // is a bigger change than the one this gate was growing for.
+            let mentions = repository
+                .documents()
+                .iter()
+                .filter(|document| document.text.contains(path))
+                .count();
+            assert!(
+                mentions >= 2,
+                "`{path}` is declared unfollowable but only {mentions} file(s) mention it — \
+                 this one being the declaration. Nothing cites it any more, so delete the \
+                 entry rather than leaving the register carrying it.",
             );
         }
     }
@@ -868,6 +1014,38 @@ fn the_line_gate_is_capable_of_failing() {
     assert!(
         found[1].inherited && found[1].anchors.contains(&"read_target".to_owned()),
         "a bare coordinate must inherit the path and take the name beside it as its anchor",
+    );
+
+    // And the population that carries no coordinate at all, which reached none of the gates
+    // above until `cited_paths` was written and which therefore has never been watched fail.
+    // Assembled for the reason everything above is: a real-looking path written out here is a
+    // citation of this file's own, and a control caught by the gate it is a control for is
+    // worse than no control.
+    let bare = format!("the shim lives in `{}/{}`", "js", "gl.js");
+    assert_eq!(
+        cited_paths(&bare),
+        vec![(1, "js/gl.js".to_owned())],
+        "a path written without a line number is still a citation and must be seen as one",
+    );
+
+    // Then each way it says no, and each of the three is a false accusation it would
+    // otherwise make: an extension named in prose, a coordinate already graded by the other
+    // population, and a path quoted because it is gone.
+    assert!(
+        cited_paths("every `.md` and `.rs` file").is_empty(),
+        "a bare suffix names the extension rather than a file",
+    );
+    assert!(
+        cited_paths(&format!("`{}:638 fn resolve`", "instructions.rs")).is_empty(),
+        "a coordinate belongs to the other population and must not be counted twice",
+    );
+    assert!(
+        cited_paths(&format!(
+            "{RETRACTION}`{}/{}`{RETRACTION} — moved upstream",
+            "js", "gl.js"
+        ))
+        .is_empty(),
+        "a struck path is quoted history, exactly as a struck coordinate is",
     );
 }
 

@@ -27,6 +27,7 @@
 
 #![allow(dead_code)] // Each test binary compiles this module and uses only the part it needs.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -117,12 +118,21 @@ impl Repository {
         let entries = std::fs::read_dir(directory)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()));
         for entry in entries {
-            let path = entry.expect("a readable directory entry").path();
+            let entry = entry.expect("a readable directory entry");
+            let path = entry.path();
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
-            if path.is_dir() {
+            // The entry's own type rather than `path.is_dir()`, which follows a symlink and
+            // answers about the target. A link pointing at any ancestor of itself is a cycle
+            // this recursion has no bottom for: the walk would descend it until the stack ran
+            // out, and under `panic = "abort"` a stack overflow is not a failure anybody can
+            // read the cause of. There is no such link in the tree today — this is the walk
+            // being made unable to hang rather than a defect being repaired. A link is
+            // admitted as the file it is and never descended into, which terminates the walk
+            // on any tree the filesystem can hold.
+            if entry.file_type().expect("a readable entry type").is_dir() {
                 if !is_pruned(name) {
                     self.descend(&path);
                 }
@@ -167,13 +177,34 @@ impl Repository {
 
     /// The text of a file this repository contains.
     ///
+    /// # Served from the walk, because the walk is already holding it
+    ///
+    /// This used to read the file from disk every time. Three gates in `cited_lines.rs` call
+    /// it **once per citation** from inside a loop, so a document cited forty times was read
+    /// forty times — after the walk had already read it once and kept the text. That is the
+    /// same defect this directory grades in prose: one fact with two homes, and the second
+    /// one free to disagree with the first, because a file edited between the walk and the
+    /// read would be graded against text the walk never saw.
+    ///
+    /// The walk holds only `.md` and `.rs`, and a coordinate may also name a `.js`, `.sh`,
+    /// `.html`, `.toml` or `.yml` file, which is why this returns a [`Cow`] rather than a
+    /// `&str`: the held majority is borrowed and the rest is still read here.
+    ///
     /// # Panics
     ///
-    /// If the file is absent or is not valid UTF-8.
+    /// If the file is neither held nor readable, or is not valid UTF-8.
     #[must_use]
-    pub fn read(&self, relative: &str) -> String {
-        std::fs::read_to_string(self.root.join(relative))
-            .unwrap_or_else(|error| panic!("cannot read {relative}: {error}"))
+    pub fn read(&self, relative: &str) -> Cow<'_, str> {
+        match self
+            .documents
+            .binary_search_by(|held| held.path.as_str().cmp(relative))
+        {
+            Ok(index) => Cow::Borrowed(&self.documents[index].text),
+            Err(_) => Cow::Owned(
+                std::fs::read_to_string(self.root.join(relative))
+                    .unwrap_or_else(|error| panic!("cannot read {relative}: {error}")),
+            ),
+        }
     }
 
     /// Turn a path as written in prose into the file it names.
@@ -182,11 +213,11 @@ impl Repository {
     ///
     /// 1. **Repository-relative as written.** `crates/spectrum/src/ula.rs`. A path that
     ///    resolves from the root is what the writer wrote and needs no interpretation.
-    /// 2. **Relative to the citing file's own directory.** `M7.md` inside `docs/` is
-    ///    `docs/M7.md`. This is second rather than first so that `README.md` in a document
-    ///    under `docs/` reaches the root `README.md`, which is what it means — `docs/` has
-    ///    no `README.md`, and if it ever gains one this order will have to be revisited
-    ///    deliberately rather than silently.
+    /// 2. **Relative to the citing file's own directory**, with its `.` and `..` steps
+    ///    taken. `M7.md` inside `docs/` is `docs/M7.md`. This is second rather than first so
+    ///    that `README.md` in a document under `docs/` reaches the root `README.md`, which is
+    ///    what it means — `docs/` has no `README.md`, and if it ever gains one this order
+    ///    will have to be revisited deliberately rather than silently.
     /// 3. **A unique suffix, on component boundaries.** `ula.rs` is
     ///    `crates/spectrum/src/ula.rs` because nothing else ends in it. `lib.rs` is five
     ///    files, so it resolves to nothing and is reported as such: a citation that names
@@ -216,10 +247,42 @@ impl Repository {
         }
     }
 
-    /// `cited` read as a path relative to the directory `citing` lives in.
+    /// `cited` read as a path relative to the directory `citing` lives in, with its `.` and
+    /// `..` steps taken.
+    ///
+    /// # The steps were not taken here, and three correct citations paid for it
+    ///
+    /// This used to join the two halves and stop, so a leading `..` survived into the lookup
+    /// and matched nothing. The documents write that form and mean it: `docs/ARCHITECTURE.md`
+    /// and `docs/Z80-REFERENCE.md` both link one directory up to `testdata/README.md`, and
+    /// `testdata/README.md` links one directory up to the root `README.md` — Markdown links a
+    /// reader follows, pointing at files this repository holds. Left unresolved they came out
+    /// `Unknown`, which the citation gate reports as a path nobody can follow; the cheap way
+    /// to silence that would have been to declare three correct citations unfollowable, which
+    /// is a false record, and the next cheapest to edit three documents that were already
+    /// right. Taking the steps is what makes the resolver agree with the renderer.
+    ///
+    /// A `..` that climbs past the root names nothing here, and stays `None` rather than
+    /// wrapping round to some other file.
+    ///
+    /// Written out rather than delegated, and both candidates were checked: `Path::components`
+    /// hands back a `ParentDir` without resolving it, and `normalize_lexically` — which is
+    /// exactly this function — is still unstable at the 1.98 this workspace pins. The third
+    /// candidate, `fs::canonicalize`, was refused rather than missed: it asks the filesystem,
+    /// so it follows the symlinks the walk above deliberately does not and it can case-fold
+    /// differently on macOS than on Linux, which is a gate answering differently on two
+    /// machines. Text in, text out, same answer everywhere.
     fn sibling_of(&self, citing: &str, cited: &str) -> Option<String> {
         let directory = citing.rsplit_once('/').map(|(head, _)| head)?;
-        Some(format!("{directory}/{cited}"))
+        let mut components: Vec<&str> = directory.split('/').collect();
+        for step in cited.split('/').filter(|step| *step != ".") {
+            if step == ".." {
+                components.pop()?;
+            } else {
+                components.push(step);
+            }
+        }
+        Some(components.join("/"))
     }
 
     /// The assertion every walk in this repository carries: that it looked at the subject.

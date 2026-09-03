@@ -53,6 +53,13 @@ impl Operand {
 
     /// Bits 5–3: the destination of `LD r,r'` and `LD r,n`, and the target of `INC r`
     /// and `DEC r`.
+    ///
+    /// **The list above used to be the whole list, and it was three-quarters of one.** The
+    /// same field also names the register of `IN r,(C)` and `OUT (C),r` on the `ED` page —
+    /// and those two are the reason encoding `110`'s [`None`] matters most. It is the
+    /// omitted case that carries the meaning: `IN (C)` reads the port and keeps only the
+    /// flags, `OUT (C),0` writes a zero, and both fall out of `register_index` returning
+    /// nothing rather than out of a special case in either handler.
     pub(crate) fn destination(opcode: u8) -> Self {
         // INVARIANT: shifting then masking with 0x07 yields 0..=7.
         OPERANDS[usize::from((opcode >> 3) & 0x07)]
@@ -140,6 +147,13 @@ impl Index {
 ///
 /// So the effective address is carried here as a *value*, computed once by
 /// [`Cpu::resolve`] and handed to every site that needs it.
+///
+/// **"Computed once by [`Cpu::resolve`]" named the invariant correctly and the mechanism
+/// incompletely.** `Cpu::execute_cb` builds a `Target::Memory` directly for the `DDCB`/`FDCB`
+/// forms, and has to: those encodings put the displacement byte *before* the opcode, so the
+/// address is known before there is an [`Operand`] to resolve. Two constructors, one
+/// per-instruction computation — which is the property that matters, and which neither site
+/// can break on its own.
 ///
 /// [`Cpu::resolve`]: crate::Cpu::resolve
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

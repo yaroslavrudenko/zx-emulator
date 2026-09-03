@@ -8,7 +8,11 @@
 //! a save, and nothing in M6 needs one. Reading stays, because the milestone names the
 //! format and because plenty of software is only distributed this way.
 //!
-//! # Three consequences of that design, recorded so they are not rediscovered as bugs
+//! # What that design costs, recorded so it is not rediscovered as bugs
+//!
+//! The heading counted **three** and the table below has always had four rows. The count is
+//! dropped rather than corrected to four, because nothing here depends on it and a number in a
+//! heading is a second place for the table to disagree with itself.
 //!
 //! | Property | Consequence |
 //! |---|---|

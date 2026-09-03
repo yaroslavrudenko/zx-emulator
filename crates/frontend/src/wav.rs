@@ -86,6 +86,23 @@ const FULL_SCALE: f32 = i16::MAX as f32;
 /// It is roughly twelve hours at 48 kHz, so nothing this tool produces will meet it. Unreachable
 /// is not the same as impossible, and the check costs one comparison per capture rather than one
 /// per sample.
+///
+/// # This limit is eighteen samples too generous, and at the limit `encode` aborts
+///
+/// **The check is against the body and the RIFF size field describes the file.** At exactly
+/// `MAX_SAMPLES` the body is `u32::MAX - 1` bytes, and `encode` then writes
+/// `data_bytes + (HEADER_BYTES - 8)` — thirty-six more — which overflows a `u32`. This
+/// workspace sets `overflow-checks = true` in **release** as well as debug, and `panic = "abort"`,
+/// so that is a **process abort in shipped code**, in the one module whose whole argument is that
+/// `as u32` is refused because it *"would silently write a wrapped length"*. The paragraph beside
+/// the cast in `encode` states the thirty-six bytes and then does not subtract them.
+///
+/// The correct value is `(u32::MAX as usize - (HEADER_BYTES - 8)) / BYTES_PER_SAMPLE` —
+/// `2_147_483_629`, eighteen fewer — and the change is one line with no LOC delta. **It is not
+/// applied here because this is a `pub const` and its value is part of the published contract**,
+/// so it needs the owner's sign-off rather than a reviewer's. Reaching the defect needs a slice
+/// of about 8.6 GiB of `f32`, roughly 12.4 hours at 48 kHz, so deferring it is safe; leaving the
+/// doc silent about it would not be.
 pub const MAX_SAMPLES: usize = u32::MAX as usize / BYTES_PER_SAMPLE;
 
 const _: () = assert!(
@@ -150,9 +167,15 @@ pub fn encode(samples: &[f32], device_hz: u32) -> Result<Vec<u8>, EncodeError> {
             samples: samples.len(),
         });
     }
-    // Both casts are bounded by the check above: `data_bytes` cannot exceed `u32::MAX`, and the
-    // RIFF size adds the 36 bytes that follow it, which is why the limit is taken against the
-    // body rather than against the file.
+    // `data_bytes` is bounded by the check above and cannot exceed `u32::MAX`.
+    //
+    // **The RIFF size below adds the 36 bytes that follow it, and the check above does not
+    // subtract them** — so at exactly `MAX_SAMPLES` that addition overflows and this function
+    // aborts. See [`MAX_SAMPLES`]'s own doc: the limit is eighteen samples too generous, the fix
+    // is one line, and it changes a published constant's value so it waits for sign-off. This
+    // comment used to end *"which is why the limit is taken against the body rather than against
+    // the file"*, presenting the gap as the reason for the design rather than as the defect in
+    // it.
     let data_bytes = (samples.len() * BYTES_PER_SAMPLE) as u32;
     let block_align = BYTES_PER_SAMPLE as u16;
     let byte_rate = device_hz.saturating_mul(u32::from(block_align));

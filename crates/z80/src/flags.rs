@@ -11,19 +11,39 @@
 //! Bits 3 and 5 of `F` have no documented meaning, but they are not random: the Z80
 //! copies them from the result of almost every operation, and real software — plus the
 //! `zexall` conformance suite — depends on it. They are handled here as a first-class
-//! part of every rule, not as an afterthought. Two classes break the "copy from the
-//! result" pattern and are commented at the site:
+//! part of every rule, not as an afterthought.
 //!
-//! - `CP` copies them from the **operand**, because it throws its result away.
-//! - `SCF` and `CCF` take them from the **accumulator**.
+//! **This heading used to say "Two classes break the pattern", and name `CP` and
+//! `SCF`/`CCF`. Both halves of that were wrong by the time it was read.** The count was
+//! never two — it is **eight**, listed below — and the `SCF`/`CCF` rule it taught,
+//! *"take them from the accumulator"*, is the rule [`scf`] **replaced**. Leaving it stood
+//! as the module's orientation comment teaching, in as many words, the one deviation the
+//! crate spent the most effort getting right. The classes that do **not** copy bits 3 and 5
+//! from an 8-bit result, each commented at its own site:
 //!
-//! # Milestone split
+//! - [`cp8`] copies them from the **operand**, because it throws its result away.
+//! - [`scf`] and [`ccf`] derive them as `((Q ^ F) | A) & 0x28` — the NMOS Q-latch rule, not
+//!   the accumulator. `crate::CpuState::q` and [`scf`]'s own comment carry the algebra, the
+//!   measurement, and the reason no oracle here can grade it.
+//! - [`add16`] and `prefixed::sign_zero_undocumented_16` take them from the **high byte**,
+//!   which is the byte the ALU handled last. (The second is unlinked because it is private to
+//!   [`prefixed`], and an outer doc comment resolves in the scope its item is *declared* in —
+//!   the trap [`prefixed`]'s own comment records.)
+//! - [`prefixed::block_transfer`] and [`prefixed::block_compare`] take bit 3 from bit 3 but
+//!   bit **5 from bit 1** of an adjusted difference — the quirk, not a typo.
+//! - [`prefixed::block_io`] takes them from the **counter** `B`, not from the byte moved.
+//! - [`prefixed::bit`] takes them from its `undocumented_source`, which for the memory forms
+//!   is the high byte of `MEMPTR` rather than the tested value.
 //!
-//! The rules the un-prefixed instruction set uses live at the top level. The rules that
-//! belong to the `CB`- and `ED`-prefixed classes live in [`prefixed`], which M2 wires up.
-//! They are written now rather than later because a class's rule belongs beside its
-//! siblings — that adjacency is what keeps the shared pieces (`sign_and_zero`, `parity`,
-//! the rotate bit-movements) honest across both milestones.
+//! # Where a rule lives
+//!
+//! The rules the un-prefixed instruction set uses live at the top level; the rules that
+//! belong to the `CB`- and `ED`-prefixed classes live in [`prefixed`]. **The split is not
+//! the milestone boundary this section used to call it** — it said "which M2 wires up", and
+//! M2 shipped five milestones ago — and it never was a clean one: [`sub8`] sits at the top
+//! level while [`prefixed::neg`] and [`prefixed::block_compare`] both call it. The line that
+//! actually holds is *shared arithmetic stays where its siblings can see it*, which is what
+//! keeps `sign_and_zero`, `parity` and the rotate bit-movements from being written twice.
 
 /// Bit 7 — set from bit 7 of the result. A signed value's sign.
 pub(crate) const SIGN: u8 = 0b1000_0000;
@@ -390,23 +410,24 @@ pub(crate) fn add16(target: u16, operand: u16, f: u8) -> (u16, u8) {
 /// The bit movement of a rotate or shift: the new byte, and the bit that fell out.
 type Shifted = (u8, bool);
 
-fn rotate_left_circular(value: u8) -> Shifted {
+const fn rotate_left_circular(value: u8) -> Shifted {
     (value.rotate_left(1), (value & 0x80) != 0)
 }
 
-fn rotate_right_circular(value: u8) -> Shifted {
+const fn rotate_right_circular(value: u8) -> Shifted {
     (value.rotate_right(1), (value & 0x01) != 0)
 }
 
-fn rotate_left_through_carry(value: u8, carry_in: bool) -> Shifted {
-    ((value << 1) | u8::from(carry_in), (value & 0x80) != 0)
+// The carry arrives through `flag` rather than `u8::from(carry_in)` for two reasons that
+// point the same way: `From` is not const-callable on the pinned toolchain, so the `u8::from`
+// spelling is what kept these two off the module's `const fn` convention — and naming the
+// destination bit reads better here than converting a bool and then shifting it into place.
+const fn rotate_left_through_carry(value: u8, carry_in: bool) -> Shifted {
+    ((value << 1) | flag(0x01, carry_in), (value & 0x80) != 0)
 }
 
-fn rotate_right_through_carry(value: u8, carry_in: bool) -> Shifted {
-    (
-        (value >> 1) | (u8::from(carry_in) << 7),
-        (value & 0x01) != 0,
-    )
+const fn rotate_right_through_carry(value: u8, carry_in: bool) -> Shifted {
+    ((value >> 1) | flag(0x80, carry_in), (value & 0x01) != 0)
 }
 
 /// Flags for the accumulator rotate class. Sign, zero and parity survive; the half-carry
@@ -445,9 +466,14 @@ pub(crate) fn rra(a: u8, f: u8) -> (u8, u8) {
 /// They live beside the rules they share arithmetic with, rather than beside their callers,
 /// because that adjacency is what stops the two drifting: `sbc16` and [`add16`] must agree
 /// on where the 16-bit half-carry lives, and `rlc` and [`rlca`] must agree on how a byte
-/// rotates. All of them are now wired up — the `CB` rotates, shifts, `SLL`, `BIT`, `RES`
-/// and `SET` to both the plain and the `DD`/`FD`-indexed forms, and [`prefixed::neg`],
-/// [`prefixed::adc16`] and [`prefixed::sbc16`] to the `ED` decoder.
+/// rotates. All of them are now wired up — the `CB` rotates, shifts, `SLL` and `BIT` to both
+/// the plain and the `DD`/`FD`-indexed forms, and [`prefixed::neg`], [`prefixed::adc16`] and
+/// [`prefixed::sbc16`] to the `ED` decoder.
+///
+/// **That list used to name `RES` and `SET` too, and there is no rule here for either.**
+/// The absence is correct rather than a gap: `RES b,r` and `SET b,r` define no flags at all,
+/// so `Cpu::execute_cb` writes the result and calls nothing here. Naming them in a list of
+/// rules this module contains sent a reader looking for two functions that should not exist.
 ///
 /// The three are qualified and the two above them are not, for a reason worth stating once
 /// rather than rediscovering: this is an **outer** doc comment, so its links resolve in the
@@ -532,16 +558,16 @@ pub(crate) mod prefixed {
         (result, flags)
     }
 
-    fn shift_left(value: u8) -> Shifted {
+    const fn shift_left(value: u8) -> Shifted {
         (value << 1, (value & 0x80) != 0)
     }
 
     /// Arithmetic right shift: bit 7 is duplicated, preserving a signed value's sign.
-    fn shift_right_arithmetic(value: u8) -> Shifted {
+    const fn shift_right_arithmetic(value: u8) -> Shifted {
         ((value >> 1) | (value & 0x80), (value & 0x01) != 0)
     }
 
-    fn shift_right_logical(value: u8) -> Shifted {
+    const fn shift_right_logical(value: u8) -> Shifted {
         (value >> 1, (value & 0x01) != 0)
     }
 
@@ -671,10 +697,13 @@ pub(crate) mod prefixed {
     ///
     /// P/V mirrors Z, and only bit 7 can set the sign flag.
     pub(crate) fn bit(value: u8, bit_index: u8, f: u8, undocumented_source: u8) -> u8 {
-        let index = bit_index & 0x07;
-        let tested = value & (1 << index);
+        // INVARIANT: `bit_index` is `CbOp`'s middle field, already `& 0x07` at
+        // `decode.rs`'s `CbOp::from_opcode`, so it is 0..=7 and the shift cannot overflow.
+        // This used to re-mask defensively; the mask was dead, and the third posture on one
+        // invariant is what made the crate look undecided about it.
+        let tested = value & (1 << bit_index);
         (f & CARRY)
-            | flag(SIGN, index == 7 && tested != 0)
+            | flag(SIGN, bit_index == 7 && tested != 0)
             | flag(ZERO, tested == 0)
             | flag(PARITY_OVERFLOW, tested == 0)
             | HALF_CARRY

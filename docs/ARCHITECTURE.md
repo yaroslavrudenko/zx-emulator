@@ -644,14 +644,39 @@ now say why.
 > and the harder one to catch: nothing goes red, and a sentence disclaiming a source it now has
 > reads as modesty rather than as an error.
 
-## Decision 7 — sound is generated late, and never on the hot path
+## Decision 7 — sound is generated late, and on an edge rather than on the clock
 
-`Ula::tick` is the hottest function in the emulator and **nothing about sound is on it** — not a
-branch, not a load, not a field. That is possible because the chip's output at any instant is a
-pure function of its registers and the time since they were last written, so the generator can
-be run at only two kinds of moment: when the guest does something that would otherwise be lost
-— the speaker bit **changing**, or a write to an AY register — and when a consumer asks for the
+`Ula::tick` is the hottest function in the emulator and **sound costs it one `bool` test**. That
+is possible because the chip's output at any instant is a pure function of its registers and the
+time since they were last written, so the generator can be run at only three kinds of moment:
+when the guest does something that would otherwise be lost — the speaker bit **changing**, or a
+write to an AY register — when the **tape's own signal flips**, and when a consumer asks for the
 samples. Between those it does nothing at all.
+
+> **This heading said *"never on the hot path"*, and the section said *"not a branch, not a load,
+> not a field"* over *"two kinds of moment"*, both guest-initiated. M8 added the tape's `EAR`
+> signal to the mix — a real Spectrum's `EAR` socket feeds the amplifier as well as the ULA's
+> input, which is why a loading tape is audible — and the tape's signal is driven by the
+> **machine's own passage of time**, not by anything the guest does. That is a third kind of
+> moment and it is unavoidable; what was avoidable was *where the test lived*.
+>
+> **The first wiring polled it, and it cost +23%.** `Ula::advance` read `Tape::level()` on every
+> elapsed T-state and let the audio module compare — the shape `set_beeper` uses, and the wrong
+> one here, because the *timestamp* argument is evaluated at the call site before any guard can
+> discard it, and `Clock::t_states` is a 64-bit multiply-add that under this workspace's
+> `overflow-checks = true` compiles to two multiplies and two branch-to-panic edges. 69,888 calls
+> a frame, on a machine with no tape in the drive. Measured on `benches/frame.rs`: **+19% to +30%
+> across all eleven cases, mean +23%.**
+>
+> `Tape::advance` already knew when the level moved — `finish_pulse` is the only thing that
+> writes it, and it runs right there — so it says so, and the timestamp is computed only when
+> there is something to timestamp. The recovery is complete and the invariant is stronger than
+> before, because the level test now lives with the level. **The lesson is not "keep sound off
+> the hot path" — it is that an eagerly-evaluated argument defeats a guard inside the callee**,
+> which is a Rust evaluation-order fact and not an audio one.
+>
+> No benchmark in this workspace played a tape, which is why a regression on the tape path
+> shipped green; `benches/frame.rs` now has a `tape_playing_48k` case.
 
 The trade is smaller than it looks in both directions, and that is why it is defensible rather
 than merely cheap. Total work is proportional to emulated time either way, so generating eagerly
@@ -668,8 +693,13 @@ call pattern*.
 
 Two shape decisions in the sample carry real weight:
 
-**The sources stay apart.** A `Sample` is `{ channels: [u16; 3], beeper: u16 }`, and nothing in
-`crates/spectrum` ever adds them together. Two independent rulings converge on it. The AY's own
+**The sources stay apart.** A `Sample` is `{ channels: [u16; 3], beeper: u16, tape: u16 }` — five
+sources in three fields, and *this line listed two of the three, from before M8 added the tape* —
+and nothing in `crates/spectrum` ever adds them together. `Sample` is `#[non_exhaustive]`, which
+is what made the third field additive rather than breaking, and the structural guarantee that no
+mix can happen here is stronger than a promise: **`crates/spectrum/src` contains zero `f32` and
+zero `f64`**, so a weighted sum does not have a type to be written in. Two independent rulings
+converge on it. The AY's own
 gate must not be falsifiable by the beeper landing, or it goes red for a reason unrelated to
 what it grades and gets muted. And the mix belongs downstream, in `crates/frontend`, because the
 sum is **irreversible** — stereo panning, which is how a 128 is conventionally presented, needs
@@ -1124,6 +1154,14 @@ $ cargo bench -p spectrum                  # the real machine: a real Cpu<Ula>, 
 > that the cost of rendering at all cancels. The three heaviest cases are upper bounds rather
 > than workloads and are labelled so: a music driver writes the AY about fourteen times a
 > *frame*, not two thousand.
+>
+> **Re-measured 2026-09-03**, after M8's tape half landed — with the same-day +23 % regression
+> and its reversal that Decision 7's correction carries — and after `Memory::is_contended` was
+> folded into a per-slot cache rebuilt on the paging write: `quiet_48k` is **138.8 µs — 0.69 %
+> of a frame** — and a cassette actually turning costs **+0.8 µs** over the same frame drained
+> silent (`tape_playing_48k` 147.1 µs against `drained_48k` 146.3 µs; lowest median of three
+> runs, one-minute load average 12–17 on 16 cores). The 2026-09-01 figures stand as that day's
+> record.
 
 Divide the counter by the Z80's 3.5 MHz for the realtime multiple. Measured 2026-09-01 with the
 one-minute load average between **5.1 and 11.3 on 16 cores** — another agent was compiling in the
@@ -1297,7 +1335,7 @@ $ grep -c panic_bounds_check target/release/deps/spectrum-*.s
 | `panic_bounds_check` in `crates/z80/src` | **7** — 3 at `registers.rs:143`, 3 at `:148`, 1 in `instructions.rs` | **15** — 6 at `registers.rs:143`, 7 at `:148`, 2 in `instructions.rs` |
 | `panic_bounds_check` in `crates/spectrum/src` | — | **0** |
 | Allocator call sites | *not counted — see below* | *not counted — see below* |
-| Indirect calls (`blr`) | **0** | **1**, at `instructions.rs:436` — `shuffle(self.regs.a(), memory)` |
+| Indirect calls (`blr`) | **0** | **1**, at `instructions.rs:475` — `shuffle(self.regs.a(), memory)` |
 | Out-of-line `Bus` methods | **0** | **1** — `Ula::tick`, called 124 times |
 | Decode jump tables | 124 + 119 + 64 | 124 + 119 + 64, all in `Cpu::<Ula>::dispatch` |
 
@@ -1313,7 +1351,7 @@ strictly stronger — `crates/z80` is `#![cfg_attr(not(test), no_std)]` with no 
 so in every non-test build **allocation does not compile**. That is a property of all builds rather
 than an observation about one, and it is what the gate asserts.
 
-**The indirect call is real.** `instructions.rs:436` is `shuffle(self.regs.a(), memory)` inside
+**The indirect call is real.** `instructions.rs:475` is `shuffle(self.regs.a(), memory)` inside
 `rotate_digit`, which takes `shuffle: fn(u8, u8) -> (u8, u8)`. There are exactly two such parameters
 in the crate — `rotate_digit` (`RRD`/`RLD`, so `ED`-prefixed, M2) and `rotate_a` (`RLCA`/`RRCA`/
 `RLA`/`RRA`, **present since M1**). Whether LLVM specialises them away is a property of the build

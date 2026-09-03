@@ -51,7 +51,7 @@
 //!
 //! This paragraph listed *"border stripes"* alongside the other two, and that is no longer
 //! true. The border **is** drawn as the beam painted it, row by row, from
-//! [`BorderTrace`] — because a tape load is the one place a mid-frame write is what a person
+//! `BorderTrace` — because a tape load is the one place a mid-frame write is what a person
 //! is looking at, and a loading screen drawn in one colour is visibly wrong rather than
 //! subtly so. Nothing else about the boundary moved: attributes and the bitmap are still
 //! sampled once.
@@ -148,10 +148,19 @@ impl Colour {
         self.0 % Self::COUNT
     }
 
+    /// Bit 3 of the colour byte: the brightness the other three bits are drawn at.
+    const BRIGHT_BIT: u8 = 0x08;
+
     /// Whether this is one of the bright half.
+    ///
+    /// Nothing outside this file called this for a milestone while [`Colour::rgb`] open-coded
+    /// the same `& 0x08` two methods below — a published item with no consumer beside a copy of
+    /// its body. It is **kept rather than deleted**, because deleting a `pub` item is a semver
+    /// event and this one names a real property of the byte; `rgb` calls it now, so the mask
+    /// lives in one place and the item has a consumer.
     #[must_use]
     pub const fn is_bright(self) -> bool {
-        self.index() & 0x08 != 0
+        self.index() & Self::BRIGHT_BIT != 0
     }
 
     /// The colour as 8-bit RGB.
@@ -166,7 +175,7 @@ impl Colour {
         const BRIGHT: u8 = 0xFF;
 
         let index = self.index();
-        let level = if index & 0x08 == 0 { NORMAL } else { BRIGHT };
+        let level = if self.is_bright() { BRIGHT } else { NORMAL };
         [
             gun(index, 0x02, level),
             gun(index, 0x04, level),
@@ -471,6 +480,13 @@ impl Frame {
     fn set(&mut self, x: usize, y: usize, colour: Colour) {
         // INVARIANT: every caller is a display loop bounded by DISPLAY_WIDTH/HEIGHT offset
         // by BORDER, so the index is within the frame.
+        //
+        // Asserted rather than only stated, and `x` is the reason it is worth a line: a flat
+        // index is in range for an `x` past the row's end, so an off-by-one there wraps onto the
+        // next row and writes the wrong pixel **silently** — the raw index below cannot catch it
+        // and neither can `get_mut`. `debug_assert!` puts it in every test run and emits nothing
+        // in release, which is what keeps this out of an 81,920-iteration inner loop's codegen.
+        debug_assert!(x < FRAME_WIDTH && y < FRAME_HEIGHT);
         self.pixels[y * FRAME_WIDTH + x] = colour;
     }
 }
@@ -705,7 +721,7 @@ const _: () = assert!(
 /// The signature is unchanged and deliberately so: `Memory` already knows which bank the ULA
 /// is drawing, so no caller has to learn about the shadow screen to keep working.
 ///
-/// **It is now a projection of [`render_border_trace`] against a uniform border**, rather than
+/// **It is now a projection of `render_border_trace` against a uniform border**, rather than
 /// a second implementation — the same instrument `crate::timing`'s public constants use, so
 /// there is one drawing loop and no pair to drift. A caller wanting the border as the beam
 /// painted it uses [`crate::Spectrum::render`], which is what a frontend already calls.

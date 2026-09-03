@@ -11,11 +11,18 @@
 //!
 //! # What nothing here grades
 //!
-//! - **The decode.** No source for it was found. `joystick::KEMPSTON_PORT_MASK` matches the
-//!   canonical address's low byte and claims nothing about address lines; the assertions below
-//!   grade this crate against that choice and could not discover it is wrong.
-//! - **What the unused top three bits read as.** Zero here, and no source establishes it. A
-//!   game misbehaving with the stick idle is the observation that would.
+//! - **The decode, as a *behaviour*.** The decode itself is no longer unsourced — the Kempston
+//!   Issue 4 (1989) schematic gives `A5 = A6 = A7 = 0` and `spectrum::joystick` transcribes it —
+//!   but the assertions below grade this crate against that transcription and could not discover
+//!   the transcription is wrong. *(This row read **"No source for it was found"** and described
+//!   `KEMPSTON_PORT_MASK` as matching *"the canonical address's low byte"* while claiming
+//!   *"nothing about address lines"*. Both were already false of the constant beside them —
+//!   `0x00E0` is not `0x00FF`, and a mask **is** a claim about address lines. This was the
+//!   fourth copy of that sentence in the repository and the one no review listed; it was found
+//!   by grepping for the pattern rather than by being pointed at.)*
+//! - **What the unused top three bits read as, as a *behaviour*.** The same schematic sources
+//!   them — D5 through an inverting `74LS366`, D6 and D7 pulled low through two `1N4148`s — so
+//!   zero is transcribed rather than assumed; what nothing here grades is the transcription.
 //! - **That any real game responds to it.** That is T4 — a person, a game, and a look.
 
 mod common;

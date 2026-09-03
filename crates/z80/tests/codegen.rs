@@ -82,7 +82,16 @@ const PINNED_RUSTC: &str = "1.98.0";
 ///
 /// - All seven sites are `Registers::get`/`set`'s `self.regs[index.0]`. Proving a range at
 ///   that one expression takes the count to **0**; nothing else in the crate indexes that
-///   array.
+///   array. **[`EXPECTED_BOUNDS_SITES`] appears to contradict that by putting one of them in
+///   `instructions.rs`, and does not — but only because of the `0`.** That row's line number
+///   is DWARF's *no line*, emitted for a cold block LLVM tail-merged out of the inlined body,
+///   and the block's own `core::panic::Location` argument is `registers.rs:148`: the three
+///   `panic_bounds_check` call sites in that tail load two `Location` statics between them,
+///   `registers.rs:143` and `registers.rs:148`, and nothing else. So the attribution is a
+///   property of the *debug line table*, not a second indexing expression — which is worth
+///   stating here, because the natural suspect is `instructions.rs`'s lone index expression
+///   `self.wz.to_be_bytes()[0]`, and that one indexes a `[u8; 2]` at a **constant**, so it
+///   cannot bounds-check at all.
 /// - **Four of the seven are in `load_pair_absolute` and `store_pair_absolute`, which are
 ///   byte-identical between M1 and M2.** What changed is the call graph. At M1 each had a
 ///   single call site reached with `base = pair::HL`, constant-propagated in from `step`.
@@ -103,10 +112,25 @@ const PINNED_RUSTC: &str = "1.98.0";
 const EXPECTED_BOUNDS_CHECKS: usize = 7;
 
 /// Where those checks sit, so a change says *which* index moved rather than only that one did.
+///
+/// **This table was pinned and never asserted.** It was consumed once, to build a failure
+/// *message* for the count above — so all seven checks could have migrated to another file
+/// and the gate would have stayed green, which is the "pinned expectation nothing enforces"
+/// failure this whole file exists to abolish, sitting inside the file. It is now half of the
+/// assertion, and the rows must therefore be in the order
+/// [`Facts::bounds`] yields them: by path, then by line.
+///
+/// **The two `registers.rs` numbers will rot**, and deliberately so rather than for want of
+/// trying. They are the lines the indexing expressions occupy, so any edit above them moves
+/// them; nothing shorter than re-deriving them by grepping the source for `self.regs[index.0]`
+/// would make them stable, and a gate that greps for its own subject is a gate that goes green
+/// when the subject is renamed. The posture is [`PINNED_RUSTC`]'s: a red that names both lists
+/// side by side is a two-minute re-pin, which is cheaper than the machinery. The third row's
+/// `0` cannot rot — it is not a line number at all; see [`EXPECTED_BOUNDS_CHECKS`].
 const EXPECTED_BOUNDS_SITES: &[(&str, u32, usize)] = &[
-    ("src/registers.rs", 143, 3), // `self.regs[index.0]`
-    ("src/registers.rs", 148, 3), // `self.regs[index.0] = value`
-    ("src/instructions.rs", 0, 1),
+    ("src/instructions.rs", 0, 1), // a tail-merged cold block; its `Location` is registers.rs:148
+    ("src/registers.rs", 143, 3),  // `self.regs[index.0]`
+    ("src/registers.rs", 148, 3),  // `self.regs[index.0] = value`
 ];
 
 /// Decode's jump tables, largest first. **Two at M1 (119 + 64); the 124-entry table
@@ -623,9 +647,10 @@ fn bounds_checks_in_the_execute_path_have_not_moved() {
         .collect();
 
     assert_eq!(
-        total,
-        EXPECTED_BOUNDS_CHECKS,
-        "panic_bounds_check count changed: pinned {EXPECTED_BOUNDS_CHECKS}, measured {total}.\n\
+        (total, &observed),
+        (EXPECTED_BOUNDS_CHECKS, &expected),
+        "panic_bounds_check count or sites changed: pinned {EXPECTED_BOUNDS_CHECKS}, \
+         measured {total}.\n\
          \x20 pinned sites  : {}\n\
          \x20 measured sites: {}\n\
          {}\n\
