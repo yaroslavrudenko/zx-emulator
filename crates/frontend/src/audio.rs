@@ -39,7 +39,7 @@
 //! | A square wave survives with its amplitude | same, peak-to-peak against a literal | **proven** |
 //! | The output rate matches the device's, over a run long enough for a rounding error to show | same, exact counts | **proven** |
 //! | Nothing is allocated per frame | [`Resampler::feed`] takes `&mut Vec<f32>` and only pushes into it; the caller keeps the capacity | **proven**, structurally |
-//! | The tape's `EAR` signal reaches the mix, and is quieter than the beeper at the same level | `a_playing_tape_is_audible_on_its_own`, `the_tape_is_quieter_than_the_beeper_at_the_same_level` | **proven** |
+//! | The tape's `EAR` signal reaches the mix, at the beeper's own level | `a_playing_tape_is_audible_on_its_own`, `the_tape_is_as_loud_as_the_beeper_at_the_same_level` — the second gate asserted **quieter** until the S4 ruling took the tape out of the shared denominator and ruled it equal; see [`TAPE_LEVEL`] | **proven** |
 //! | [`Resampler::track`]'s **direction** — a deep queue is given fewer output samples and a shallow one more | `a_deep_queue_is_given_less_and_a_shallow_one_more` | **proven** |
 //! | Its **magnitude** never leaves [`MAX_CORRECTION`], so the pitch shift stays under 8.6 cents | `the_correction_stays_within_its_bound` | **proven** |
 //! | That the loop **converges** rather than running away, from either side | `the_loop_converges_instead_of_running_away`, closed against a simulated device | **proven** |
@@ -58,15 +58,19 @@
 use spectrum::Sample;
 use spectrum::audio::{AMPLITUDE_MAX, SAMPLE_PERIOD_T_STATES};
 
-/// How loud the mix is allowed to get, as a fraction of full scale.
+/// How loud the **game** mix is allowed to get, as a fraction of full scale.
 ///
-/// Five sources can be at maximum together — three AY channels, the beeper and the tape's `EAR`
-/// signal — and the mix divides by their weighted total, so no combination clips. This leaves
-/// headroom below the device's full scale rather than running right at it.
+/// The sources that sound together in a running program — the beeper and the AY's three
+/// channels — divide by their weighted total, [`GAME_SCALE`], and land exactly here at their
+/// combined maximum, so no combination of them clips. The tape is deliberately not under this
+/// bound: it rides on top at [`TAPE_LEVEL`], and the compile-time assertion beside that
+/// constant proves the worst case of all five sources still fits under the device's range.
 ///
 /// Chosen, not derived. A real Spectrum's loudness depends on its speaker and its volume knob,
 /// and there is no figure to transcribe here — so this is a **ruling** in the vocabulary
-/// `docs/M6.md` established, and the thing to change if it is too loud or too quiet.
+/// `docs/M6.md` established, and the thing to change if it is too loud or too quiet. Because
+/// [`TAPE_LEVEL`] is derived from it, moving it moves the whole mix together rather than
+/// re-opening the tape-against-beeper balance.
 const HEADROOM: f32 = 0.6;
 
 /// The resistor the 128 sums the ULA's beeper through, in ohms.
@@ -97,68 +101,92 @@ const AY_RESISTOR_OHMS: f32 = 18_000.0;
 /// How much louder the beeper is than the AY, from the two resistances.
 const BEEPER_GAIN: f32 = AY_RESISTOR_OHMS / BEEPER_RESISTOR_OHMS;
 
-/// How loud the tape's `EAR` signal is against the beeper.
+/// The largest total the **game** sources can form, in units of [`AMPLITUDE_MAX`].
 ///
-/// **Chosen, not derived** — a ruling, and a weaker one than [`BEEPER_GAIN`], which at least has
-/// two resistors behind it. There is no equivalent figure to transcribe here: what reaches the
-/// amplifier from the `EAR` socket depends on the tape, the deck, and the volume the person
-/// playing it set, which is exactly why loading a real Spectrum involved turning a knob until it
-/// worked.
+/// The beeper at its gain plus the AY's three channels at unity — and deliberately not the
+/// tape. This was `FULL_SCALE = BEEPER_GAIN + TAPE_GAIN + 3.0`, one denominator across all
+/// five sources, and that shape was the S4 defect: sources that are almost never loud together
+/// shared one scale, so loudness given to the tape was taken from every game — a tape loads
+/// *before* a game makes music, not during it, and the headroom the shared sum reserved was
+/// spent on a combination that does not occur. The tape now carries its own absolute level,
+/// [`TAPE_LEVEL`], and the worst case of the two groups **added** is proven under the device's
+/// range at compile time beside it.
 ///
-/// What the number has to satisfy is audibility without dominance, and **the first attempt got it
-/// wrong in the quiet direction.** It was `0.5`, on the reasoning that a loading tone is
-/// continuous where beeper music is not and would therefore dominate at unity. Measured, that
-/// produced a peak of 2.5% of full scale against the beeper's 12.9% — a tape five times quieter
-/// than the speaker, when the machine it models is remembered for being unbearably loud while
-/// loading. The reasoning was sound and the magnitude it implied was not, which is what measuring
-/// a ruling is for.
-///
-/// **The figures are transcribed here rather than cited, and that is deliberate.** This paragraph
-/// first pointed at the `.wav` capture that settled it, under `.agent-workspace/` — which
-/// `.gitignore` excludes, so the citation named a file no reader of this repository can open. A
-/// ruling has to carry its evidence, and a path outside the tree carries none. The durable half
-/// is the arithmetic, and it is reproducible from the constants above: a 0→`AMPLITUDE_MAX` square
-/// through the DC blocker peaks at half its amplitude, so a lone tape reaches
-/// `TAPE_GAIN / FULL_SCALE × HEADROOM / 2` of full scale and a lone beeper reaches the same with
-/// `BEEPER_GAIN`. At `0.5` that was **2.44%** against the beeper's **12.92%**; at `0.9` it is
-/// **4.12%** against **12.13%**. Regenerate the recording with
-/// `cargo run --bin zx-shot -- --wav <out>.wav` over a loading tape if a fresh one is wanted.
-///
-/// `2.0` was the second attempt and **a gate refused it**, for a reason worth more than the
-/// number: every source divides by the same [`FULL_SCALE`], so loudness given to one is taken
-/// from the others. At `2.0` a lone beeper fell to 34.6% of the mix and
-/// `five_sources_at_full_scale_do_not_exceed_the_headroom` failed on its own words — *"a 48K
-/// would be thin"*. Making the tape audible had quietly made **every 48K game** quieter, which is
-/// the larger defect by a wide margin.
-///
-/// `0.9` is what that constraint allows. `BEEPER_GAIN / FULL_SCALE > 0.4` — the gate's own
-/// inequality — solves to `TAPE_GAIN < 0.97`, so this is the ceiling with a margin rather than a
-/// preference. It is 1.8x the first attempt: **4.12%** of full scale against the beeper's
-/// **12.13%**.
-///
-/// *That beeper figure said **12.9%**, which was its value at `TAPE_GAIN = 0.5`.* Raising the tape
-/// raised [`FULL_SCALE`] from 6.147 to 6.547, so the beeper's share fell with everything else's —
-/// which is the paragraph above's own point, arriving one paragraph later as a stale number. The
-/// margin the gate leaves is genuinely narrow: `BEEPER_GAIN / FULL_SCALE` is `0.4043` against a
-/// floor of `0.4`, a 1.1% margin, and any future change to [`BEEPER_GAIN`], to the AY's channel
-/// count or to that floor breaks it. The failure mode is a *quieter 48K*, which no gate other
-/// than `five_sources_at_full_scale_do_not_exceed_the_headroom` would notice.
-///
-/// **The tape is therefore still quieter than the machine it models, and the cause is structural
-/// rather than this number.** A shared denominator across sources that are almost never loud
-/// together spends headroom on a combination that does not occur: a tape loads *before* a game
-/// makes music, not during it. Fixing it properly means normalising per source or bounding the
-/// sum some other way, which is a design change and not a constant — recorded in the README's
-/// post-release table rather than smuggled in here.
-const TAPE_GAIN: f32 = 0.9;
+/// Dividing by this is what keeps a 128 playing an AY tune *and* clicking the beeper inside
+/// [`HEADROOM`] — the loudest thing a running program can do, and the case no test that plays
+/// a single source can reach.
+const GAME_SCALE: f32 = BEEPER_GAIN + 3.0;
 
-/// The largest total [`mix`] can form, in units of [`AMPLITUDE_MAX`].
+/// How loud the tape's `EAR` signal is — the beeper's own level, claimed for the tape.
 ///
-/// The beeper at its gain, the tape at its own, plus the AY's three channels at unity. Dividing
-/// by this is what keeps a 128 playing an AY tune *and* clicking the beeper *and* loading a tape
-/// inside the device's range — the case that clips, and the one no test that plays a single
-/// source can reach.
-const FULL_SCALE: f32 = BEEPER_GAIN + TAPE_GAIN + 3.0;
+/// `BEEPER_GAIN / GAME_SCALE` is exactly `45/96 = 0.46875` — the 18k/6.8k resistor ratio is
+/// `45/17` — so this is `0.28125` exactly: the level a lone full-deflection beeper reaches in
+/// [`mix`]. One expression rather than two numbers, so a corrected resistor value moves both
+/// together and the equality cannot silently drift.
+///
+/// **Equal is the ruling, and it is anchored to the machine rather than to a gate.** The
+/// Spectrum played its tape through its own speaker while loading, at the loudness everyone
+/// remembers — the screech is famous precisely because it was as loud as the games. That is an
+/// argument of kind, not a transcribed figure, so the constant stays **chosen** in the
+/// register's vocabulary; what changed is the anchor. Its predecessor `TAPE_GAIN = 0.9` was a
+/// gate's ceiling — the largest value the thin-48K floor allowed — which made the tape's
+/// loudness an accident of the denominator it shared.
+///
+/// # The recorded path to the ruling, kept per this file's retraction convention
+///
+/// - **`0.5`** — the first attempt, reasoned: a loading tone is continuous where beeper music
+///   is not, so it would dominate at unity. Measured, that produced **2.44%** of device full
+///   scale against the beeper's **12.92%** — a tape five times quieter than the machine it
+///   models is remembered for. The reasoning was sound and the magnitude it implied was not,
+///   which is what measuring a ruling is for.
+/// - **`2.0`** — the second attempt, and **a gate refused it**, for a reason worth more than
+///   the number: under the shared `FULL_SCALE` every source divided by the same total, so
+///   loudness given to one was taken from the others. At `2.0` a lone beeper fell to 34.6% of
+///   the mix and `five_sources_at_full_scale_do_not_exceed_the_headroom` failed on its own
+///   words — *"a 48K would be thin"*.
+/// - **`0.9`** — the ceiling that constraint allowed: the gate's inequality
+///   `BEEPER_GAIN / FULL_SCALE > 0.4` solved to `TAPE_GAIN < 0.97`, and the result was
+///   **4.12%** of device full scale against the beeper's **12.13%**, with the floor's margin
+///   at 1.1% — a tape still three times quieter than the games, held there by structure rather
+///   than by anybody's ruling. The doc here called that structural — *"a design change and not
+///   a constant"*, recorded in the engineering journal's post-release table
+///   (`docs/JOURNAL.md`) — and this constant is that design change landing.
+///
+/// # The figures now, transcribed rather than cited
+///
+/// The durable half is the arithmetic, reproducible from the constants above: a
+/// 0→`AMPLITUDE_MAX` square through the DC blocker settles at half its mixed level, so a lone
+/// tape peaks at `TAPE_LEVEL / 2` = **14.06%** of device full scale and a lone beeper at the
+/// same **14.06%** — where the shared denominator had them at 4.12% against 12.13%. The game
+/// sources rise ~16% (the honest cost of removing the tape's `0.9` from a denominator it never
+/// belonged in — inside [`HEADROOM`]'s own ruling space, and stated rather than compensated
+/// away with a retuned headroom, which would be a constant chosen to make new arithmetic
+/// reproduce old output). The beeper:AY ratio is untouched, and the worst-case five-source sum
+/// is **0.88125**, proven under full scale at compile time below — which is why there is no
+/// limiter.
+///
+/// Measured as well as derived, 2026-09-03, on a fresh `zx-shot --wav` capture of *Manic
+/// Miner* loading from its own tape and then playing its menu tune: the screech holds
+/// **14.28–14.33%** of device full scale for the whole load — the blocker's settled peak for a
+/// square of mixed level `A` is `A/(1 + R^H)`, with `R` the [`DC_POLE`] and `H` the half-period
+/// in device samples; at the pilot rate that is 14.27%, of which the "half its amplitude" above
+/// is the fast-square limit — where the same instrument read **4.12%** before the decoupling.
+/// Block-boundary edges reach the un-halved **28.12%**, this constant exactly. The beeper
+/// tune that follows on the same capture peaks at **24.6–25.7%**: a note's asymmetric
+/// duty parks its rare side further from the axis than a 50%-duty screech, so the equality
+/// this constant rules is of per-source *levels*, which the note shapes then spread — the
+/// beeper ends up, if anything, above the tape. Global maximum over the whole run **51.0%**,
+/// a one-off transient at the load→game seam: nothing approached the device's range, which is
+/// the no-limiter claim observed as well as proven. Regenerate with
+/// `cargo run --bin zx-shot -- --wav <out>.wav` over a loading tape if a fresh one is wanted.
+const TAPE_LEVEL: f32 = BEEPER_GAIN / GAME_SCALE * HEADROOM;
+
+// The compile-time half of "no limiter is needed": the worst instantaneous case — every game
+// source at full deflection *and* the tape at full deflection — fits under the device's full
+// scale with an 11.9% margin (0.88125). A `TAPE_LEVEL` or `HEADROOM` that broke this would
+// refuse to compile; `five_sources_at_full_scale_stay_under_the_device_range` measures the same
+// bound through `mix`, so the proof and the measurement cannot drift apart.
+const _: () = assert!(HEADROOM + TAPE_LEVEL < 1.0);
 
 /// How much of the previous output a one-pole DC blocker carries forward.
 ///
@@ -234,7 +262,17 @@ const MILLISECONDS_PER_SECOND: u32 = 1000;
 /// is too deep — it underruns, and both devices fill an underrun with silence. Steering at the
 /// midpoint gives the loop the same authority either way. A quarter would bias it toward
 /// underrunning; three quarters toward latency. Nothing measures which is best, so this is a
-/// **choice** in `docs/M6.md`'s vocabulary, like [`HEADROOM`] and [`TAPE_GAIN`].
+/// **choice** in `docs/M6.md`'s vocabulary, like [`HEADROOM`] and [`TAPE_LEVEL`].
+///
+/// # `device_hz` is a measurement in a browser and a request on the desktop
+///
+/// A browser reports the real rate: `page::audio_rate()` reads `AudioContext.sampleRate` off
+/// the running context, so this setpoint is computed from what the device actually consumes.
+/// The desktop figure is the rate the frontend *asked for* — tinyaudio's device handle is
+/// opaque and no granted rate can be read back — so everything derived from it, this setpoint
+/// included, inherits that assumption. The bound on how far a grant can differ from the
+/// request, per platform, lives with the request itself: `desktop::REQUESTED_HZ` in
+/// `crates/page`, which names the one uncovered case and its symptom.
 ///
 /// # Why it is a named function and not an expression in the frame loop
 ///
@@ -251,18 +289,22 @@ pub const fn queue_target(device_hz: u32) -> u32 {
     device_hz * page::BUFFER_MILLISECONDS / MILLISECONDS_PER_SECOND / 2
 }
 
-/// One [`Sample`]'s five sources as a single level, from `0.0` to [`HEADROOM`].
+/// One [`Sample`]'s five sources as a single level, from `0.0` to [`HEADROOM`] plus
+/// [`TAPE_LEVEL`].
 ///
-/// *Five, and this line said four.* The three AY channels, the beeper and the tape's `EAR` signal
-/// — [`FULL_SCALE`] sums all five and the gate beside it is named
-/// `five_sources_at_full_scale_do_not_exceed_the_headroom`, so the count was wrong against two
-/// neighbours in the same file. It is worth stating rather than silently correcting because the
-/// number is the one a reader checks the arithmetic against.
+/// *Five, in two groups, and the grouping is the S4 ruling.* The beeper and the AY's three
+/// channels — the sources that sound together in a running program — share the tape-free
+/// [`GAME_SCALE`] and top out at [`HEADROOM`]; the tape rides on top at its own absolute
+/// [`TAPE_LEVEL`], and the worst case of both groups at once is proven under the device's
+/// range at compile time beside that constant. *(An earlier correction here fixed this line
+/// saying "four" against a five-source gate; the five are unchanged — only the denominator
+/// they no longer all share is.)*
 ///
 /// A **weighted** sum. `crates/spectrum/src/audio.rs` says of [`AMPLITUDE_MAX`] that *"two
 /// sources sharing a full scale is not a claim that they are equally loud"* — a warning that
-/// this function is exactly where such a claim gets made. It makes one, and the weight comes
-/// from the 128's own summing resistors rather than from taste: see [`BEEPER_RESISTOR_OHMS`].
+/// this function is exactly where such a claim gets made. It makes two: the beeper against the
+/// AY from the 128's own summing resistors (see [`BEEPER_RESISTOR_OHMS`]), and the tape
+/// **equal to the beeper** by the S4 ruling (see [`TAPE_LEVEL`]).
 #[must_use]
 pub fn mix(sample: Sample) -> f32 {
     let ay: f32 = sample
@@ -270,8 +312,10 @@ pub fn mix(sample: Sample) -> f32 {
         .iter()
         .map(|&channel| f32::from(channel))
         .sum();
-    let total = f32::from(sample.beeper) * BEEPER_GAIN + f32::from(sample.tape) * TAPE_GAIN + ay;
-    total / (f32::from(AMPLITUDE_MAX) * FULL_SCALE) * HEADROOM
+    let game = (f32::from(sample.beeper) * BEEPER_GAIN + ay)
+        / (f32::from(AMPLITUDE_MAX) * GAME_SCALE)
+        * HEADROOM;
+    game + f32::from(sample.tape) / f32::from(AMPLITUDE_MAX) * TAPE_LEVEL
 }
 
 /// Turns the machine's samples into the device's, mixing on the way.

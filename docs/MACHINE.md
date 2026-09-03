@@ -884,7 +884,7 @@ an accident.
 > without it would be this project's familiar failure committed **knowingly in advance**, which
 > [`M6.md`](M6.md) already identified as *"a different and worse category than the first three."*
 >
-> `README.md`'s and `ARCHITECTURE.md`'s copies of this table are owned elsewhere and still carry
+> `docs/JOURNAL.md`'s and `ARCHITECTURE.md`'s copies of this table are owned elsewhere and still carry
 > the old wording for M8; `M8.md`'s closing section lists them alongside every other copy it
 > found. **This note is written from this file, and the note about those two is written there** —
 > which is the remedy the M6/M7 correction two blocks above had to learn the hard way, after each

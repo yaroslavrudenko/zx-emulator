@@ -70,36 +70,66 @@ fn silence_mixes_to_nothing() {
 }
 
 #[test]
-fn five_sources_at_full_scale_do_not_exceed_the_headroom() {
+fn five_sources_at_full_scale_stay_under_the_device_range() {
+    // **This gate was named `five_sources_at_full_scale_do_not_exceed_the_headroom`** until the
+    // S4 ruling. Since the tape left the shared denominator, the five-source sum deliberately
+    // exceeds `HEADROOM` (0.88125 against 0.6) — what the assertion below actually holds is the
+    // device's full scale, so the name now says so. The old name asserted a property the mix no
+    // longer has, and a gate whose name promises something its assertion does not check is how
+    // a false claim survives a green suite.
+    //
     // The defect this exists for is clipping, which sounds like distortion and is inaudible in
     // any test that only ever plays one source. A 128 running an AY tune *and* clicking the
-    // beeper is the case that reaches it.
+    // beeper *while a loader screeches* is the case that reaches it.
+    //
+    // The bound is restated from the rulings rather than read back from the implementation:
+    // the game sources top out at the 0.6 headroom, and the tape — decoupled from their
+    // denominator by the S4 ruling — adds the beeper's own share of the tape-free scale,
+    // 45/96 of that same 0.6, on top. The compile-time assertion in
+    // `crates/frontend/src/audio.rs` proves the sum sits under 1.0; this measures the same
+    // bound through `mix`, so proof and measurement cannot drift apart.
     let full = mix(everything());
+    let beeper_gain = 18_000.0_f32 / 6_800.0;
+    let ceiling = 0.6 + beeper_gain / (beeper_gain + 3.0) * 0.6;
     assert!(
-        (0.0..=1.0).contains(&full),
-        "four sources at once mix to {full}, which is outside a device's range",
+        full <= ceiling + 1e-6,
+        "five sources at once mix to {full}, past the {ceiling} the two rulings add up to",
+    );
+    assert!(
+        full < 1.0,
+        "five sources at once mix to {full}, which is outside a device's range",
     );
     // **The beeper is 2.65x the AY, and that number is from the 128's board.** Its summing
     // network reaches the MC1376 through R112 = 6K8 for the beeper against R132 = 18K for the
     // AY, and contribution in such a network goes as 1/R — so 18000/6800. This asserts the
     // implemented ratio against that source rather than against the implementation, which is
-    // the difference between a gate and a restatement.
+    // the difference between a gate and a restatement. Both sides now divide by the tape-free
+    // scale, so the S4 decoupling moved this ratio by nothing — which is itself part of what
+    // it asserts.
     let beeper_only = mix(beeper(AMPLITUDE_MAX));
     let mut ay = Sample::default();
     ay.channels = [AMPLITUDE_MAX; 3];
     let ay_only = mix(ay);
     // Three channels at unity against one beeper at its gain.
     let measured = beeper_only / (ay_only / 3.0);
-    let expected = 18_000.0 / 6_800.0;
     assert!(
-        (measured - expected).abs() < 0.01,
-        "the beeper is {measured}x an AY channel; the 128's resistors say {expected}x",
+        (measured - beeper_gain).abs() < 0.01,
+        "the beeper is {measured}x an AY channel; the 128's resistors say {beeper_gain}x",
     );
-    // And the 48K — beeper alone, no chip — is now a usable fraction of full scale rather than
-    // the quarter an unweighted sum gave it. That was the audible cost of the earlier guess.
+    // The thin-48K floor, recomputed against the game mix — the floor's own sentence is about
+    // a 48K *game* being thin, and a 48K game has no tape playing. Under the shared
+    // denominator this inequality held by 1.1% and `TAPE_GAIN`'s doc warned that any change
+    // to the gains would break it; against the tape-free mix the beeper's share is
+    // 45/96 = 0.46875 — a 17.2% margin over the 0.4 floor. The decoupling is what turned the
+    // fragile inequality structural.
+    let mut game = Sample::default();
+    game.beeper = AMPLITUDE_MAX;
+    game.channels = [AMPLITUDE_MAX; 3];
+    let game_full = mix(game);
     assert!(
-        beeper_only > full * 0.4,
-        "a lone beeper is {beeper_only} against a full mix of {full}; a 48K would be thin",
+        beeper_only > game_full * 0.4,
+        "a lone beeper is {beeper_only} against a tape-free full mix of {game_full}; a 48K \
+         would be thin",
     );
 }
 
@@ -177,8 +207,10 @@ fn a_square_wave_keeps_its_amplitude() {
     let low = tail.iter().copied().fold(f32::MAX, f32::min);
     let peak_to_peak = high - low;
 
-    // A full-scale beeper mixes to a quarter of the headroom, so an undistorted square wave
-    // swings that far peak to peak. Anything much below means the filter is eating the signal.
+    // A full-scale beeper mixes to its share of the headroom — 45/96 of it since the S4
+    // decoupling; this line once said "a quarter", the unweighted mix's figure — so an
+    // undistorted square wave swings that far peak to peak. Anything much below means the
+    // filter is eating the signal.
     let expected = mix(beeper(AMPLITUDE_MAX));
     assert!(
         peak_to_peak > expected * 0.9,
@@ -291,11 +323,29 @@ fn a_playing_tape_is_audible_on_its_own() {
 }
 
 #[test]
-fn the_tape_is_quieter_than_the_beeper_at_the_same_level() {
-    // Not a claim about any real deck — see `TAPE_GAIN`, which is a ruling. It is the property
-    // the ruling exists to produce: a loading tone holds full deflection for the length of a
-    // block, so at unity it would sit on top of beeper music rather than under it.
-    assert!(mix(tape(AMPLITUDE_MAX)) < mix(beeper(AMPLITUDE_MAX)));
+fn the_tape_is_as_loud_as_the_beeper_at_the_same_level() {
+    // **This gate is `the_tape_is_quieter_than_the_beeper_at_the_same_level`, inverted, and
+    // the inversion is deliberate rather than drift.** The old assertion read the shared
+    // denominator's artefact as the intended property: quieter was never ruled, it was what
+    // `TAPE_GAIN`'s ceiling left over once the thin-48K floor capped it, and the constant's
+    // own doc called the result structural and pointed at the design change. S4 is that
+    // change: the tape left the shared scale, and `TAPE_LEVEL` is *derived* from the beeper's
+    // own level — the machine being modelled played its tape through its own speaker, and the
+    // screech is famous precisely because it was as loud as the games.
+    //
+    // Near-equality rather than `==`: the two levels are one expression by construction, but
+    // the runtime arithmetic in `mix` takes a different operation order from the const's, so
+    // the results may differ by ULPs — never by more than a relative 1e-3.
+    let tape_peak = mix(tape(AMPLITUDE_MAX));
+    let beeper_peak = mix(beeper(AMPLITUDE_MAX));
+    assert!(
+        beeper_peak > 0.0,
+        "a silent beeper would make the ratio below vacuous"
+    );
+    assert!(
+        ((tape_peak - beeper_peak) / beeper_peak).abs() < 1e-3,
+        "the tape is ruled equal to the beeper and came out {tape_peak} against {beeper_peak}",
+    );
 }
 
 // ---------------------------------------------------------------------------------------

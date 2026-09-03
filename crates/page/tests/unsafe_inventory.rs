@@ -31,7 +31,7 @@
 //! that needs one names the constant instead of repeating its value.*
 //!
 //! **The general test — whether a figure or a list in prose is a second copy at all — is stated
-//! once, and not here.** `README.md`'s *Engineering rules* owns it, as the third of three sibling
+//! once, and not here.** `docs/JOURNAL.md`'s *Engineering rules* owns it, as the third of three sibling
 //! rules: *"does the surrounding sentence stay true when the list or the figure goes wrong?"*
 //! Writing it out again in this file would be the defect it names, so what stays here is this
 //! crate's own working of it. It deleted *"the three imports"* from `src/lib.rs`, which had gone

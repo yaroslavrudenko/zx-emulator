@@ -104,7 +104,7 @@ struct Removed {
 /// [`every_deleted_name_is_still_absent_and_still_discussed`] fails an entry that has come
 /// back and an entry nobody mentions any more — so it cannot become the quiet place a real
 /// finding goes to be silenced.
-const DELETED_ON_PURPOSE: [Removed; 2] = [
+const DELETED_ON_PURPOSE: [Removed; 4] = [
     Removed {
         name: "every_key_is_visible_to_a_scan_of_its_own_half_row",
         why: "Removed at M6. It derived both the port it scanned and the value it expected from \
@@ -126,6 +126,28 @@ const DELETED_ON_PURPOSE: [Removed; 2] = [
               rename where the test lives, grades the stopped-on-high state with two gates of \
               its own, and recounts the old name in the past tense — the sentence this entry \
               exists to keep legal.",
+    },
+    Removed {
+        name: "five_sources_at_full_scale_do_not_exceed_the_headroom",
+        why: "Renamed to five_sources_at_full_scale_stay_under_the_device_range after the S4 \
+              ruling took the tape out of the shared denominator: the five-source sum now \
+              deliberately exceeds HEADROOM (0.88125 against 0.6) and what the assertion holds \
+              is the device's full scale, so the old name promised a property the mix no longer \
+              has. crates/frontend/tests/audio_resampling.rs argues the rename where the gate \
+              lives; the historical mentions recount the old name in the past tense — the \
+              sentences this entry keeps legal.",
+    },
+    Removed {
+        name: "the_tape_is_quieter_than_the_beeper_at_the_same_level",
+        why: "Inverted to the_tape_is_as_loud_as_the_beeper_at_the_same_level by the S4 \
+              ruling: quieter was never ruled, it was what the shared FULL_SCALE denominator \
+              left over once the thin-48K floor capped TAPE_GAIN, and the constant's own doc \
+              called the result structural rather than chosen. S4 took the tape out of the \
+              shared scale and derived TAPE_LEVEL from the beeper's own level — the machine \
+              played its tape through its own speaker, as loud as the games it ran. \
+              crates/frontend/tests/audio_resampling.rs argues the inversion where the test \
+              lives and names the old gate in the past tense — the sentence this entry keeps \
+              legal.",
     },
 ];
 

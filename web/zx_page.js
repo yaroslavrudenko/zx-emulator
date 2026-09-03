@@ -157,6 +157,26 @@
     let audioPushed = 0;
     let audioConsumed = 0;
 
+    // Buffers the worklet has finished copying out of, posted back here for reuse. The pool
+    // replaces ~50 fresh allocations a second — one per pushed frame — whose backing stores
+    // became garbage on the audio thread, the one thread in this page with a hard deadline to
+    // miss. An empty pool is never an error and never waits: `zx_audio_push` allocates a fresh
+    // buffer on a miss, so the worst case is exactly the per-frame allocation this pool exists
+    // to avoid — no blocking, no dropping, on either thread.
+    const freeBuffers = [];
+
+    // The most buffers the pool parks. In flight at once is posted-not-yet-returned, which is
+    // 2-3 at one post per 20 ms frame against a ~1 ms return round-trip; more parked than this
+    // means something posts without popping, and those are left to the collector rather than
+    // hoarded. A context that leaves `running` stops the pushes and the returns together —
+    // `zx_audio_push` answers "no device" before it touches the pool — so a suspended tab
+    // parks at most this many buffers, ~16 KiB at 48 kHz, for as long as it stays suspended.
+    const FREE_LIST_MAX = 4;
+
+    // Pool allocation granularity: 4096 bytes = 1024 samples of headroom at 48 kHz, so the
+    // ±1-sample drift of `Resampler::track`'s rate correction never forces a reallocation.
+    const POOL_GRANULARITY_BYTES = 4096;
+
     function audioStart() {
         if (audioContext !== null) {
             return;
@@ -175,12 +195,21 @@
                     outputChannelCount: [2],
                 });
                 audioNode.port.onmessage = function (event) {
-                    // The worklet posts one number and nothing else. Checked rather than read
-                    // blind: an unexpected shape would put `undefined` into the arithmetic
-                    // above and make every subsequent push answer `NaN`, which reaches Rust as
-                    // 0 and reads as "the queue is empty" forever.
+                    // The worklet posts exactly two shapes: a number — its consumed count —
+                    // and an exhausted chunk's `ArrayBuffer`, coming home for reuse. *This
+                    // comment said "one number and nothing else"* until the buffer pool added
+                    // the second shape. Checked rather than read blind, exactly as before: an
+                    // unexpected shape would put `undefined` into the arithmetic above and
+                    // make every subsequent push answer `NaN`, which reaches Rust as 0 and
+                    // reads as "the queue is empty" forever. The two shapes are disjoint on
+                    // one ordered port, so the consumed contract is untouched, and anything
+                    // else still falls through ignored.
                     if (typeof event.data === "number") {
                         audioConsumed = event.data;
+                        return;
+                    }
+                    if (event.data instanceof ArrayBuffer && freeBuffers.length < FREE_LIST_MAX) {
+                        freeBuffers.push(event.data);
                     }
                 };
                 audioNode.connect(audioContext.destination);
@@ -241,13 +270,40 @@
                 ) {
                     return NO_DEVICE;
                 }
-                // `.slice()` **copies** out of wasm memory. The buffer is then transferred to
-                // the worklet, which owns it on another thread for as long as it likes — a view
-                // over wasm memory would alias a buffer that can grow, detach and be reused
-                // underneath it. This is the copy `crates/page`'s SAFETY comment relies on, and
-                // `.slice()` is that view's last read: everything below touches only the copy.
-                const samples = new Float32Array(wasm_memory.buffer, pointer, count).slice();
-                audioNode.port.postMessage(samples, [samples.buffer]);
+                // Nothing to post. Returning before the pool matters: the worklet ignores an
+                // empty chunk without posting its buffer back, so an empty push that popped
+                // the pool would quietly shrink it by one buffer each time.
+                if (count === 0) {
+                    return audioPushed - audioConsumed;
+                }
+                // The copy out of wasm memory **stays** — a view over wasm memory would alias
+                // a buffer that can grow, detach and be reused underneath it, and the worklet
+                // owns what it is handed on another thread for as long as it likes. This is
+                // the copy `crates/page`'s SAFETY comment relies on, and the `set` below is
+                // the wasm view's last read: everything after it touches only the copy.
+                //
+                // What changed is the copy's *destination*. *It was `.slice()`* — a fresh
+                // buffer per frame, ~3,834 bytes at 48 kHz, fifty times a second, freed on the
+                // audio thread — where a recycled one does the same job with no allocation in
+                // steady state. The pool self-sizes: a miss, or a pooled buffer too small for
+                // a grown `count`, allocates fresh — page-granular (`POOL_GRANULARITY_BYTES`,
+                // whose comment carries the arithmetic), and no device-rate constant is
+                // copied into this file.
+                const bytes = count * Float32Array.BYTES_PER_ELEMENT;
+                let buffer = freeBuffers.pop();
+                if (buffer === undefined || buffer.byteLength < bytes) {
+                    buffer = new ArrayBuffer(
+                        Math.ceil(bytes / POOL_GRANULARITY_BYTES) * POOL_GRANULARITY_BYTES,
+                    );
+                }
+                const samples = new Float32Array(buffer, 0, count);
+                samples.set(new Float32Array(wasm_memory.buffer, pointer, count));
+                // A view posted with its buffer in the transfer list keeps its offset and
+                // length across the port: the worklet's `chunk.length` is still exactly
+                // `count` while `chunk.buffer` is the full page-rounded capacity — no wrapper
+                // object per frame. The transfer detaches `samples` on this side, and nothing
+                // below reads it.
+                audioNode.port.postMessage(samples, [buffer]);
                 audioPushed += count;
                 return audioPushed - audioConsumed;
             },

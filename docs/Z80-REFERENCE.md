@@ -35,7 +35,7 @@ site that takes it — selects HL, IX or IY, and the entire instruction set work
 > **It is recorded rather than quietly renamed, because it had already been caught and the fix did
 > not reach this file.** [`ARCHITECTURE.md:150`](ARCHITECTURE.md) carries the note that *"two
 > independent reviewers found `grep hl_base` returning zero hits while this document described it
-> as the decision 'everything hangs on'"*, and [`STATUS.md:1127`](STATUS.md)'s M1 hardening-round
+> as the decision 'everything hangs on'"*, and [`STATUS.md:1209`](STATUS.md)'s M1 hardening-round
 > table records the resolution — *"fixed; `base` threaded, so `DD 29` becomes `ADD IX,IX` with no
 > new code"*. Two documents found the phantom in a third. **Neither of them carried the fix all the
 > way**, and the sweep run for this correction says exactly where it stopped: `ARCHITECTURE.md`
@@ -443,7 +443,7 @@ vendored into this repository.
 > exception there is, both from the repository root. Run them — a list here would be a second copy
 > of both, and this block is what that copy costs.
 >
-> `README.md`'s *Test data* table states this correctly and `MACHINE.md` calls it *"the committed
+> `docs/JOURNAL.md`'s *Test data* table states this correctly and `MACHINE.md` calls it *"the committed
 > ROM"*; this line did not, and is corrected to match rather than left as the odd one out.
 >
 > > **`.gitignore`'s last exception was `!testdata/roms/*.rom` when this block was written — a
@@ -467,7 +467,7 @@ vendored into this repository.
 > > when both were read again on 2026-09-02. So the two are gone rather than corrected a third time,
 > > and the commands that produce them stand where they were. **A correction goes stale exactly as a
 > > claim does, and is the harder failure to catch, because it wears the costume of a fix** — the
-> > same trap `README.md` records in its own nested correction, under *"the note outlived the
+> > same trap `docs/JOURNAL.md` records in its own nested correction, under *"the note outlived the
 > > defect it named"*.
 >
 > Absence is not silent. A missing corpus makes its gate **fail**, naming the fetch instructions;

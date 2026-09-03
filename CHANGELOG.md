@@ -58,6 +58,45 @@ been labelled as such; nothing in them changed.
 > **evidence** register, not an API register. Pointing a reader asking *"did this break?"* at a
 > table answering *"is this tested?"* is the same conflation rejected above.
 
+## Unreleased — audio, second wave · `crates/frontend` — the tape as loud as the beeper, and a browser page that stops shedding buffers
+
+The follow-up to the entry below, closing the one audible defect it left open — S4, the tape's
+loudness taken from the beeper — and removing the allocation churn its browser fix ran on. No
+signature moved in either half: what changed is what `mix` computes, and what the page's
+JavaScript shim does with a pushed frame — the latter recorded here because `crates/page` and
+`web/` are the FFI seam `crates/frontend`'s behaviour ships through, per this file's own scope
+note above.
+
+### `crates/frontend` — S4: the tape leaves the shared mix denominator
+
+**Changed.** The mix's one shared denominator — `FULL_SCALE`, every source divided by the same
+total, so loudness given to the tape was taken from the games — is replaced by a tape-free
+`GAME_SCALE`, and `TAPE_GAIN = 0.9` by a derived `TAPE_LEVEL` — the beeper's own level,
+`BEEPER_GAIN / GAME_SCALE * HEADROOM`, 0.28125 exactly. The tape is **ruled equal to the
+beeper** — the machine played its
+tape through its own speaker, at the loudness the screech is remembered for — and the ruling is
+one expression rather than two numbers, so a corrected resistor value moves both together. A
+lone tape goes from **4.12% to 14.06%** of device full scale, measured at **14.3%** on a fresh
+capture; a lone beeper sits at the same 14.06%. The worst-case five-source sum is **0.88125**,
+proven under full scale at compile time, so there is **no limiter**; the thin-48K floor's margin
+widens from 1.1% to 17.2%. The gate that asserted the old shape is inverted to
+`the_tape_is_as_loud_as_the_beeper_at_the_same_level`, and the old quieter-than name is
+registered in the deleted-on-purpose register rather than left citable. Both constants were
+private, so the published surface is unchanged — what a consumer hears is not, by design.
+
+### `crates/frontend` — the browser page recycles its audio buffers through a transferable free-list
+
+**Changed.** `web/zx_page.js` allocated a fresh buffer per pushed frame — ~3,834 bytes at
+48 kHz, fifty times a second, ~187.5 KiB/s — and every one of them became garbage on the audio
+thread, the one thread on the page with a hard render deadline. The page now pops a pooled
+`ArrayBuffer`, copies the frame into it, and transfers it; `web/zx_audio_worklet.js` posts each
+exhausted buffer straight back after its ring copy, and the pool parks at most four buffers
+(`FREE_LIST_MAX`). Audio-thread-freed garbage goes to **zero in steady state**, at +16 lines of
+code. An empty
+pool never blocks and never drops — a miss allocates fresh, which is exactly the old behaviour —
+and the worklet's own rule that `process` allocates nothing that outlives it stands as written:
+the post-back runs in the port's message dispatch.
+
 ## Unreleased — audio · `crates/spectrum` + `crates/frontend` — the tape became audible and the clicking stopped
 
 Two defects a person hears, reported together and fixed together. Neither was a wrong number: both
