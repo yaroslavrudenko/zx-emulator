@@ -525,6 +525,215 @@ same pipeline the window runs.
 
 ---
 
+## Where the bytes come from, and the thread with 2.667 ms
+
+Six findings, and what makes them a section rather than six rows is that **not one of them is
+about how much memory anything uses.** Rust has no garbage collector and no escape analysis, so
+every allocation in this workspace is one somebody typed — which makes an allocation finding here
+*certain* rather than probabilistic, and makes the size the least interesting thing about it. The
+questions that decided all six were **which thread frees it**, **what the compiler actually
+emitted**, and **whether the repair is smaller than the defect**. Two of the six close with a
+refusal and one with a correction to a sentence rather than to code; those are the ones worth
+reading twice.
+
+### Allocating on one thread, freeing on another — and the deadline thread pays
+
+`web/zx_page.js` built a fresh `Float32Array` for every pushed frame: 958.5 samples at the
+machine's own 50.08 Hz, **3,834 bytes**, fifty times a second — 187.5 KiB/s, which is just
+48,000 × 4. The size is nothing; a page can allocate that in a loop and never notice. **Where it
+was freed is the finding.** The page allocated on the main thread and the AudioWorklet dropped
+the last reference on the render thread, whose deadline is **2.667 ms** per 128-sample quantum at
+48 kHz. So a hundred and eighty-seven kilobytes a second of garbage was being collected on the
+one thread in the page that cannot afford a pause.
+
+**The copy itself is not optional, and the fix does not touch it.** `crates/page/src/lib.rs`'s
+`SAFETY` comment on the push turns on exactly this: a view handed across the port would alias wasm
+memory, *"which may grow and detach afterwards"*, so *"the copy is what makes the transferred
+buffer independent"*. What was optional was the copy's **destination** being a fresh allocation
+each time, and the same comment names the old shape in the same breath — *"That copy was
+`.slice()`, which returned a fresh `ArrayBuffer` per call"*.
+
+So the buffer boomerangs. The page pops a pooled `ArrayBuffer`, copies the frame into it, and
+posts the view with the buffer in the transfer list; `web/zx_audio_worklet.js` posts
+`chunk.buffer` straight back — transferred, so the return costs no copy either — as the **last
+statement of `accept`**, which is the exact point the buffer used to become garbage. `FREE_LIST_MAX`
+is 4: two or three are in flight at one post per 20 ms frame against a ~1 ms return round trip, so
+a pool asked to park more than that is a pool something is filling without draining. A miss
+allocates fresh, so an empty pool never blocks and never drops — the worst case is precisely the
+per-frame allocation the pool exists to remove.
+
+Measured, in the G2 run `docs/STATUS.md` records: headless Chrome, four minutes, a counter wired
+into the pool-miss branch of the **served artifact only**. **One allocation.** `fresh` was 1 at
+five seconds, 1 at one minute and still 1 at four minutes, with a single buffer parked between
+frames — against ~50 fresh buffers a second before.
+
+> **One figure was dropped rather than carried.** This section was briefed as *"one allocation,
+> not ~2,750"*. The first half is in the record; the second is in no document here and does not
+> reconstruct — four minutes at ~50 a second is about twelve thousand, not 2,750. What the run
+> establishes is **one, against a rate**, and the rate is the number with a home.
+
+### A queue with no ceiling is not headroom, it is latency that climbs for the whole session
+
+`crates/page/src/lib.rs` rules on this for the desktop device, in writing:
+
+> **Dropped rather than grown.** An unbounded queue does not fix an emulator running fast; it
+> converts a small permanent error into a latency that climbs for as long as the session lasts.
+
+The browser half did not honour it, and the worklet's own header now says so — *"Two devices, one
+documented rule, honoured by one of them."* The reason it did not is structural rather than
+careless: the queue was `chunks = []`, pushed unconditionally and drained with `shift()`, and
+**there was no insertion point at which a ceiling could be enforced without inventing one.** Three
+further defects fell out of the same shape — a five-load `while` guard paid on every sample to
+catch an event that happens fifty times a second (~240,000 property loads for 50 events); a chunk
+boundary that blocked the block copy to the second output channel, so a mono sample was stored per
+channel per sample (96,000 indexed stores a second where two block copies would do); and
+`Array.prototype.shift()` being O(n) in chunk count, so the drop path degraded quadratically
+exactly when the queue was already pathological.
+
+One preallocated power-of-two `Float32Array` with masked read and write indices answers all four,
+and drop-oldest becomes a subtraction on the read index. The measurement is the point: the runaway
+observed on 2026-09-01 was **10,080 samples of backlog after four minutes and still climbing** —
+which is the same observation S1 above records as *210 ms*, because 10,080 ÷ 48,000 **is** 210 ms
+— and the G2 run at the same four-minute mark read **1,177**, oscillating under its 2,400 setpoint
+instead of running away from it.
+
+### `Display` instead of `String`, and a repair that measured worse than the defect
+
+`crates/frontend/src/main.rs` formats its status line into one reused `String`, and the field's own
+doc says why: the per-frame path writes into one buffer rather than building a new one fifty times
+a second. `crates/frontend/src/pacing.rs` carries the pattern that makes that possible — a
+`Display` impl on `Rung`, written for exactly that call site, *"so that `Status::draw` keeps
+formatting the whole readout in one `write!` into its reused buffer, rather than building a string
+per field"*.
+
+One argument of that same `write!` still arrives as a `String`. `Status::queue` returns one, and
+two of its three arms allocate a copy of a `&'static str` to do it — `MUTED.to_owned()`, where
+`MUTED` is the four bytes `"mute"`. That is the half that is easy to miss: `.to_owned()` on a
+literal reads as required by the signature when it is required by nothing.
+
+**The generalisable rule is to return `impl Display`, not `String`, and let the caller decide where
+the bytes land.** What this repository did with that rule is the more useful half, and it is a
+**refusal**. Every repair was measured and every one came out worse: a `Cow` still allocates in the
+live case, because the live case is a number; the `Display` newtype — the sibling pattern already
+sitting in `crates/frontend/src/pacing.rs` — costs **+11 lines and +3 branches for 11 bytes**; and
+a `write!`-into-`&mut String` signature splits the single `write!` into three, destroying the exact
+property the buffer exists to give. So the code stands and **the sentence was corrected instead**:
+the doc used to claim the line formatted *"without allocating"*, and it and the `Display` impl now
+each say plainly which field obeys that and which does not. The finding stays open, written at the
+place a reader deciding whether a per-frame `format!` is allowed on this path will meet it.
+
+### `extend` beats a `push` loop by type-system specialisation, and that is what settled the mutex
+
+The desktop producer used to hold the audio mutex across a ~958-iteration `push_back` loop with a
+per-item ceiling test — ~48,000 iterations a second, all of it inside the lock the real-time
+callback needs. It is now two lines:
+
+```rust
+let room = CEILING.saturating_sub(queued.len()).min(samples.len());
+queued.extend(samples[..room].iter().copied());
+```
+
+The comment beside it names the mechanism: `extend` over a `TrustedLen` iterator specialises to a
+bulk copy. So ~958 `len()` comparisons become one subtraction, the loop becomes one block copy,
+and the break-on-full semantics are unchanged — `room` is exactly the number the loop would have
+pushed before its first `break`. The campaign table above prices it at ~99 % of the mutex's hold
+time for **−6 lines**.
+
+**That measurement is what settled a different question.** A blocking `std::sync::Mutex` in a
+real-time audio callback looks indefensible, and the refusal to remove it is now arithmetic rather
+than confidence: **63 ns** mean hold, **666 ns** for the worst legal shape — a full `CEILING` copy
+into an empty ring — and **9.9 µs** worst observed with the measuring harness preempted mid-hold,
+against a **10.67 ms** deadline. That is 0.09 % of the budget. The *unbounded priority inversion in
+principle* leg is closed by the platform the figures were taken on: on `aarch64-apple-darwin` that
+mutex lowers to Apple's `pthread_mutex`, one of the two primitives Apple documents as
+priority-donating, so a callback arriving mid-hold boosts the nanosecond-scale owner ahead of all
+timeshare work instead of queueing behind it. **`try_lock` is refused explicitly**, and written
+down *because* it looks like the answer: it converts a rare few-microsecond wait into a rare
+10.67 ms hole, which is audibly worse than the thing it avoids. The lock-free single-producer ring
+that removes the question entirely was priced at ~+30 lines and declined.
+
+### Growth amortisation is cheap to count, and worse than it looks
+
+`Recorder::samples` in `crates/frontend/src/bin/zx-shot.rs` starts from `Vec::new()`, and
+`Resampler::feed` fills it one `push` at a time — so a `--wav` capture pays the whole amortised
+doubling schedule from a capacity of four.
+
+That is cheap to price and the price is not small. R-Type takes **28,429 frames of tape to load**,
+the number `zx-shot --keys-after` prints and the section above already leans on; at 50.08 Hz into a
+48 kHz device that is 27.2 M samples, **109 MB** of audio. Priced against the real growth policy by
+running it rather than recalling it: **24 reallocations**, **134 MB copied** — every byte recorded
+so far, moved again, twenty-four times — and at the last one the old buffer and the new one are
+both live, **201 MB** resident for a capture that ends at 109 MB.
+
+It is written down rather than fixed, and the reason is worth stating instead of leaving as a gap.
+A capacity hint needs a length, and the constructor is handed the *start* frame and not the end; a
+run with no tape has no end at all until the frame budget runs out. The one case where the number
+exists is the one `--keys-after` already computes — the `Tape::pulses` sum, the cassette end to end
+— so the remedy is conditional rather than a one-line change, which is exactly why it is a finding
+here and not a row in the campaign table.
+
+> **The brief priced this on a 189-second capture at *"≈72 MB copied, 54 MB peak"*, and two thirds
+> of that did not survive checking.** The doubling count did: 189 seconds is **23** reallocations,
+> exactly as briefed. The byte figures did not — they assume a final capacity equal to the data,
+> where Rust rounds up to a power of two, and the same 189 seconds measures **67.1 MB copied and
+> 100.7 MB live**. The figures above are on R-Type instead, because 28,429 frames is a number this
+> file already carries with its provenance and 189 seconds is not.
+
+### Without a garbage collector, the code does not always read honestly
+
+`crates/spectrum/src/memory.rs` builds its RAM and its ROM pages like this:
+
+```rust
+ram: Box::new([[0; PAGE_SIZE]; BANK_COUNT]),
+rom: Box::new([[0; PAGE_SIZE]; ROM_COUNT]),
+```
+
+Read literally that is 128 KB and 32 KB of array built on the stack and then moved to the heap —
+160 KB of temporary, in a workspace that also builds for `wasm32`, where the stack is small enough
+for that reading to matter. It is not what happens, and it was **checked with a disassembler rather
+than argued**. In the release binary those two lines are:
+
+```asm
+mov  w0, #0x20000        ; 131072 — eight banks of 16 KB
+mov  w1, #0x1
+bl   _calloc
+mov  w0, #0x8000         ; 32768 — two ROM pages
+mov  w1, #0x1
+bl   _calloc
+```
+
+Two zeroed heap allocations of exactly the right size, and no stack temporary anywhere: under this
+workspace's `lto = "fat"` the construction inlines into `zx_shot::run`, whose entire frame is
+`sub sp, sp, #0xd70` — 3,440 bytes. **State the scope, because the obvious reading is too strong.**
+This holds for a **zeroed** initialiser, where the compiler can route the allocation to the
+allocator's zeroing path; a non-zero one has to be built somewhere before it is moved, and the same
+line would then mean what it looks like.
+
+The flip side is why it was worth opening a disassembler for at all. No GC and no escape analysis
+means every allocation is one the author wrote — so an allocation finding is certain, and the
+*absence* of one is provable. `crates/z80` is that case: it is `#![cfg_attr(not(test), no_std)]`
+with no `extern crate alloc`, so in every non-test build **allocation does not compile.**
+
+> **The obvious way to check that was tried here first and proven insensitive, which is the part
+> worth keeping.** Counting `bl __rust_alloc` sites attributable to `crates/z80/src` in the probe's
+> assembly was written, then falsified: a mutation making `Cpu::step` build a `Vec` on every call
+> left that count at **zero**, because the call to the allocator sits inside `alloc`'s own code and
+> carries `alloc`'s `.loc` rather than the caller's. It was an assertion that could not fail.
+> `the_execute_path_allocates_nothing` in `crates/z80/tests/codegen.rs` replaced it with the two
+> structural lines above — a guarantee about every build rather than an observation about one — and
+> the mutation had to delete the `no_std` attribute before it could allocate at all. **A grep that
+> comes back empty is not a proof of absence; a compiler that refuses the program is.**
+
+Two of the six ended in a refusal, one in a correction to a sentence rather than to code, and one
+in a figure being dropped for want of a home. That ratio is the honest shape of allocation work in
+a language with no collector: the finding is nearly always real, because somebody wrote the
+allocation on purpose — and the repair is often worse than the defect, for the same reason. What
+separates the two is a measurement, and every number above has one behind it: an assembly listing,
+a four-minute browser run, a growth schedule executed rather than remembered.
+
+
+---
+
 ## Layout
 
 ```
