@@ -244,6 +244,13 @@ cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx-shot -- 
 cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx-shot -- \
     --media testdata/games/ManicMiner.tap --play-tape \
     --keys 'J;LeftControl+P;LeftControl+P;Enter' --settle 9800 --out title.ppm
+
+# The same load, kept. --snapshot writes the machine the picture is of, so the next start
+# is a file read rather than three minutes of cassette.
+cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx-shot -- \
+    --media testdata/games/ManicMiner.tap --play-tape \
+    --keys 'J;LeftControl+P;LeftControl+P;Enter' --keys-after Enter --hold 30 --settle 600 \
+    --snapshot manic.z80 --out manic.ppm
 ```
 
 | Flag | |
@@ -256,8 +263,17 @@ cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx-shot -- 
 | `--hold N` | frames each key is held. Default 10; **4 or fewer is missed by the ROM entirely, 5 registers, and 36 starts the 48K editor's auto-repeat** — both edges measured. Raise it for a game, which polls its own keys on its own terms and which nothing here has measured |
 | `--settle N` | frames after the last key |
 | `--play-tape` | press PLAY *after* the keys. A `.tap` loads nothing without it |
+| `--keys-after SCRIPT` | typed once the drive has stopped — by running out of cassette, or because `--pause-tape-at` said so. The wait is read off the tape, not guessed, and the frame it ended on is printed |
+| `--pause-tape-at FRAME` | repeats; stop the motor at a frame index and start it again after the keys. A loader that wants something mid-cassette can be answered nowhere else |
+| `--snapshot PATH` | the machine the picture is of, as a `.z80`. The same file `F2` writes, taken at the instant `--out` was rendered |
 | `--wav PATH` | what a device would have been handed, mono 16-bit at 48 kHz |
 | `--wav-from FRAME` | start recording at a frame index over the whole run |
+
+`--out` stays required even when `--snapshot` is given, and that is a decision rather than an
+oversight: every way one of these runs ends badly — a loader stopped on a publisher's logo, a
+`--settle` that landed on a black frame mid-clear, a machine that crashed into its own screen
+memory — is invisible in a `.z80` and obvious in the picture. Making the frame optional would let a
+shelf of snapshots be forged without anyone ever looking at one.
 
 There is no `--help`; `--help` is an unknown argument, and running with no `--out` prints the usage
 to stderr and exits 1. Convert the output with `sips -s format png title.ppm --out title.png` on
@@ -269,6 +285,55 @@ recipes, including how each image was taken and re-checked.
 texture, and a test asserts those are the same buffer. Headless it is not paced to 50 Hz, so the
 tape load above finishes in **about two seconds of wall clock** for a 10,000-frame run rather than
 three minutes.
+
+### Turning a folder of tapes into a shelf of cartridges
+
+`tools/forge.sh` runs the command above once per game and collects the results.
+
+```bash
+sh tools/forge.sh ~/games
+```
+
+It reads one recipe per line from `tools/cartridges.txt` — which file, which machine, what to type,
+how long to wait — and writes into `cartridges/`: a `<slug>.z80` that opens at once, a `<slug>.png`
+of the frame it opens on, an `index.json` a picker can read, and `_all.png`, every cover tiled so
+the shelf can be judged in one look. **`cartridges/` is gitignored**, for the reason `.gitignore`
+gives beside `testdata/games/`: a cartridge is a copy of somebody else's game.
+
+**A cartridge opens on the game's own menu — the screen where the player picks the control scheme
+and the mode — and not on the game already in play.** That distinction is the whole design. A
+shelf that opens mid-level has chosen the control scheme for the player, whichever one the recipe's
+key script happened to select, and has skipped the screen a person wants when they plug something
+in. So each recipe presses what is needed to *reach* the menu and stops before the key that would
+leave it, and each row records in a `menu` column what its screen offers — the joystick options and
+the mode options — which a picker prints and which is the evidence the target was reached.
+
+**The cover is a different moment, and each game is therefore forged twice.** Run 1 stops at the
+menu and writes the `.z80`; run 2 carries the same load further and writes the `.png`. They were
+once one instant — `--snapshot` was built so a picture and a machine state could not disagree — and
+the shelf that produced was a wall of menus: a grey rectangle reading SELECT JOYSTICK, a list of
+trainer pokes. Nobody recognises a game from a list of choices. A cover is now a frame of the game
+being played or the game's own drawn artwork, the `cover-keys` and `cover-settle` columns carry the
+second recipe, and `cover-shows` is what somebody saw when they opened the file.
+
+A mechanical gate backs that up: if the cover frame comes out **byte-identical** to the cartridge
+frame, the row fails, because two identical pictures mean the second run did nothing and the shelf
+would ship a photograph of its own menu.
+
+**Sources can live inside archives.** `zip:ARCHIVE.zip!MEMBER` unpacks that member into a scratch
+directory and loads it from there — the owner's folder is only ever read from, and nothing is
+unpacked inside the repository. The member is named rather than guessed because several archives
+carry a `SCRSHOT/*.SCR`, an `INFO/*.TXT` and a `POKES/*.POK` beside the tape, and one holds both
+sides of the same game.
+
+Three things about that table are worth knowing before editing it. Its `--settle` numbers are
+readings rather than guesses: a row that types after its load gets the wait from `--keys-after`,
+which asks the cassette and prints the frame it ran out on, and a row whose menu comes up on its
+own carries a number taken from a run that printed one. Its `verdict` column is a **human**
+reading, because `zx-shot` exits 0 for a machine parked on a crack's advertisement exactly as it
+does for one sitting on *Exolon*'s menu — somebody has to open the cover and say which it was. And
+a gap keeps its cover and gets a red title on the contact sheet, because a shelf with a hole
+quietly closed is a shelf that lies about what this emulator can load.
 
 ### What this is like at the moment
 

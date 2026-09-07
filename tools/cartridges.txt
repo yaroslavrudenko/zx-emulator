@@ -1,0 +1,152 @@
+# The recipe for every cartridge on the shelf. Read by `tools/forge.sh`; see that file's header
+# for what a cartridge is and why this table exists.
+#
+# ## The target is the MENU, not the game
+#
+# A cartridge comes up on **the game's own options screen** — the one where the player picks the
+# control scheme (KEYBOARD / KEMPSTON / CURSOR / INTERFACE II / SINCLAIR) and the mode (one
+# player, two players, define keys) — and it stops there. Not in play.
+#
+# That is not a preference, it is the difference between a cartridge and a save game. A shelf that
+# opens mid-level has already chosen the control scheme for the player — whichever one this
+# table's key script happened to select — and has skipped the screen a person wants when they plug
+# something in. So each recipe below presses exactly what is needed to *reach* the menu, and not
+# the key that would leave it: *Cybernoid* stops before `1 START GAME`, *R-Type* stops on the
+# trainer menu rather than pressing `3`, *Bomb Jack* stops before `K` picks the keyboard.
+#
+# ## Why a `|`-delimited table and not TOML or JSON
+#
+# Because `tools/forge.sh` is `/bin/sh` and this is the only format it can read without inventing
+# a parser. `while IFS='|' read -r ...` is one line of shell and has no failure mode; a TOML file
+# would need something to read it, that something would be a dependency this repository does not
+# have, and a hand-rolled shell TOML reader is a parser written to avoid writing a parser.
+#
+# The delimiter is `|` and not whitespace because **the source names contain spaces, brackets and
+# parentheses** — `Batty (1987)(Hit-Pak)[t].tap`, `Head Over Heels .tap` with the trailing space
+# its owner gave it — and a whitespace-split table would silently mangle over half of these rows.
+# Leading and trailing spaces around a field are stripped so the columns can be lined up to be
+# read.
+#
+# `#` starts a comment, blank lines are ignored, and one game is one line.
+#
+# ## The columns
+#
+#   slug        the file names: `<slug>.z80` is the cartridge, `<slug>.png` the cover
+#   title       what a picker would print. Kept short — the contact sheet draws it on the tile
+#   source      the game file, relative to the directory `forge.sh` is pointed at. A `repo:`
+#               prefix names a file in this repository instead; one row needs it, and says why
+#   model       48 or 128. It is the count of ROMs, and for a `.z80` it must match the file
+#   keys        `--keys`: typed at the ROM, before PLAY. `LOAD` is the `LOAD ""` script
+#   settle      `--settle`: frames after the last key, and the gap either side of `keys-after`
+#   hold        `--hold`: frames each key is held
+#   keys-after  `--keys-after`: typed once the drive has stopped. Empty for none
+#   verdict     menu | title | blocked — WHAT THE CARTRIDGE OPENS ON, decided by opening it
+#   menu        what that screen offers: the control schemes and the mode options. A picker
+#               prints it, and it is the evidence the cartridge reached its target
+#   cover-keys  the `--keys-after` script for the SECOND run, the one that makes the picture.
+#               It replaces the cartridge's after-keys rather than extending them, so a row
+#               whose best picture is its loading artwork writes nothing here and lets
+#               `cover-settle` stop the run mid-cassette
+#   cover-settle  the `--settle` for that second run
+#   cover-shows what is in the picture, written by somebody who opened it
+#   note        anything else worth knowing, and for a gap, what stopped it
+#
+# ## The cover is a picture of the game, and that is a gate rather than a preference
+#
+# A cover is a frame of the game being played, or the game's own drawn artwork — the commissioned
+# loading screen it paints while it loads, or a title screen that is a picture. **A menu is not a
+# cover.** Neither is a poke list, a plain text screen, loading stripes, a blank screen or a
+# publisher's logo: nobody recognises a game from a list of choices, and a cover nobody recognises
+# does not do the one job a cover has.
+#
+# The test is one question asked while looking at the PNG: *would a person who has never seen this
+# game recognise it from this picture?* If the answer is no the row is not finished, and the
+# remedy is to get further in — more starting keys, a longer settle, the other dump.
+#
+# ## A source can be a member of an archive
+#
+# `zip:ARCHIVE.zip!MEMBER` unpacks that member into a scratch directory and loads it from there.
+# The owner's folder is only ever read. The member is named rather than guessed because several
+# archives carry a `SCRSHOT/*.SCR`, an `INFO/*.TXT` and a `POKES/*.POK` beside the tape, and one
+# holds both sides of *Freddy Hardest* — picking by extension would have to choose between them.
+# `repo:` names a file in this repository instead, which one row needs and explains.
+#
+# `--play-tape` is not a column. It is not a choice: a tape needs PLAY and a snapshot is already
+# running, so `forge.sh` derives it from the source's extension using the same rule the emulator
+# uses to decide what the file is. A column would only be a way to get it wrong.
+#
+# ## Wait for the tape; do not guess how long it is
+#
+# `--keys-after` **asks the cassette**: it runs frames until the pulse train is spent, prints *"the
+# tape ran out at frame N"*, and only then types. That number is a reading of the file in the drive
+# and it is what `forge.sh` records as `tape_frames`. Every row that types after its load therefore
+# carries a small `--settle` — 600, 800, 2000 — that is only the gap either side of the keys.
+#
+# **Eight rows type nothing after their load, because their menu comes up on its own**, and those
+# carry a `--settle` past the end of the cassette instead. Those numbers are readings too, taken
+# from a run of the same row that did print one: *Bomb Jack* ends at 14,061 and its menu is up at
+# 15,000; *Rex* side 1 ends at 31,728 and its menu is up at 32,100. Where a screen cycles — *Bomb
+# Jack* alternates its menu with a high-score table, *Cybernoid* with a hall of fame — the number
+# was swept until the menu was the frame, which is the loop `docs/images/README.md` publishes.
+#
+# ## Two things that were measured here rather than assumed
+#
+# **A game's menu drops taps that arrive too close together.** `--hold 30` gives 30 frames held and
+# 30 released, and *Head Over Heels* answers roughly one tap in three at that spacing. That is why
+# a script that needs a key to land repeats it rather than trusting one tap.
+#
+# **`--hold` has an upper edge on a 48K and none on a 128.** Past 35 frames the 48K editor types
+# every tap in the script a second time, so `LOAD ""` never parses — reproduced by accident at
+# `--hold 100`, which put `LOAD LOAD LOAD LOAD…` on the screen and loaded nothing. A 128 booted to
+# its own menu never reaches that editor, so the `r-type` row could hold a key 200 frames if it
+# needed to. It no longer needs to: under the menu target it stops at the trainer screen.
+#
+# ## The three gaps, and what is behind each
+#
+# `batty` reaches its menu from a snapshot rather than from its cassette, and the row says so. The
+# forge gets a long way — `--pause-tape-at` holds the head still while the crack draws over the
+# game's own header, and the game then loads and puts its trainer's `Poke?` prompt on its own
+# loading screen — and then stops: **every key tried at that prompt abandons the load** and drops
+# the machine back to the editor with `Program: !Speccy` on the screen. Six keys were tried at the
+# frame where the prompt is live, and all six did it.
+#
+# `r-type-tap` and `r-type-tap-cz` are stopped by their own dumps rather than by this tool. Both
+# hold their levels in alternating 20-byte and ~13,000-byte blocks — a custom loader's own format,
+# not the ROM's — and `.tap` stores bytes with no timing, so a loader that reads at its own speed
+# has nothing to read. `r-type` itself is on the shelf, from the `.tzx`, which is the dump that
+# works.
+#
+# slug             | title                 | source                                                                              | model | keys  | settle | hold | keys-after  | verdict | menu                                                                                                           | cover-keys                                                                                          | cover-settle | cover-shows                                                                                    | note
+manic-miner      | Manic Miner           | Manic Miner (1983)(Bug-Byte Software).tzx                                           | 48    | LOAD  | 11000  | 30   |             | title   | no control choice offered; ENTER starts, and the key legend is on the screen                                   | Enter                                                                                               | 600          | Willy in Central Cavern, air bar draining, the first platforms and plants drawn                | Cartridge: its own title, PRESS ENTER TO START. The cassette ends at 10,603
+manic-miner-snap | Manic Miner           | Manic Miner (1983)(Bug-Byte Software).z80                                           | 48    |       | 600    | 30   |             | title   | no control choice offered; ENTER starts, and the key legend is on the screen                                   | Enter                                                                                               | 600          | Willy in Central Cavern, the same first cavern the cassette reaches                            | The same game from a snapshot rather than the tape, and it needs no cassette at all
+cybernoid        | Cybernoid             | Cybernoid.tzx                                                                       | 48    | LOAD  | 14600  | 30   |             | menu    | KEYBOARD / INTERFACE 2 / KEMPSTON; 1 START GAME, 2 DEFINE KEYS, 6 SOUND ON-OFF                                 | Key1;Key1                                                                                           | 1200         | The ship in flight over the first cavern, bombs and shield counters live                       | Cartridge: its own menu. One Key1 only cycles it to the hall of fame; two start the game
+cybernoid-snap   | Cybernoid             | Cybernoid - The Fighting Machine (1988)(Hewson Consultants)[a2][128K].z80           | 128   |       | 600    | 30   |             | menu    | KEYBOARD / INTERFACE 2 / KEMPSTON; 1 START GAME, 2 DEFINE KEYS, 6 SOUND ON-OFF                                 | Key1                                                                                                | 600          | The ship in flight over the first cavern, on a 128                                             | Already a cartridge when it arrived; this row re-forges the menu and takes a cover from it
+cybernoid-ii     | Cybernoid II          | Cybernoid II - The Revenge (1988)(Hewson Consultants)[128K].tap                     | 48    | LOAD  | 2000   | 30   | Space;Space | menu    | INTERFACE 2 / KEMPSTON; 1 START GAME, 2 DEFINE KEYS, 5 MUSIC ON-OFF                                            | Space;Space;Key1                                                                                    | 2000         | The Revenge in play, ship over the opening chamber with its bomb and shield gauges             | Two Spaces leave the loading screen and reach the menu; the third tap starts it and belongs only to the cover
+exolon           | Exolon                | Exolon (1987)(Hewson Consultants)[48-128K].tap                                      | 48    | LOAD  | 800    | 30   | Space;Space | menu    | KEYBOARD / INTERFACE 2 / KEMPSTON; 1 START GAME, 2 DEFINE KEYS                                                 | Space;Space;Key1                                                                                    | 800          | Vitorc on the first screen with the pillars and the planets, ammo and grenades on the panel    | Two Spaces leave the loading screen and reach the menu
+mario-bros       | Mario Bros            | Mario Bros (1987)(Erbe Software)[a][re-release].tzx                                 | 48    | LOAD  | 600    | 30   | Space;Space | menu    | REDEFINE KEYS; 1 = 1 PLAYER, 2 = 2 PLAYER                                                                      | Space;Space;Key1                                                                                    | 600          | The first floor in play, turtles and crabs on the girders and the POW block in the middle      | Two Spaces leave the loading screen and reach the OPTIONS screen
+batty            | Batty                 | repo:.agent-workspace/forge/batty-menu.z80                                                                 | 48    |       | 120    | 30   |             | menu    | KEYBOARD / KEMPSTON / CURSOR / INTERFACE II; 1 UP, 2 - 2 PLAYERS, 3 - DOUBLE PLAY, 0 - START GAME              | Key0                                                                                                | 900          | Batty in play, the bat and the brick wall                                                      | CARTRIDGE CAPTURED BY HAND, NOT FORGED. The owner reached this menu interactively on 2026-09-03 and saved it as snapshot-6.z80. THAT FILE HAS SINCE VANISHED from the repository root along with snapshot-2, -4 and -5; this row now loads a byte-for-byte copy my own probe took from it on 2026-09-04, kept in the agent workspace. What blocks a real forge is in this file's header
+bomb-jack        | Bomb Jack             | Bomb Jack.tzx                                                                       | 48    | LOAD  | 15000  | 30   |             | menu    | K = Keyboard, T = Keyboard Turbo, I = Sinclair I-F 2, P = Kempston; 1 = One Player Start, 2 = Two Player Start | K;Key1                                                                                              | 600          | The Egypt screen in play, Jack among the bombs with the sphinx and the pyramid behind          | Cartridge: Elite's own option screen. It alternates with a BEST BOMBERS table, so the settle was swept: 14,400 and 14,700 are the table, 15,000 is the menu
+head-over-heels  | Head Over Heels       | Head Over Heels .tap                                                                | 48    | LOAD  | 600    | 30   | Space       | menu    | KEYS-KEY JOYSTICK / KEMPSTON JOYSTICK / FULLER JOYSTICK; ENTER selects, any key moves the cursor               | Enter;Enter;Enter;Enter;Enter;Enter;Enter;Enter                                                     | 6000         | Inside a yellow isometric room, the character on the floor and the inventory strip below       | One Space leaves the Ocean title art for SELECT JOYSTICK. The game answers about one tap in three, so the cover needs eight Enters to cross two menus
+nebulus          | Nebulus               | Nebulus.tzx                                                                         | 48    | LOAD  | 14300  | 30   |             | title   | no control choice offered; 1 PLAYER and SOUND ON are the only options on the screen                            | Key0                                                                                                | 1200         | Pogo climbing the first tower with the sea below and the timer running                         | Cartridge: its own title. Key0 starts it where Enter and Space only cycle the attract
+rex-side-1       | Rex (side 1)          | Rex.tzx/Rex - Side 1.tzx                                                            | 48    | LOAD  | 32100  | 30   |             | menu    | 3 KEMPSTON / 4 CURSOR / 5 SINCLAIR; 1 SELECT, 2 DEFINE                                                         | Key3;Key3;Key3;Key3;Y;Y;Y;Y                                                                         | 1200         | In the level, the launcher on its platform among the red foliage                               | Cartridge: Rex's own control menu beside the logo. The cassette ends at 31,728
+rex-side-2       | Rex (side 2)          | Rex.tzx/Rex - Side 2.tzx                                                            | 48    | LOAD  | 14200  | 30   |             | title   | no control choice offered; this side is a demo and SPACE pauses it                                             | Key3;Key3;Key3;Key3                                                                                 | 1200         | The demo running its own level, score and shields on the panel                                 | Side two is not the game and says so: YOU ARE ABOUT TO SEE A DEMO OF REX
+r-type           | R-Type                | R-Type (1988)(Electric Dreams Software)[cr Torasoft][t +3 Torasoft][128K].tzx       | 128   | Enter | 28800  | 200  |             | menu    | no control choice; 0 ALL POKE AND START, 1 INFINITE LIVES, 2 TOTAL IMMUNITY, 3 START GAME                      | Key3;Space;Space;Space;Space;Space;Space;Space;Space;Space;Space;Space;Space;Space;Space;Space;Key0 | 600          | R-Type in flight over the surface, the BEAM meter charging                                     | Cartridge: the Torasoft trainer menu this release comes up on. Nine minutes of cassette. --hold 200 is safe here and would be a defect on a 48K: the 35-frame repeat edge is the 48K EDITOR's, and a 128 booted to its own menu never reaches it
+r-type-tap       | R-Type (side 1)       | Rtype/Rtype.tap                                                                     | 48    | LOAD  | 20000  | 30   |             | blocked | none reached                                                                                                   |                                                                                                     | 20000        |                                                                                                | Stops on its own REWIND SIDE 2 THEN PRESS ANY KEY. Its levels are in alternating 20-byte and 13,000-byte custom-loader blocks, which a .tap cannot carry at their own speed
+r-type-tap-cz    | R-Type (Czech)        | Rtype/Rtype_cz.tap                                                                  | 48    | LOAD  | 20000  | 30   |             | blocked | none reached                                                                                                   |                                                                                                     | 20000        |                                                                                                | Reaches the Czech trainer's three lives options and no further: choosing one answers NAHRAVAM DAL, STISKNETE TLACITKO and wants level blocks in the same custom-loader format
+durak | Durak | ДУРАК.tap | 48 | LOAD | 3000 | 30 | Space;Space | menu | Russian menu: МЕНЮ, ИСПОЛЬЗУЙТЕ Q И P ДЛЯ ВЫБОРА — Q and P move the selection | Space;Space;Enter | 3000 | A fanned hand of cards with the deck at the right and a row of played cards below; the red panel and the Q-and-P line are still on the screen | A Cyrillic filename, carried through the manifest unchanged; the reader and the slug were checked against it before the row was written
+seadragon | Sea Dragon | SeaDragon (NO GS).tap | 128 | Enter | 32000 | 30 |  | menu | 1 CONTROLS, 2 MUSIC, 3 SOUND, 4 LEVEL, 0 START — its own options screen | Key0 | 1200 | The submarine cavern in play: red seabed under a blue sea with a surface ship above, mines on their tethers, and the AIR bar draining | A 128, on the tape's own evidence: four blocks all load to 49152, which is bank switching and nothing else. The NO GS build is the one without General Sound hardware
+crosswize | Crosswize | zip:Crosswize (1988)(Firebird Software).zip!Crosswize (1988)(Firebird Software).z80 | 48 |  | 600 | 30 |  | menu | 1 KEYBOARD, 2 KEMPSTON, 3 2 PLAYER, 4 SET KEYS | Key1 | 900 | In play over the rooftops, sprites in the air, with the two-player score panel and the CROSSWIZE bar below | A version-1 .z80, which is always a 48K; already a cartridge, so this row only chooses a control scheme for its cover
+donkey-kong | Donkey Kong | zip:DonkeyKong.tap.zip!DonkeyKong.tap | 48 | LOAD | 5000 | 30 | Space;Space | menu | 1 KEYBOARD, 2 KEMPSTON, 3 CURSOR, 4 SINCLAIR, 5 REDEFINE KEYS, 6 SOUND 48K-128K; ENTER TO START GAME |  | 12000 | The commissioned loading artwork: the DONKEY KONG logo over Kong, Mario and the girders | Two Spaces cross a credits screen to the menu. The cassette ends at 13,594; the cover is taken mid-cassette, where the artwork is up
+f1-tornado       | F1 Tornado            | zip:F1Tornado.tap.zip!F1TORNAD.TAP                                                  | 48    | LOAD  | 15200  | 30   |             | title   | no control menu was found; the tape runs into the simulator itself                                             | Space                                                                                               | 600          | The cockpit in flight over the sea, ships and aircraft ahead, weapon and score panel below     | The cassette ends at 14,924
+freddy-hardest-1 | Freddy Hardest (1)    | zip:FreddyHardest.tap.zip!Freddy Hardest - Side 1 (Spanish).tap                     | 48    | LOAD  | 15000  | 30   |             | title   | no menu on this side; side two is where the control choice lives                                               |                                                                                                     | 10000        | The commissioned loading artwork: FREDDY HARDEST over the hero and a green alien, Dinamic 1987 | The cassette ends at 14,676. The two sides are two members of one archive and are forged as two rows
+freddy-hardest-2 | Freddy Hardest (2) | zip:FreddyHardest.tap.zip!Freddy Hardest - Side 2 (Spanish).tap | 48 | LOAD | 600 | 30 | Space | menu | 1-TECLADO (keyboard), 2-KEMPSTON, 3-REDEFINE — Dinamic's own Spanish menu |  | 10000 | The commissioned Dinamic loading artwork: FREDDY HARDEST over the hero and the green alien | One Space leaves the artwork for the menu. That menu will not start the game on its own — this is the second load of a two-part game and its options sit inert without part one — so the cover is the artwork it paints while loading
+game-over-128    | Game Over (128)       | zip:GameOver128(ImagineSoftwareLtd).z80.zip!GAMEO128.Z80                            | 128   | Space | 900    | 30   |             | menu    | 1 KEYBOARD, 2 JOYSTICK, 3 PLAY, 4 WORLD 2                                                                      | Key3                                                                                                | 1200         | Game Over in play on the 128                                                                   | A version-2 .z80 whose hardware byte reads 4, which is a 128; already a cartridge, and one key takes it from its artwork to its menu
+game-over-1      | Game Over (part 1)    | zip:GameOverPart1_48(SummitSoftware1).tap.zip!Game Over - Part 1 (Summit).tap       | 48    | LOAD  | 600    | 30   | Space       | menu    | 1 KEYS, 2 JOYSTICK, 3 PLAY                                                                                     | Space;Key3                                                                                          | 1200         | Part one in play                                                                               | The Summit release of part one. Part one and part two are sequential loads of one game and are forged as two cartridges
+game-over-2 | Game Over (part 2) | zip:GameOverPart2_48(ImagineSoftwareLtd).tap.zip!GAMEOVER.TAP | 48 | LOAD | 600 | 30 | Space | menu | 1 KEYS, 2 JOYSTICK, 3 PLAY, 4 ACCES CODE |  | 9000 | The commissioned Imagine loading artwork: the armoured figure that made this game's cover famous | The Imagine release of part two, which asks for the access code part one gives. Its menu will not start without that code, so the cover is the artwork it paints while loading
+hate             | H.A.T.E.              | zip:H.A.T.E..tap.zip!HATE.TAP                                                       | 48    | LOAD  | 600    | 30   | Space       | menu    | 1 KEYBOARD, 2 SINCLAIR, 3 KEMPSTON, 4 PROTEK-AGF; 5 DEMO, 6 START GAME                                         | Space;Key1;Key6                                                                                     | 1200         | Hostile All-Terrain Encounter in play over its yellow grid landscape                           | One Space leaves the loading artwork for the SELECT panel
+harrier-attack | Harrier Attack | zip:HarrierAttack.tap.zip!HARRIER.TAP | 48 | LOAD | 600 | 30 | Space | title | no control choice; the prompt is ENTER SKILL LEVEL (1 TO 5), which is the mode choice | Space;Key1 | 1200 | In flight over the sea with an enemy carrier below and the SPEED, FUEL, ROCKETS and BOMBS gauges across the panel | The smallest cassette on the shelf at 13,527 bytes, and a 1983 Durell title
+eagles-nest | Into the Eagle's Nest | zip:IntoTheEaglesNest.tap.zip!EAGLESNS.TAP | 48 | LOAD | 600 | 30 | Space | menu | SELECT LEVEL 1 — the level is the choice, with AMMO, KEYS and HITS on the panel | Space;Space;Space | 3000 | Inside the castle in play, guards on the yellow floor and AMMO 99 on the panel | One Space leaves the loading artwork for the level select
+lode-runner | Lode Runner | zip:LodeRunner48.tap.zip!LODERUNN.TAP | 48 | LOAD | 600 | 30 | Space | menu | 1 KEYBOARD, 2 KEMPSTON, 3 INTERFACE 2, 4 CURSOR, 5 REDEFINE KEYS; 6-8 LOAD-SAVE-EDIT SCREENS, 0 START GAME | Space;Key0;Space | 1500 | A level in play: brick ledges, ladders and gold, with SCORE, LIVES and LEVEL on the panel | The fullest menu on the shelf: five control schemes and a screen editor
+manic-miner-2    | Manic Miner No 2      | zip:ManicMiner-2.tap.zip!Manic Miner #2.tap                                         | 48    | LOAD  | 600    | 30   | Space       | title   | no control choice offered; PRESS ENTER TO START, with the key legend on the screen                             | Space;Enter                                                                                         | 900          | A cavern of Manic Miner No 2 in play                                                           | NOT the Bug-Byte Manic Miner already on this shelf: this is R.D. Foord Software's 1985 sequel, a different game with the same title screen shape
+nebulus-tap | Nebulus (tap) | zip:Nebulus.tap.zip!NEBULUS.TAP | 48 | LOAD | 600 | 30 | Space | title | no control choice offered; 1 PLAYER and SOUND ON are the only options, as on the other dump | Space;Key0 | 1200 | Pogo climbing the first tower with the sea below | An alternate dump of a game already on this shelf. It reaches the identical screen the .tzx row does and offers no more control choice, so it is recorded rather than preferred: three Nebulus rows are three dumps, not three games
+nebulus-tzx-alt | Nebulus (tzx alt) | zip:Nebulus.tzx.zip!Nebulus.tzx | 48 | LOAD | 600 | 30 | Space | title | no control choice offered; 1 PLAYER and SOUND ON are the only options, as on the other dump | Space;Key0 | 1200 | Pogo climbing the first tower with the sea below | A second alternate dump, byte-different from the loose .tzx and landing on the identical screen. Kept for the same reason and with the same verdict: not a better dump, just another one

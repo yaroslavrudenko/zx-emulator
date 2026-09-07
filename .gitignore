@@ -68,6 +68,23 @@ testdata/**
 # directory where committing by default means redistributing somebody else's game.
 !testdata/games/
 !testdata/games/PROVENANCE.md
+#
+# `tools/forge.sh` writes `cartridges/`, and every file in it is covered by the sentence directly
+# above. A cartridge is a `.z80` of a machine with a game loaded into it — the game's own code, its
+# own screen, its own data, in a container this project can also write — so it is a copy of that
+# game and nothing about the copy being made by an emulator changes whose copyright it is. The
+# cover beside it is a picture of the game's screen and is the same answer.
+#
+# So the rule is the games rule, applied to the directory that produces sixteen of them at a time,
+# and it is here rather than in `tools/forge.sh` because this is the file a reviewer reads when
+# asking what this repository redistributes. `index.json` and `_all.png` are ignored with them:
+# the index names every source file the owner happens to hold, which is nobody else's business,
+# and the contact sheet is sixteen game screens in one image.
+#
+# The whole directory, unlike the two blocks above, because there is nothing in it that could ever
+# be an exception — no README to rescue, no permission to read. A `!cartridges/…` line added later
+# is a redistribution, and there is no version of it that is not.
+/cartridges/
 /.agent-workspace/
 # Agent scratch space, and the same hazard as `/target` for the same reason. Worktrees created
 # under `.claude/worktrees/` each carry their own full build directory — 1.7 GB in the one that

@@ -129,6 +129,102 @@
 //! game is up to receive them and after them so what they did is on the picture. It is an
 //! explicit number because it is genuinely a guess, and the frame the tape ran out on is printed
 //! on the way past so the guess starts from a reading.
+//!
+//! # `--pause-tape-at`, and the button this tool did not have
+//!
+//! Everything above types at two moments and only two: before PLAY, and once the cassette has run
+//! out. **A tape loader that wants something in between could not be answered at all**, and the
+//! shape it takes is not exotic — three of sixteen games in one ordinary folder are stopped by it.
+//! Two ask for a side change; the third is worse and is worth setting out, because it is not a
+//! keypress problem at all.
+//!
+//! A cracked *Batty* loads a BASIC program that draws a full-screen advertisement and then falls
+//! through to `LOAD ""`. Reading the machine's own `PC` out of snapshots taken across the load —
+//! `0x05E9` at frame 1,000, `0x8042` at 1,300, `0x0574` from 2,200 onwards — shows what happens:
+//! the crack's routine holds the CPU in RAM for something like nine hundred frames, the game's own
+//! `BATTY` header goes past the heads during exactly that window, and by the time the ROM's
+//! `LD-BYTES` is listening again the only thing left on the cassette is a `Bytes` header, which
+//! `LOAD ""` will not take. **The machine then waits for a header that will never come, forever,
+//! with the advertisement still on the screen** — which reads as *"this crack is broken"* and is
+//! nothing of the sort. The owner reached that game's menu by hand on a real emulator window in
+//! about a second, because a person watching a screen presses PAUSE.
+//!
+//! That is the whole of this flag. `--pause-tape-at FRAME` stops the motor at a frame index over
+//! the whole run — the unit `--wav-from` already counts in — and starts it again once the
+//! after-keys have been typed. Nothing about the cassette changes while it is stopped, so the
+//! frame it now runs out on is the old one plus the length of the pause, which is arithmetic
+//! rather than a second reading of the pulse train.
+//!
+//! ```sh
+//! cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx-shot -- \
+//!     --media Batty.tap --play-tape --keys 'J;LeftControl+P;LeftControl+P;Enter' \
+//!     --pause-tape-at 1150 --settle 700 --out batty.ppm --snapshot batty.z80
+//! ```
+//!
+//! **It generalises `--keys-after` rather than competing with it**, and the generalisation is the
+//! reason this is one flag and not two. That script's rule used to be *"typed once the tape has
+//! played out"*; it is now *"typed once the drive has stopped"*, and running out of tape is one of
+//! the two ways a drive stops. So a run with no pause behaves exactly as it did, a run with a
+//! pause types into the window instead, and there is no third case and no flag that changes what
+//! another flag means. A pause with no `--keys-after` at all is a legitimate run and is what
+//! *Batty* needs: nothing has to be pressed, the head simply has to hold still while somebody
+//! else's loader finishes drawing.
+//!
+//! # `--snapshot`, and why the picture is still required
+//!
+//! Everything above is spent reaching a machine that the process then throws away. A tape load is
+//! minutes of emulated cassette and a `--settle` somebody swept for; what it produces is a
+//! `Spectrum` in a state nothing can get back to except by running the whole thing again.
+//! `--snapshot` keeps it. [`media::save`] writes that machine as a `.z80`, which loads in the time
+//! it takes to read 40 KB — the difference between a cassette and a cartridge, and the only
+//! difference: it is the same machine, not a re-creation of one.
+//!
+//! ```sh
+//! cargo run --release --manifest-path crates/frontend/Cargo.toml --bin zx-shot -- \
+//!     --media testdata/games/ManicMiner.tap --play-tape \
+//!     --keys 'J;LeftControl+P;LeftControl+P;Enter' --settle 11750 \
+//!     --snapshot manic-miner.z80 --out manic-miner.ppm
+//! ```
+//!
+//! **It is [`media::save`] and nothing else, which is what makes it the same file `F2` writes.**
+//! `src/main.rs`'s `write_snapshot` is [`host::free_path`] for the name and that one call for the
+//! bytes; this is [`Options::snapshot`] for the name and that one call for the bytes. A second
+//! writer would be a second `.z80` encoder to disagree with the first, in a repository whose
+//! `media.rs` header already says what a second copy of a decision is for.
+//!
+//! **The state is taken at the instant the frame is rendered**, from the same `machine`, with no
+//! frame run between the two. So the picture is not *about* the snapshot — it **is** the snapshot,
+//! seen. A cover taken a hundred frames earlier or later would be a claim about the state rather
+//! than a reading of it, and the whole point of writing both is that neither has to be trusted.
+//!
+//! > **That paragraph argued for a use this flag no longer has, and the argument was sound while
+//! > it lasted.** It is kept because the property is still exactly true of any one run — `--out`
+//! > and `--snapshot` cannot disagree, and nothing here has changed that. What changed is the
+//! > *conclusion drawn from it*: `tools/forge.sh` used to take a game's picture and its cartridge
+//! > from this single instant, and the shelf that produced was a wall of **menus** — a grey
+//! > rectangle reading SELECT JOYSTICK, a list of trainer pokes — because the instant a cartridge
+//! > should open on is the instant a cover should not. Nobody recognises a game from a list of
+//! > choices. The forge now runs each game twice, stops the first at the menu for the `.z80` and
+//! > carries the second into the game for the `.png`, and those two files are deliberately
+//! > **different moments**. The invariant above is what makes each of them individually
+//! > trustworthy; it was never an argument that one run should have to serve both purposes, and
+//! > reading it as one cost a shelf nobody could browse.
+//!
+//! **`--out` stays required, and that is a decision rather than an oversight.** Every way a run of
+//! this binary can end badly is invisible in a `.z80` and obvious in a frame: a loader that stopped
+//! on a publisher's logo, a `--settle` that landed mid-clear on a black rectangle, a machine that
+//! crashed into the middle of its own screen memory. A snapshot is *bytes that parse*, which is a
+//! much weaker statement than *a machine somebody has looked at*, and making the picture optional
+//! would let a shelf of them be forged without anyone ever looking. That is the shape this file's
+//! header already complains about twice — a gate that grades less than it appears to — and the
+//! render it would save costs one frame at the end of a run of thousands.
+//!
+//! The success line names which machine the file describes, because a `.z80` carries its own model
+//! and the **count of `--rom`s** on any later command line has to agree with it. `docs/RUNNING.md`
+//! publishes the refusal that comes of not knowing —
+//! *"a 128 snapshot cannot be restored into a 48K"* — and the one thing that fixes it is naming
+//! the other ROM, which is a thing to be told at the moment the file is written rather than
+//! discovered a week later.
 
 use std::process::ExitCode;
 
@@ -258,7 +354,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: zx-shot --out PATH [--rom PATH]... [--media PATH]... [--frames N]\n\
                  \x20                     [--keys SCRIPT] [--keys-after SCRIPT] [--hold N]\n\
-                 \x20                     [--settle N] [--wav PATH] [--wav-from FRAME]\n\
+                 \x20                     [--settle N] [--pause-tape-at FRAME]\n\
+                 \x20                     [--snapshot PATH] [--wav PATH] [--wav-from FRAME]\n\
                  one --rom is a 48K; two are a 128, editor ROM first\n\
                  --media takes a {MEDIA_FORMATS}\n\
                  --hold is frames per key, and has an edge at each end: under \
@@ -267,8 +364,12 @@ fn main() -> ExitCode {
                  every one of them. A game's menu may\n\
                  \x20  want the top of that range; the gallery's game shots use 30\n\
                  --play-tape presses PLAY after the keys: a .tap loads nothing without it\n\
-                 --keys-after types once the tape has played out, which is how a loaded game is\n\
+                 --keys-after types once the drive has stopped, which is how a loaded game is\n\
                  \x20  started; --settle is then the gap either side of it\n\
+                 --pause-tape-at stops the drive at a frame index and starts it again after the\n\
+                 \x20  keys: a game that wants something mid-cassette can only be answered there\n\
+                 --snapshot writes the machine the picture is of, as a .z80 that loads at once:\n\
+                 \x20  the same file F2 writes, and the same instant --out was rendered from\n\
                  --wav writes what a device would have been handed, mono 16-bit at 48 kHz\n\
                  --wav-from skips to a frame index over the whole run: a tape load is ~9244"
             );
@@ -307,6 +408,20 @@ struct Options {
     /// then shipped in the headless tool. A flag is the fix, because pressing PLAY is an
     /// emulator control and belongs beside `--frames` rather than inside a key script.
     play_tape: bool,
+    /// The frame indices at which the drive is stopped, in the order given.
+    ///
+    /// See this file's header. Empty is the ordinary run, where the only thing that stops the
+    /// cassette is running out of it. It **repeats**, for the same reason `--rom` and `--media`
+    /// do — a loader that asks for something twice is answered twice — and *Batty* is the game
+    /// that needs it: once while a crack draws over the game's own header, and again at the
+    /// trainer prompt that gates the code block.
+    pause_tape_at: Vec<u64>,
+    /// Where to write the machine the picture is of, as a `.z80`, if anywhere.
+    ///
+    /// Optional where [`Options::out`] is required, and this file's header says why: a frame is
+    /// what makes a snapshot inspectable, so a run may reasonably want only the picture and no
+    /// run should be able to want only the state.
+    snapshot: Option<String>,
     /// Where to write what a device would have been handed, if anywhere.
     wav: Option<String>,
     /// The frame index, over the whole run, at which recording starts.
@@ -470,13 +585,40 @@ fn run(arguments: &[String]) -> Result<String, String> {
     // The second half of the run, and the only one a tape-loaded game can be started from. The
     // shape deliberately mirrors the block above — wait for the thing, type at it, let the screen
     // catch up — because it is the same three steps against a different event.
-    if !options.after.is_empty() {
+    // Every window the run was told to open: stop the head, type into the gap, start it again.
+    // The cassette does not move while the head is still, so the frame it runs out on is the old
+    // one plus the frames it stood still — arithmetic, not a second reading of the pulse train.
+    //
+    // **The keys are typed in the last window and nowhere else, and that was measured.** An
+    // earlier draft typed the script into every window on the reasoning that a key landing in a
+    // machine that is not asking for one is harmless. It is not: *Batty*'s first window sits over
+    // a `LOAD ""` in progress, and a tap there drops the machine into the editor with
+    // `Program: !Speccy` on the screen and the load abandoned — photographed four times, once per
+    // candidate key, before the rule changed. An earlier window exists to get *past* something;
+    // only the last one is the moment the run was steering toward.
+    let mut stood_still = 0;
+    let last = options.pause_tape_at.len().saturating_sub(1);
+    for (window, &at) in options.pause_tape_at.iter().enumerate() {
+        let stopped = stop_the_tape(&mut machine, &mut recorder, at);
+        let taps: &[Vec<KeyCode>] = if window == last { &options.after } else { &[] };
+        type_at_the_stopped_drive(&mut machine, &mut recorder, taps, &options);
+        machine.tape_mut().play();
+        stood_still += recorder.elapsed - stopped;
+    }
+
+    // Then the ordinary wait, whichever way the drive came to a stop. A run with no window waits
+    // for the cassette and types there, exactly as it always did; a run with windows has already
+    // typed in them and waits here only for whatever is left of the tape.
+    if !options.pause_tape_at.is_empty() {
+        wait_for_the_tape(
+            &mut machine,
+            &mut recorder,
+            tape_ends_at.map(|end| end + stood_still),
+        );
+        recorder.advance(&mut machine, options.settle);
+    } else if !options.after.is_empty() {
         wait_for_the_tape(&mut machine, &mut recorder, tape_ends_at);
-        recorder.advance(&mut machine, options.settle);
-        for tap in &options.after {
-            press(&mut machine, &mut recorder, tap, options.hold);
-        }
-        recorder.advance(&mut machine, options.settle);
+        type_at_the_stopped_drive(&mut machine, &mut recorder, &options.after, &options);
     }
 
     // The pipeline, identical to the window's up to the last line.
@@ -488,6 +630,15 @@ fn run(arguments: &[String]) -> Result<String, String> {
     host::save(&options.out, &ppm::encode(&rgba)).map_err(|error| error.to_string())?;
 
     let mut wrote = options.out;
+    if let Some(path) = options.snapshot {
+        // No frame between this and the render above, deliberately: the cover and the cartridge
+        // are one instant or they are two claims, and the second is what a reader would have to
+        // take on trust.
+        host::save(&path, &media::save(&machine)).map_err(|error| error.to_string())?;
+        // The model, because the file carries its own and the next command line's `--rom` count
+        // has to agree with it. Said here rather than left to the refusal a mismatch earns.
+        wrote = format!("{wrote} and {path}: {}", snapshot_note(machine.model()));
+    }
     if let Some(path) = options.wav {
         let bytes = wav::encode(&recorder.samples, DEVICE_HZ).map_err(|error| error.to_string())?;
         host::save(&path, &bytes).map_err(|error| error.to_string())?;
@@ -503,6 +654,26 @@ fn run(arguments: &[String]) -> Result<String, String> {
         );
     }
     Ok(wrote)
+}
+
+/// What the success line calls the machine a `.z80` describes.
+///
+/// [`Model`] has no [`Display`](std::fmt::Display) and is not given one here: that would put a
+/// presentation decision in the library for the benefit of one line in one binary, and the window
+/// already spells the same two machines its own way in its own status bar.
+///
+/// **The whole clause and not the name, because the wildcard is forced.** [`Model`] is
+/// `#[non_exhaustive]`, which — in `media.rs`'s own words about [`media::Kind`] — *"obliges a
+/// wildcard in every **other** crate and obliges nothing inside this one"*. This is another crate,
+/// so the compiler cannot stop the build for a model added later; a `_ => "48K"` would announce
+/// that machine as a 48K and be believed. Returning the sentence lets the third arm decline to
+/// name what it does not know, which is the only answer available to it that is true.
+const fn snapshot_note(model: Model) -> &'static str {
+    match model {
+        Model::Spectrum48K => "a 48K snapshot",
+        Model::Spectrum128 => "a 128 snapshot",
+        _ => "a snapshot of a machine this binary has no name for",
+    }
 }
 
 /// Frames the tape in the drive needs to play from end to end.
@@ -557,6 +728,53 @@ fn wait_for_the_tape(machine: &mut Spectrum, recorder: &mut Recorder, ends_at: O
     println!("--keys-after: waited {waited} frames; the tape ran out at frame {end}");
 }
 
+/// `--settle`, the after-keys, `--settle`: leave the machine alone, type at it, leave it alone.
+///
+/// One function because it is one idea used at two different moments — at a window the run opened
+/// with `--pause-tape-at`, and at the end of a cassette that stopped by itself — and because two
+/// copies of *"the gap either side of the keys"* are two things to get out of step. The gap is on
+/// both sides for the reason this file's header gives: before, so the game is up to receive the
+/// keys, and after, so what they did is on the picture.
+fn type_at_the_stopped_drive(
+    machine: &mut Spectrum,
+    recorder: &mut Recorder,
+    taps: &[Vec<KeyCode>],
+    options: &Options,
+) {
+    recorder.advance(machine, options.settle);
+    for tap in taps {
+        press(machine, recorder, tap, options.hold);
+    }
+    recorder.advance(machine, options.settle);
+}
+
+/// Run frames until `at`, then stop the drive, and say what was left on the tape.
+///
+/// The frame the head stopped on is returned so the caller can shift the cassette's end by the
+/// length of the pause. It is `recorder.elapsed` rather than `at`, because a pause asked for at a
+/// frame the run has already passed happens **now** — the alternative is running time backwards.
+fn stop_the_tape(machine: &mut Spectrum, recorder: &mut Recorder, at: u64) -> u64 {
+    recorder.advance(machine, at.saturating_sub(recorder.elapsed));
+    let was_playing = machine.tape().is_playing();
+    machine.tape_mut().stop();
+    // Not silence, for the reason `wait_for_the_tape` gives about its own missing flag: a pause
+    // asked for on a drive that was never started, or one that had already wound off, is what a
+    // forgotten `--play-tape` and a mistyped frame both look like, and the two are worth telling
+    // apart before somebody sweeps a number for an hour.
+    if was_playing {
+        println!(
+            "--pause-tape-at: drive stopped at frame {}",
+            recorder.elapsed
+        );
+    } else {
+        println!(
+            "--pause-tape-at: the drive was not turning at frame {}, so nothing was stopped",
+            recorder.elapsed,
+        );
+    }
+    recorder.elapsed
+}
+
 /// Hold `tap` for `hold` frames, then release for the same, through the real keymap.
 fn press(machine: &mut Spectrum, recorder: &mut Recorder, tap: &[KeyCode], hold: u64) {
     for _ in 0..hold {
@@ -577,6 +795,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     let mut settle = SETTLE_FRAMES;
     let mut hold = HOLD_FRAMES;
     let mut play_tape = false;
+    let mut pause_tape_at = Vec::new();
+    let mut snapshot = None;
     let mut wav = None;
     let mut wav_from = 0;
     let mut taps = Vec::new();
@@ -616,6 +836,18 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
                     .map_err(|_| format!("--hold wants a whole number, not {raw:?}"))?;
             }
             "--play-tape" => play_tape = true,
+            "--pause-tape-at" => {
+                let raw = next(&mut rest, flag)?;
+                pause_tape_at.push(
+                    raw.parse().map_err(|_| {
+                        format!("--pause-tape-at wants a whole number, not {raw:?}")
+                    })?,
+                );
+            }
+            // Takes a path rather than being a bare switch beside `--out`, because the two files
+            // are wanted under different names: `--out` is the cover and `--snapshot` is the
+            // cartridge, and a tool assembling a shelf of them names both.
+            "--snapshot" => snapshot = Some(next(&mut rest, flag)?),
             "--wav" => wav = Some(next(&mut rest, flag)?),
             "--wav-from" => {
                 let raw = next(&mut rest, flag)?;
@@ -650,6 +882,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         settle,
         hold,
         play_tape,
+        pause_tape_at,
+        snapshot,
         wav,
         wav_from,
         taps,
@@ -710,6 +944,8 @@ fn script(source: &str) -> Result<Vec<Vec<KeyCode>>, String> {
 /// functions, so what is measured is what `--keys --hold N` does.
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use spectrum::screen;
 
     use super::*;
@@ -876,6 +1112,167 @@ mod tests {
              after ENTER: {:?}",
             MEASURED_KEY_REPEAT_DELAY_FRAMES + 1,
             repeated.settled.trim(),
+        );
+    }
+
+    /// The 48K ROM's tape loader: `LD-BYTES` and the edge-counting routines it lives in.
+    ///
+    /// A machine parked anywhere in here is **waiting for a header**. That is the whole of the
+    /// defect below: the header it is waiting for went past the heads while somebody else's code
+    /// held the CPU, and nothing on the rest of the cassette will satisfy it.
+    ///
+    /// # The upper bound is the ROM's, and the first draft's was the observations'
+    ///
+    /// It read `0x05E9` — `LD-DEC`, where the byte loop turns over — and that was wrong by the
+    /// width of the two routines the loop spends most of its time inside: `LD-EDGE-2` at `0x05E3`
+    /// and `LD-EDGE-1` at `0x05E7` run on to `LD-SAMPLE` and the `RET` at `0x0604`. Snapshots of
+    /// this very load were taken at `0x0574`, `0x05E9`, `0x05EA`, `0x05F5` and `0x05F6`, and a
+    /// bound drawn under the last two would have reported *"the machine has left the loader"*
+    /// about a machine sitting in the middle of it. The bound is the routine's end, so which of
+    /// its instructions a sample happens to land on cannot change the answer.
+    const LD_BYTES: std::ops::RangeInclusive<u16> = 0x0556..=0x0604;
+
+    /// The `--pause-tape-at` frame that holds the head still through the crack's routine.
+    ///
+    /// Measured, and the edges either side are why it is not a round number: at 1,000 the pause
+    /// lands **inside** the block still being read and the load ends in `R Tape loading error`,
+    /// and by about 1,600 the game's own header has already gone past and the pause changes
+    /// nothing. `docs/images/README.md`'s sweep procedure, run on a tape position rather than on
+    /// a `--settle`.
+    const PAUSE_AT: u64 = 1400;
+
+    /// A `--pause-tape-at` frame beyond the end of this cassette, which is the control.
+    ///
+    /// # Why the control also passes the flag, instead of leaving it off
+    ///
+    /// So that the **only** difference between the two runs is the number. A control that omitted
+    /// `--pause-tape-at` would differ in its shape as well — no window, no shifted wait — and any
+    /// difference in the result could be put down to that. Here both runs open a window, run the
+    /// same settles and wait the same way; one lands where the head is still reading and the other
+    /// lands after the tape has wound off, where stopping an already-stopped motor does nothing.
+    ///
+    /// The cassette is about 9,450 frames from PLAY on this dump, so this is past it and the run
+    /// costs no more than the subject's.
+    const PAUSE_PAST_THE_END: u64 = 9_600;
+
+    /// The display file: 6,144 bytes of pixels at `0x4000`, without the attributes.
+    ///
+    /// **Pixels only, and no border, because the ROM's loader paints both while it searches.** A
+    /// comparison that included the flashing border stripes would differ between any two frames
+    /// and would therefore pass whatever the flag did — which is exactly the shape the mutation
+    /// that broke this test's first draft exploited. Nothing writes the display file while
+    /// `LD-BYTES` is looking for a header, so this is the one part of the picture that is stable.
+    const DISPLAY_FILE: std::ops::Range<u16> = 0x4000..0x5800;
+
+    /// What is drawn on `machine`'s screen, as bytes.
+    fn drawn(machine: &Spectrum) -> Vec<u8> {
+        DISPLAY_FILE
+            .map(|address| machine.memory().read(address))
+            .collect()
+    }
+
+    /// Load `Batty` from `tape` with the head stopped at `pause`, and hand back the machine.
+    ///
+    /// It goes through [`run`] — the binary's own argument parsing, frame loop and `--snapshot`
+    /// writer — and then reads the machine back out of the `.z80` that wrote. Driving
+    /// [`Recorder`] and [`spectrum::tape::Tape::stop`] directly from here would be quicker and
+    /// would grade a copy of the flag rather than the flag.
+    fn batty_after(rom: &Path, tape: &Path, settle: u64, pause: u64) -> Spectrum {
+        let stem = format!("pause{pause}");
+        let out = std::env::temp_dir().join(format!("zx-shot-{stem}.ppm"));
+        let snapshot = std::env::temp_dir().join(format!("zx-shot-{stem}.z80"));
+        let arguments = vec![
+            "--rom".to_owned(),
+            rom.display().to_string(),
+            "--media".to_owned(),
+            tape.display().to_string(),
+            "--keys".to_owned(),
+            LOAD_SCRIPT.to_owned(),
+            "--play-tape".to_owned(),
+            "--settle".to_owned(),
+            settle.to_string(),
+            "--out".to_owned(),
+            out.display().to_string(),
+            "--snapshot".to_owned(),
+            snapshot.display().to_string(),
+            "--pause-tape-at".to_owned(),
+            pause.to_string(),
+        ];
+        run(&arguments).expect("the corpus is present and the arguments are this file's own");
+
+        let bytes = std::fs::read(&snapshot).expect("--snapshot just wrote it");
+        let rom_image = std::fs::read(rom).expect("the ROM that was read a moment ago");
+        let mut machine = media::start(&[&rom_image]).expect("one ROM is a 48K");
+        media::load_named(&mut machine, "cartridge.z80", &bytes).expect("this crate wrote it");
+        machine
+    }
+
+    /// The defect `--pause-tape-at` exists for, and the fix, in one run each.
+    ///
+    /// # Why this game and not a synthesised tape
+    ///
+    /// A tape written here to have a gap in the right place would be a tape written to pass this
+    /// test. The property under test is not *"a stopped motor stops the tape"* — that is one line
+    /// of `spectrum::tape` and it is graded there — it is that **a real loader misses a real
+    /// header when a real crack holds the CPU**, and that stopping the head at the right frame is
+    /// what recovers it. Only a cracked release does that, so the gate reads one.
+    ///
+    /// # What this asserts, and the weaker version it replaced
+    ///
+    /// It compares the **display file** of the two runs and requires them to differ. The first
+    /// draft asserted instead that the paused run's `PC` was *not* in [`LD_BYTES`] — and that
+    /// version **passed with `machine.tape_mut().stop()` deleted**, which is to say it graded
+    /// nothing at all. *"Somewhere other than the loader"* is satisfied by a great many end
+    /// states, including the ones a run that changed nothing lands in. The screen is not: with the
+    /// head held still the game's own loading screen is drawn, and without it the advertisement is
+    /// still there, and those are different bytes for the reason this flag exists.
+    #[test]
+    fn pausing_the_drive_catches_a_header_the_advertisement_would_have_covered() {
+        let roms = testsupport::testdata_dir().join("roms").join("48.rom");
+        let tape = testsupport::testdata_dir().join("games").join("Batty.tap");
+        if !roms.is_file() || !tape.is_file() {
+            testsupport::skip_absent_corpus("the 48K ROM and a cracked Batty cassette", &tape);
+            return;
+        }
+
+        let control = batty_after(&roms, &tape, 800, PAUSE_PAST_THE_END);
+        let paused = batty_after(&roms, &tape, 800, PAUSE_AT);
+        for (what, machine) in [("control", &control), ("paused", &paused)] {
+            assert!(
+                machine.fault().is_none(),
+                "the {what} machine faulted, so nothing read off it means anything",
+            );
+        }
+
+        // The control's own control, and the statement of the defect: a pause that lands after the
+        // cassette has wound off changes nothing, so this run ends where an ordinary one does —
+        // waiting in the ROM's loader for a header that went past long ago.
+        assert!(
+            LD_BYTES.contains(&control.cpu_state().pc),
+            "a pause past the end of the tape should leave this load stuck in the ROM's loader, \
+             and PC is {:#06x} — either the dump changed or the defect has gone",
+            control.cpu_state().pc,
+        );
+
+        // And the premise of the comparison below: a blank screen differs from a blank screen only
+        // by accident, so the control must actually have something drawn on it.
+        let advertisement = drawn(&control);
+        assert!(
+            advertisement.iter().any(|&byte| byte != 0),
+            "the control's screen is blank, so comparing anything to it proves nothing",
+        );
+
+        let differing = drawn(&paused)
+            .iter()
+            .zip(advertisement.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 0,
+            "holding the head still changed nothing on the screen: both runs ended on the same \
+             {} bytes of display file, so the game's own loading screen was never drawn and its \
+             header went past under the advertisement exactly as it does without the flag",
+            advertisement.len(),
         );
     }
 
