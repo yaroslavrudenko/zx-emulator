@@ -39,6 +39,8 @@ use std::collections::BTreeMap;
 
 use z80::{Bus, Cpu, CpuState, StepError};
 
+use super::Completed;
+
 /// The Z80 address space. Every `u16` is in range by construction.
 pub const MEMORY_SIZE: usize = 0x1_0000;
 
@@ -241,7 +243,7 @@ impl CpmMachine {
     /// names the last test group the program reached.
     pub fn run(&mut self, max_instructions: u64) -> Outcome {
         while self.instructions < max_instructions {
-            let pc = self.cpu.state().pc;
+            let pc = self.cpu.completed().pc;
             if pc == WARM_BOOT {
                 return self.finished();
             }
@@ -292,7 +294,7 @@ impl CpmMachine {
 
     /// Service the call `PC` has just arrived at. The `RET` at [`BDOS_ENTRY`] returns.
     fn service_bdos(&mut self) {
-        let state = self.cpu.state();
+        let state = self.cpu.completed();
         // C is the function number, E the character argument, DE the string address.
         let function = state.bc as u8;
         *self.bdos_calls.entry(function).or_default() += 1;

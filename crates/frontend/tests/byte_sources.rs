@@ -62,7 +62,7 @@ fn rom() -> Option<Vec<u8>> {
 fn generated_snapshot(rom: &[u8]) -> Vec<u8> {
     let mut machine = Spectrum::new(rom).expect("the committed ROM is one 16 KB page");
     machine.run_frames(BOOT_FRAMES);
-    media::save(&machine)
+    media::save(&machine).expect("completed instruction")
 }
 
 /// Build a machine from `rom`, feed it `(name, bytes)`, run a little, and return its state.
@@ -74,7 +74,7 @@ fn fed(rom: &[u8], name: &str, bytes: &[u8]) -> Vec<u8> {
         "the payload should have been restored, and instead: {message}",
     );
     machine.run_frames(SETTLE_FRAMES);
-    media::save(&machine)
+    media::save(&machine).expect("completed instruction")
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn a_command_line_a_url_a_bundle_and_a_drop_reach_the_same_machine() {
     untouched.run_frames(SETTLE_FRAMES);
     assert_ne!(
         from_command_line,
-        media::save(&untouched),
+        media::save(&untouched).expect("completed instruction"),
         "a machine that was fed the payload is indistinguishable from one that was not",
     );
 

@@ -50,18 +50,22 @@
 //! Spectrum has no arrow keys and games disagree about what to read. See
 //! [`frontend::keymap::ARROW_SCHEMES`], which records what six games were disassembled to find.
 //!
-//! # This file is the untestable part, and it is kept thin on purpose
+//! # Keep window wiring thin and grade decisions without a GPU
 //!
-//! Everything with a decision in it — which key, which colour, how many frames, which file —
-//! is in the library next door and is reachable from `cargo test`. What is left here needs a
-//! GPU and a window and cannot run headless, so it is held to plumbing: poll, upload, draw,
-//! await. `crates/frontend/src/lib.rs` carries the table of what that leaves ungraded, and
-//! *"whether it looks right"* is the first row.
+//! Most decisions live in the library next door; the private snapshot writer and timing
+//! formatter live beside this binary and have headless unit tests of their own. The window
+//! wiring still needs a GPU for its final observation: whether it looks right. See
+//! `crates/frontend/src/lib.rs` for the boundary of what automation can grade.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
+use futures_util::future::{Either, select};
+use futures_util::stream::{self, StreamExt};
 use macroquad::prelude::*;
 
 use frontend::audio::{self, Resampler};
@@ -75,8 +79,24 @@ use frontend::{host, keymap, palette, viewport};
 use spectrum::screen::{FRAME_HEIGHT, FRAME_WIDTH};
 use spectrum::{Frame, Model, Spectrum};
 
+mod queue_display;
+mod snapshot;
+mod telemetry;
+
+use queue_display::QueueDisplay;
+#[cfg(test)]
+use queue_display::{MUTED, NO_DEVICE};
+
 /// What `F2` writes, before the collision counter and the extension.
 const SAVE_STEM: &str = "snapshot";
+const SNAPSHOT_EXTENSION: &str = "z80";
+
+/// At most two independent file requests in flight; their results retain argument order.
+const FETCH_CONCURRENCY: usize = 2;
+#[cfg(not(target_arch = "wasm32"))]
+const NATIVE_READ_DRAIN: Duration = Duration::from_millis(200);
+#[cfg(not(target_arch = "wasm32"))]
+const NATIVE_READ_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Whole frame pixels per window pixel when the window first opens.
 ///
@@ -172,12 +192,6 @@ const OPENING_MESSAGE: &str = "Tab or Ctrl = SYMBOL SHIFT   -   arrows are set f
 /// Point size of the status text.
 const STATUS_TEXT: f32 = 16.0;
 
-/// What the `snd` field says when no audio device has appeared. See [`Status::queue`].
-const NO_DEVICE: &str = "--";
-
-/// What the `snd` field says when a device is being sent nothing. See [`Status::queue`].
-const MUTED: &str = "mute";
-
 /// The second line [`complain`] draws, under whatever went wrong.
 ///
 /// A constant rather than an inline literal so that `mod tests` can measure it. It is the same
@@ -210,13 +224,16 @@ async fn main() {
     let arguments = host::arguments();
     let (rom_paths, media_paths) = host::partition(&arguments, media::DEFAULT_ROM);
 
-    let mut roms = Vec::with_capacity(rom_paths.len());
-    for path in &rom_paths {
-        match load(path).await {
-            Ok(bytes) => roms.push(bytes),
-            Err(message) => return complain(&message).await,
-        }
-    }
+    let loader = FileLoader::new();
+    let roms = match load_roms(&rom_paths, |path| {
+        let loader = loader.clone();
+        async move { loader.load(&path).await }
+    })
+    .await
+    {
+        Ok(roms) => roms,
+        Err(message) => return complain(&message).await,
+    };
     let borrowed: Vec<&[u8]> = roms.iter().map(Vec::as_slice).collect();
     let mut machine = match media::start(&borrowed) {
         Ok(machine) => machine,
@@ -225,12 +242,29 @@ async fn main() {
 
     let mut video = Video::new();
     let mut status = Status::new();
-
-    for path in media_paths {
-        match load(&path).await {
-            Ok(bytes) => status.report(media::accept(&mut machine, &path, &bytes)),
-            Err(message) => status.report(message),
+    let mut snapshots = snapshot::Writer::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut startup_scan = match snapshot::StartupScan::start(std::path::PathBuf::from(".")) {
+        Ok(scan) => Some(scan),
+        Err(error) => {
+            status.report(format!(
+                "snapshot outcome UNKNOWN: cannot start stage scan: {error}"
+            ));
+            None
         }
+    };
+
+    let mut media = std::pin::pin!(load_ordered(&media_paths, |path| {
+        let loader = loader.clone();
+        async move { loader.load(&path).await }
+    }));
+    let mut names = media_paths.iter();
+    while let Some(result) = media.next().await {
+        let Some(path) = names.next() else { break };
+        status.report(match result {
+            Ok(bytes) => media::accept(&mut machine, path, &bytes),
+            Err(message) => message,
+        });
     }
 
     let mut pacer = Pacer::new();
@@ -268,11 +302,19 @@ async fn main() {
     // the first few frames, about four reallocations once, which is named here rather than left
     // to look like an oversight.
     let mut mixed: Vec<f32> = Vec::new();
+    let mut telemetry = telemetry::Telemetry::enabled();
 
     loop {
+        let sample_start = telemetry.as_ref().map(|_| get_time());
+        #[cfg(not(target_arch = "wasm32"))]
+        report_startup_scan(&mut status, &mut startup_scan);
+        let ran_before = pacer.ran();
+        let dropped_before = pacer.dropped();
+        let mut fresh_f2 = false;
         for &(code, action) in keymap::HOTKEYS {
             if is_key_pressed(code) {
-                act(action, &mut machine, &mut status);
+                fresh_f2 |= action == Hotkey::SaveSnapshot;
+                act(action, &mut machine, &mut status, &mut snapshots);
             }
         }
         for file in get_dropped_files() {
@@ -311,46 +353,38 @@ async fn main() {
         // that have actually run.
         ear.sample(machine.ear_reads(), machine.frames());
         let tick = pacing::RUNGS[status.speed].this_tick(ear.decoding());
-        run_tick(tick, &mut machine, &mut pacer);
+        if resampler.is_none() {
+            let device_hz = page::audio_rate();
+            if device_hz != 0 {
+                // The pacer may deliver four catch-up frames before the next push.
+                mixed.reserve((device_hz as usize / 50 + 64) * pacing::MAX_CATCH_UP as usize);
+                resampler = Some(Resampler::new(machine_hz, device_hz));
+            }
+        }
+        let mut audible = resampler
+            .as_mut()
+            .filter(|_| tick == Tick::Paced(Speed::REAL_TIME));
+        mixed.clear();
+        let elapsed = Duration::try_from_secs_f32(get_frame_time()).unwrap_or(Duration::ZERO);
+        run_tick(tick, elapsed, &mut pacer, get_time, || {
+            machine.run_frame();
+            let samples = machine.take_samples();
+            if let Some(resampler) = audible.as_deref_mut() {
+                resampler.feed(samples, &mut mixed);
+            }
+        });
         // **Asked here, immediately after the frames that could have ended the tape.** Under
         // `Rung::Automatic` a three-minute cassette reaches its end in about two seconds, so a
         // report arriving a tick late is a report nobody can connect to anything.
         report_a_finished_tape(&machine, &mut status);
+        report_snapshot_completion(&mut status, &mut snapshots, fresh_f2);
         // One clock reading for both, so the figure and the colour describe the same second
         // rather than two instants a few microseconds apart.
         let now = get_time();
         meter.sample(now, pacer.ran());
         loss.sample(now, pacer.dropped());
 
-        // Polled every frame until a device appears, then built once for that exact rate.
-        //
-        // **`audio_rate` is never asked again after that, and the consequence is worth stating.**
-        // A device that changes its rate mid-session — an output switched from speakers to a
-        // 44.1 kHz interface — keeps being resampled to the old one, which is a pitch error and
-        // not a crash. Rebuilding the resampler would discard its phase and its DC-blocker
-        // history, so it is a click at the moment of the switch against a wrong pitch until the
-        // next launch; neither is obviously right and nothing here has measured it.
-        //
-        // What is *not* left to this poll is the device going **away**. A suspended browser
-        // `AudioContext` stops draining, and a push that kept succeeding into it would grow the
-        // backlog and freeze the depth this loop steers on — the loop would then be running
-        // open-loop on a constant while memory and latency climbed for as long as the tab lived.
-        // `zx_audio_push` answers `-1` while the context is not `running`, the same value and the
-        // same reason as `zx_audio_rate`, so `track` sees `None` and leaves the rate alone.
-        if resampler.is_none() {
-            let device_hz = page::audio_rate();
-            if device_hz != 0 {
-                // One frame of output plus slack, now that the rate is known: 50 is the frame
-                // rate to within a fifth of a percent on both machines, and the correction
-                // above can only move the count by 0.5%.
-                mixed.reserve(device_hz as usize / 50 + 64);
-                resampler = Some(Resampler::new(machine_hz, device_hz));
-            }
-        }
-        // Drained **every** frame whether or not anything is listening: the machine buffers two
-        // frames and then starts counting what it lost, and a consumer that stops taking would
-        // make `Spectrum::dropped_samples` climb for a reason that has nothing to do with audio.
-        let produced = machine.take_samples();
+        // The machine was drained by the frame callback above, including every catch-up frame.
         // **Above real time the device is fed nothing, and that is a decision rather than an
         // omission.** A sound card consumes exactly one second per second whatever the pacer
         // does, so at 64× the resampler offers it sixty-four seconds of samples per wall second:
@@ -389,11 +423,7 @@ async fn main() {
         // anywhere — and goes away again the moment somebody presses PLAY. Writing this against
         // the *rung* would have muted an automatic machine that was sitting at real time doing
         // nothing, which is the state a person spends nearly all their time in.
-        if let Some(resampler) = resampler.as_mut()
-            && tick == Tick::Paced(Speed::REAL_TIME)
-        {
-            mixed.clear();
-            resampler.feed(produced, &mut mixed);
+        if let Some(resampler) = audible {
             // **The backlog is closed as a loop, on the returned depth, for both targets.**
             // Observed in a browser on 2026-09-01: `snd 10080` after four minutes — 210 ms of
             // backlog and still climbing, because the emulator was running at 50.2 Hz against a
@@ -432,39 +462,310 @@ async fn main() {
             // its ring fills — but those are the device's own self-defence and they are reached
             // only after this branch has already declined to feed it. Deleting this line moved
             // the browser from *bounded* to *unbounded* once before.
-            let ceiling = target * 2;
-            if status.audio_queued < 0 || status.audio_queued < ceiling as i32 {
+            //
+            // **One rule on both targets: a chunk is admitted only if it fits whole under the
+            // ceiling** (DECISION.md item 7). This admitted while the queue was *below* 100 ms
+            // and `web/zx_page.js` refused once queue + chunk *exceeded* it — so between 80 and
+            // 100 ms queued the browser dropped the whole 20 ms frame this side had just decided
+            // to send, which is the click this paragraph exists to prevent. The desktop ring's
+            // capacity is the same 100 ms, so under this rule it never truncates a push either.
+            // The rule is `audio::admits`, tested against the browser's copy of it.
+            if status.audio_queued < 0
+                || audio::admits(status.audio_queued, mixed.len() as i32, target)
+            {
                 status.audio_queued = page::audio_push(&mixed);
             } else {
                 status.audio_queued -= mixed.len() as i32;
             }
         }
 
+        // **Only a frame that ran has anything new to show.** At 1× the display ticks at 60 Hz
+        // and the machine at 50, so about one tick in six runs no frame; rendering and uploading
+        // then repainted the GPU with the picture already on it — `render`, the palette pass and
+        // an 80 KB texture upload for nothing. A frame-equality guard was the other candidate and
+        // was refused: comparing 80 KB costs a fair part of what it saves, and the pacer already
+        // knows the answer (DECISION.md item 6). A hotkey or a dropped file that changes the
+        // machine between frames shows on the next frame that runs, at most 20 ms later.
+        if pacer.ran() != ran_before {
+            video.update(&machine);
+        }
         video.draw(&machine);
         status.draw(&machine, pacer, meter, loss, ear);
+        if let (Some(telemetry), Some(start)) = (telemetry.as_mut(), sample_start) {
+            let ran = pacer.ran() - ran_before;
+            let dropped = pacer.dropped() - dropped_before;
+            telemetry.observe(telemetry::Sample {
+                start,
+                end: get_time(),
+                due: if matches!(tick, Tick::Paced(_)) {
+                    ran + dropped
+                } else {
+                    0
+                },
+                ran,
+                dropped,
+                audio_lost: machine.dropped_samples(),
+            });
+        }
         next_frame().await;
     }
 }
 
-/// Read a file, as a message rather than as an error type.
-///
-/// `load_file` is macroquad's, not the standard library's, and that is the whole reason this
-/// returns a `String`: on `wasm32` it is an HTTP fetch whose failures do not map onto
-/// [`std::io::Error`], and the shell's only response to any of them is to put the text on the
-/// screen. See [`frontend::host`].
-///
-/// [`bundle::bytes`] is consulted first, which is what lets a standalone build need no files at
-/// all. It is a lookup in a slice of at most two entries and it is the only thing that
-/// distinguishes an embedded payload from a fetched one — everything downstream, from
-/// `media::kind_of` to `media::insert`, is handed the same name and the same bytes and is never
-/// told which it is holding.
-async fn load(path: &str) -> Result<Vec<u8>, String> {
-    if let Some(embedded) = bundle::bytes(path) {
-        return Ok(embedded.to_vec());
+/// Native reads use bounded worker threads; browser reads keep the existing HTTP route.
+#[derive(Clone)]
+struct FileLoader {
+    #[cfg(not(target_arch = "wasm32"))]
+    workers: std::sync::Arc<NativeWorkers>,
+}
+
+/// Startup-owned readers. The mutex guards only handles, never file data; workers never
+/// acquire it. `load_ordered` admits at most two active reads, and completed handles are joined
+/// before the next spawn. A cancelled read may outlive its receiver, so Drop drains or warns.
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeWorkers(std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>);
+
+/// Read outcome with the instant the worker finished, not the later window-thread poll.
+#[cfg(not(target_arch = "wasm32"))]
+type ReadCompletion = (std::time::Instant, std::io::Result<Vec<u8>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeWorkers {
+    fn spawn(
+        &self,
+        read: impl FnOnce() -> std::io::Result<Vec<u8>> + Send + 'static,
+    ) -> std::io::Result<std::sync::mpsc::Receiver<ReadCompletion>> {
+        self.spawn_with(read, |read, sender| {
+            std::thread::Builder::new().spawn(move || {
+                // A timed-out std::fs read cannot be cancelled; the completion time is still real.
+                let result = read();
+                let completed_at = std::time::Instant::now();
+                if sender.send((completed_at, result)).is_err() {
+                    eprintln!(
+                        "zx: native file read completed after its receiver left; outcome abandoned"
+                    );
+                }
+            })
+        })
     }
-    macroquad::file::load_file(path)
-        .await
-        .map_err(|error| format!("cannot read {path}: {error}"))
+
+    fn spawn_with<R, S>(
+        &self,
+        read: R,
+        start: S,
+    ) -> std::io::Result<std::sync::mpsc::Receiver<ReadCompletion>>
+    where
+        R: FnOnce() -> std::io::Result<Vec<u8>> + Send + 'static,
+        S: FnOnce(
+            R,
+            std::sync::mpsc::SyncSender<ReadCompletion>,
+        ) -> std::io::Result<std::thread::JoinHandle<()>>,
+    {
+        let (mut workers, poisoned) = match self.0.lock() {
+            Ok(workers) => (workers, false),
+            Err(error) => (error.into_inner(), true),
+        };
+        let finished: Vec<_> = workers
+            .extract_if(.., |worker| worker.is_finished())
+            .collect();
+        let started = if workers.len() < FETCH_CONCURRENCY {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            match start(read, sender) {
+                Ok(handle) => {
+                    workers.push(handle);
+                    Ok(receiver)
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "native file readers are full; previous read outcome UNKNOWN",
+            ))
+        };
+        drop(workers);
+        if poisoned {
+            eprintln!("zx: reader registry poisoned; reclaiming owned workers");
+        }
+        for handle in finished {
+            if let Err(error) = handle.join() {
+                eprintln!("zx: native file reader panicked: {error:?}");
+            }
+        }
+        started
+    }
+
+    fn receive(
+        receiver: &std::sync::mpsc::Receiver<ReadCompletion>,
+        deadline: std::time::Instant,
+        path: &str,
+    ) -> Option<Result<Vec<u8>, String>> {
+        match receiver.try_recv() {
+            Ok((completed_at, result)) if completed_at <= deadline => {
+                Some(result.map_err(|error| format!("cannot read {path}: {error}")))
+            }
+            Ok(_) => Some(Err(Self::unknown_read(path))),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err(format!("reader stopped before loading {path}")))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) if std::time::Instant::now() >= deadline => {
+                Some(Err(Self::unknown_read(path)))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        }
+    }
+
+    fn unknown_read(path: &str) -> String {
+        format!(
+            "cannot observe {path} within {}ms; result UNKNOWN (std::fs cannot be cancelled)",
+            NATIVE_READ_DEADLINE.as_millis()
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for NativeWorkers {
+    fn drop(&mut self) {
+        let handles = self
+            .0
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let deadline = std::time::Instant::now() + NATIVE_READ_DRAIN;
+        for handle in handles.drain(..) {
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if handle.is_finished() {
+                if let Err(error) = handle.join() {
+                    eprintln!("zx: native file reader panicked: {error:?}");
+                }
+            } else {
+                eprintln!(
+                    "zx: native startup file read still blocked at shutdown; result abandoned"
+                );
+                drop(handle);
+            }
+        }
+    }
+}
+
+impl FileLoader {
+    fn new() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            workers: std::sync::Arc::new(NativeWorkers(std::sync::Mutex::new(Vec::new()))),
+        }
+    }
+
+    async fn load(&self, path: &str) -> Result<Vec<u8>, String> {
+        if let Some(embedded) = bundle::bytes(path) {
+            return Ok(embedded.to_vec());
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            macroquad::file::load_file(path)
+                .await
+                .map_err(|error| format!("cannot read {path}: {error}"))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let owned_path = path.to_owned();
+            let receiver = self
+                .workers
+                .spawn(move || std::fs::read(owned_path))
+                .map_err(|error| format!("cannot start reader for {path}: {error}"))?;
+            let deadline = std::time::Instant::now() + NATIVE_READ_DEADLINE;
+            loop {
+                if let Some(result) = NativeWorkers::receive(&receiver, deadline, path) {
+                    return result;
+                }
+                next_frame().await;
+            }
+        }
+    }
+}
+
+/// Reject a ROM count before starting any file request; keep the typed media error.
+async fn load_roms<F, Fut>(paths: &[String], fetch: F) -> Result<Vec<Vec<u8>>, String>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, String>>,
+{
+    if !matches!(paths, [_] | [_, _]) {
+        return Err(media::Error::RomCount { given: paths.len() }.to_string());
+    }
+    let mut roms = Vec::with_capacity(paths.len());
+    let mut requests = std::pin::pin!(load_ordered(paths, fetch));
+    while let Some(result) = requests.next().await {
+        roms.push(result?);
+    }
+    Ok(roms)
+}
+
+/// At most one head request and one speculative request, with at most two completed results.
+struct OrderedLoads<'a, F, Fut> {
+    paths: std::iter::Cloned<std::slice::Iter<'a, String>>,
+    fetch: F,
+    first: Option<Pin<Box<Fut>>>,
+    next: Option<Pin<Box<Fut>>>,
+    ready: VecDeque<Result<Vec<u8>, String>>,
+}
+
+impl<'a, F, Fut> OrderedLoads<'a, F, Fut>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, String>>,
+{
+    fn start_next(&mut self) -> Option<Pin<Box<Fut>>> {
+        self.paths.next().map(|path| Box::pin((self.fetch)(path)))
+    }
+
+    async fn next(mut self) -> Option<(Result<Vec<u8>, String>, Self)> {
+        loop {
+            if self.first.is_none() {
+                if let Some(result) = self.ready.pop_front() {
+                    return Some((result, self));
+                }
+                self.first = self.next.take().or_else(|| self.start_next());
+            }
+            if self.next.is_none() && self.ready.len() < FETCH_CONCURRENCY {
+                self.next = self.start_next();
+            }
+            let Some(later) = self.next.take() else {
+                return Some((self.first.take()?.await, self));
+            };
+            match select(self.first.take()?, later).await {
+                Either::Left((result, later)) => {
+                    self.next = Some(later);
+                    return Some((result, self));
+                }
+                Either::Right((result, earlier)) => {
+                    self.first = Some(earlier);
+                    self.ready.push_back(result);
+                }
+            }
+        }
+    }
+}
+
+/// Fetch independent files without changing the order in which they are consumed.
+fn load_ordered<'a, F, Fut>(
+    paths: &'a [String],
+    fetch: F,
+) -> impl futures_util::Stream<Item = Result<Vec<u8>, String>> + 'a
+where
+    F: Fn(String) -> Fut + 'a,
+    Fut: Future<Output = Result<Vec<u8>, String>> + 'a,
+{
+    stream::unfold(
+        OrderedLoads {
+            paths: paths.iter().cloned(),
+            fetch,
+            first: None,
+            next: None,
+            ready: VecDeque::with_capacity(FETCH_CONCURRENCY),
+        },
+        OrderedLoads::next,
+    )
 }
 
 /// Take a file the user dropped on the window and say what happened.
@@ -546,31 +847,29 @@ fn accept_drop(machine: &mut Spectrum, file: &DroppedFile) -> String {
 /// in a named function for the same reason, [`ink`] most explicitly.
 ///
 /// The two arms are genuinely two loops rather than one with a variable bound, and that is the
-/// whole of what [`Tick`] distinguishes. [`Pacer::advance`] computes a count from time that has
-/// **already** elapsed and this file runs it; [`Pacer::run_flat_out`] owns its loop because the
-/// count can only be discovered by spending time that has not elapsed yet.
+/// whole of what [`Tick`] distinguishes. [`Pacer::run_bounded`] runs the count owed by time that
+/// has **already** elapsed, inside the same 30 ms budget flat-out mode uses; [`Pacer::run_flat_out`]
+/// owns its loop because the count can only be discovered by spending time that has not elapsed
+/// yet. *(This named `Pacer::advance` as the paced arm, which stopped being true when the window
+/// moved to `run_bounded`; corrected 2026-10-20, DECISION.md item 12.)*
 ///
 /// Nothing is returned. The frames reach [`Pacer::ran`] either way, which is what the readout's
 /// `Hz` is drawn from, so a second count here would be a number with no reader and somewhere for
 /// the two to disagree.
-fn run_tick(tick: Tick, machine: &mut Spectrum, pacer: &mut Pacer) {
+fn run_tick(
+    tick: Tick,
+    elapsed: Duration,
+    pacer: &mut Pacer,
+    clock: impl FnMut() -> f64,
+    frame: impl FnMut(),
+) {
     match tick {
         Tick::Paced(speed) => {
             pacer.set_speed(speed);
-            // `try_from_secs_f32` rather than `from_secs_f32`: the latter panics on a negative or
-            // non-finite argument, and `get_frame_time` is a number from a windowing system rather
-            // than one this program computed.
-            let elapsed = Duration::try_from_secs_f32(get_frame_time()).unwrap_or(Duration::ZERO);
-            for _ in 0..pacer.advance(elapsed) {
-                machine.run_frame();
-            }
+            pacer.run_bounded(elapsed, clock, frame);
         }
-        // `get_time` and not `get_frame_time`: the budget is spent *during* this call, so the clock
-        // has to move while it is being read. macroquad documents that one of the two does and the
-        // other is a per-tick delta, and `Pacer::run_flat_out` says what handing over the wrong one
-        // would cost.
         Tick::FlatOut => {
-            pacer.run_flat_out(get_time, || machine.run_frame());
+            pacer.run_flat_out(clock, frame);
         }
     }
 }
@@ -593,11 +892,51 @@ fn report_a_finished_tape(machine: &Spectrum, status: &mut Status) {
     }
 }
 
+/// Keep the latest F2 result primary; route completions from earlier requests to their own rows.
+fn report_snapshot_completion(
+    status: &mut Status,
+    snapshots: &mut snapshot::Writer,
+    fresh_f2: bool,
+) {
+    if !fresh_f2 && let Some(message) = snapshots.poll() {
+        if status.older_snapshot_outcomes > 0 {
+            status.older_snapshot_outcomes -= 1;
+            if status.previous_snapshots.len() == snapshot::MAX_COMPLETED_OUTCOMES {
+                status.previous_snapshots.pop_front();
+            }
+            status.previous_snapshots.push_back(message);
+        } else {
+            status.report(message);
+        }
+    }
+}
+
+/// Show the bounded native scan below the current F2 outcome, without replacing it.
+#[cfg(not(target_arch = "wasm32"))]
+fn report_startup_scan(status: &mut Status, scan: &mut Option<snapshot::StartupScan>) {
+    if let Some(snapshot::ScanPoll::Finished(notice)) =
+        scan.as_mut().map(snapshot::StartupScan::poll)
+    {
+        *scan = None;
+        if let Some(message) = notice {
+            status.recovery_notice = Some(message);
+        }
+    }
+}
+
 /// Carry out a hotkey.
-fn act(action: Hotkey, machine: &mut Spectrum, status: &mut Status) {
+fn act(
+    action: Hotkey,
+    machine: &mut Spectrum,
+    status: &mut Status,
+    snapshots: &mut snapshot::Writer,
+) {
     match action {
         Hotkey::ToggleStatus => status.visible = !status.visible,
-        Hotkey::SaveSnapshot => status.report(write_snapshot(machine)),
+        Hotkey::SaveSnapshot => {
+            let older = snapshots.outstanding();
+            status.snapshot_request(older, snapshots.request(machine));
+        }
         // **Each of the three asks the drive afterwards rather than announcing beforehand.**
         // `spectrum::tape::Tape::play` starts nothing on an empty drive and nothing on a tape
         // wound to its end, and this arm used to report `tape playing` in both — a message that
@@ -683,18 +1022,6 @@ fn speed_message(rung: Rung) -> String {
     }
 }
 
-/// Write the machine out as a numbered `.z80`, and say where it went.
-fn write_snapshot(machine: &Spectrum) -> String {
-    let path = match host::free_path(SAVE_STEM, "z80") {
-        Ok(path) => path,
-        Err(error) => return error.to_string(),
-    };
-    match host::save(&path, &media::save(machine)) {
-        Ok(()) => format!("saved {path}"),
-        Err(error) => error.to_string(),
-    }
-}
-
 /// Draw `message` until the window is closed.
 ///
 /// A frontend that cannot start still has a window open — `#[macroquad::main]` opened it
@@ -746,13 +1073,16 @@ impl Video {
         }
     }
 
-    /// Render the machine and put it on the screen.
-    fn draw(&mut self, machine: &Spectrum) {
+    /// Render the machine into the texture. Called only after a frame ran.
+    fn update(&mut self, machine: &Spectrum) {
         machine.render(&mut self.frame);
         palette::write_rgba(&self.frame, &mut self.rgba);
         self.texture
             .update_from_bytes(FRAME_WIDTH as u32, FRAME_HEIGHT as u32, &self.rgba[..]);
+    }
 
+    /// Put the texture on the screen, every display tick.
+    fn draw(&self, machine: &Spectrum) {
         // The letterbox is cleared to the machine's own border, so the margin integer scaling
         // leaves over reads as a wider border rather than as black bars — and changes colour
         // with it when a program writes port 0xFE.
@@ -814,18 +1144,11 @@ struct Status {
     /// for why that is not the shadow copy `keymap` warns about.
     drive: drive::Drive,
     message: Cow<'static, str>,
-    /// Reused so the per-frame path formats into one buffer rather than building a new one.
-    ///
-    /// *This said "without allocating", and one argument in that `write!` still does.*
-    /// [`Status::queue`] returns a `String` — 2 to 11 bytes, one malloc and one free per frame —
-    /// so the invariant the buffer was engineered for is true of the buffer and false of the
-    /// line. It is recorded rather than fixed because every repair measured is worse than the
-    /// defect: a `Cow` still allocates in the live case (a number); a `Display` newtype is the
-    /// sibling pattern [`pacing::Rung`] uses and costs +11 lines and +3 branches for 11 bytes;
-    /// and a `write!`-into-`&mut String` signature would split the single `write!` into three,
-    /// destroying the exact property the buffer exists to give. **The finding stays open** —
-    /// what is not acceptable is the sentence that was here, because it is the one a future
-    /// reader consults when deciding whether a per-frame `format!` is allowed on this path.
+    older_snapshot_outcomes: usize,
+    previous_snapshots: VecDeque<String>,
+    recovery_notice: Option<String>,
+    /// Reused for the readout and audio-loss rows. `QueueDisplay` formats the numeric queue depth directly
+    /// into this buffer, so neither row allocates while its capacity is sufficient.
     line: String,
 }
 
@@ -845,6 +1168,9 @@ impl Status {
             audio_queued: -1,
             drive: drive::Drive::new(),
             message: Cow::Borrowed(OPENING_MESSAGE),
+            older_snapshot_outcomes: 0,
+            previous_snapshots: VecDeque::new(),
+            recovery_notice: None,
             line: String::with_capacity(128),
         }
     }
@@ -859,11 +1185,28 @@ impl Status {
         self.message = message.into();
     }
 
+    fn snapshot_request(&mut self, older: usize, message: String) {
+        self.older_snapshot_outcomes = older;
+        self.report(message);
+    }
+
+    /// Rows are enumerated bottom-up; the current outcome is last and therefore on top.
+    fn message_rows(&self) -> impl Iterator<Item = (f32, &str)> {
+        self.previous_snapshots
+            .iter()
+            .map(String::as_str)
+            .chain(self.recovery_notice.as_deref())
+            .chain(std::iter::once(self.message.as_ref()))
+            .filter(|message| !message.is_empty())
+            .enumerate()
+            .map(|(index, message)| (1.0 + index as f32, message))
+    }
+
     /// What the `snd` field says.
     ///
-    /// Three states, and the two that are not a number mean different things. [`NO_DEVICE`] is
+    /// Three states, and the two that are not a number mean different things. [`queue_display::NO_DEVICE`] is
     /// *nothing is listening* — a browser tab before its first click, a machine with no sound
-    /// card — and [`MUTED`] is *something is listening and is deliberately being sent nothing*,
+    /// card — and [`queue_display::MUTED`] is *something is listening and is deliberately being sent nothing*,
     /// which is what a multiplier above real time does. Collapsing them would put a silenced
     /// emulator and a broken one behind the same two characters, which is the confusion
     /// [`Status::audio_queued`] exists to prevent, one case wider.
@@ -876,25 +1219,22 @@ impl Status {
     /// for the same reason: [`Rung::Automatic`] is muted while a cassette is moving and audible
     /// the instant it stops, so a field written from the rung would say `mute` at a machine that
     /// was playing perfectly well.
-    fn queue(&self, tick: Tick) -> String {
-        if tick != Tick::Paced(Speed::REAL_TIME) {
-            MUTED.to_owned()
-        } else if self.audio_queued < 0 {
-            NO_DEVICE.to_owned()
-        } else {
-            self.audio_queued.to_string()
+    fn queue(&self, tick: Tick) -> QueueDisplay {
+        QueueDisplay {
+            queued: self.audio_queued,
+            tick,
         }
     }
 
     /// Draw the readout along the bottom of the window.
     ///
-    /// # Two rows, because a dial and a sentence are different kinds of thing
+    /// # Separate rows, because a dial and an outcome are different kinds of thing
     ///
     /// Five figures and a message did not fit across the window — [`OPENING_MESSAGE`] carries the
     /// measurement, and the overflow was 42 characters — and they are read differently anyway: the
-    /// figures are glanced at, the sentence is read once. Separating them is also what lets the
-    /// colour mean something exact, because only the row carrying the pacing figures changes with
-    /// it.
+    /// figures are glanced at, the sentence is read once. Older snapshot completions occupy bounded
+    /// extra rows so they never overwrite the current F2 error or saving message. Only the pacing
+    /// figures change colour with a frame stall.
     fn draw(
         &mut self,
         machine: &Spectrum,
@@ -916,16 +1256,26 @@ impl Status {
         //
         // It sits directly on top of whatever else is showing, so `F1` slides it down to the
         // bottom rather than leaving it floating above an empty strip.
-        if let Some(notice) = bundle::acknowledgement() {
-            draw_row(if self.visible { 2.0 } else { 0.0 }, notice, GRAY);
+        let notice = bundle::acknowledgement();
+        let notice_row = 1.0
+            + self.previous_snapshots.len() as f32
+            + f32::from(self.recovery_notice.is_some())
+            + f32::from(!self.message.is_empty());
+        if let Some(text) = notice {
+            draw_row(if self.visible { notice_row } else { 0.0 }, text, GRAY);
         }
 
         if !self.visible {
             return;
         }
 
-        draw_row(1.0, &self.message, LIGHTGRAY);
-
+        for (row, message) in self.message_rows() {
+            draw_row(row, message, LIGHTGRAY);
+        }
+        if machine.dropped_samples() > 0 {
+            audio_loss_line(machine.dropped_samples(), &mut self.line);
+            draw_row(notice_row + f32::from(notice.is_some()), &self.line, RED);
+        }
         self.line.clear();
         // The multiplier is on the bar unconditionally, at `1x` as much as at `64x`. A machine
         // running sixty-four times too fast and a machine with a broken clock look identical from
@@ -960,7 +1310,7 @@ impl Status {
         let decoding = ear.decoding();
         let _ = write!(
             self.line,
-            "{:.1} Hz   speed {rung}{}   dropped {}   frame {}   snd {}   arrows {}",
+            "{:.1} Hz   speed {rung}{}  frame drop {}  frame {}   snd {}   arrows {}",
             meter.hz(),
             rung.note(decoding),
             pacer.dropped(),
@@ -998,6 +1348,12 @@ impl Status {
 /// layer up. [`Color`] is a plain struct of four floats and needs no context to compare.
 fn ink(loss: LossMeter) -> Color {
     if loss.keeping_up() { LIGHTGRAY } else { RED }
+}
+
+/// Use the readout's existing buffer for an occasional machine-audio loss row.
+fn audio_loss_line(samples: u64, line: &mut String) {
+    line.clear();
+    let _ = write!(line, "audio samples lost {samples}");
 }
 
 /// Draw one line of status text, `row` rows up from the bottom of the window.
@@ -1045,6 +1401,414 @@ fn to_color(colour: spectrum::Colour) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::task::{Context, Poll};
+
+    #[test]
+    fn independent_loads_overlap_but_apply_in_input_order_under_a_bound_of_two() {
+        let paths = ["slow", "fast", "third"].map(str::to_owned);
+        let started = Rc::new(Cell::new(0));
+        let fast_done = Rc::new(Cell::new(false));
+        let mut future = Box::pin(async {
+            load_ordered(&paths, {
+                let started = Rc::clone(&started);
+                let fast_done = Rc::clone(&fast_done);
+                move |path| {
+                    let started = Rc::clone(&started);
+                    let fast_done = Rc::clone(&fast_done);
+                    async move {
+                        started.set(started.get() + 1);
+                        if path == "slow" {
+                            std::future::poll_fn(|context| {
+                                if fast_done.get() {
+                                    Poll::Ready(())
+                                } else {
+                                    context.waker().wake_by_ref();
+                                    Poll::Pending
+                                }
+                            })
+                            .await;
+                        }
+                        if path == "fast" {
+                            fast_done.set(true);
+                        }
+                        Ok(path.into_bytes())
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+        });
+        let waker = futures_util::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let first = future.as_mut().poll(&mut context);
+        assert!(
+            started.get() >= 2,
+            "the second independent fetch must start while the first waits"
+        );
+        let loaded = match first {
+            Poll::Ready(loaded) => loaded,
+            Poll::Pending => match future.as_mut().poll(&mut context) {
+                Poll::Ready(loaded) => loaded,
+                Poll::Pending => panic!("all three finite fetches must complete"),
+            },
+        };
+        assert_eq!(
+            loaded,
+            paths
+                .iter()
+                .map(|path| Ok(path.as_bytes().to_vec()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn invalid_rom_count_is_typed_and_refused_before_any_missing_path_is_read() {
+        let paths = ["missing-a.rom", "missing-b.rom", "missing-c.rom"].map(str::to_owned);
+        let reads = Cell::new(0);
+        let mut request = Box::pin(load_roms(&paths, |_path| {
+            reads.set(reads.get() + 1);
+            async { Err("a missing file was read".to_owned()) }
+        }));
+        let waker = futures_util::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let Poll::Ready(Err(error)) = request.as_mut().poll(&mut context) else {
+            panic!("invalid count must fail before the first I/O poll");
+        };
+        assert_eq!(
+            error,
+            media::Error::RomCount { given: paths.len() }.to_string()
+        );
+        assert_eq!(reads.get(), 0, "invalid ROMs must not start any reads");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_reads_overlap_and_preserve_distinct_file_errors() {
+        use std::sync::mpsc::{TryRecvError, sync_channel};
+        use std::time::Duration;
+        let workers = NativeWorkers(std::sync::Mutex::new(Vec::new()));
+        let (started, entered) = sync_channel(1);
+        let (release, waiting) = sync_channel(1);
+        let first = workers
+            .spawn(move || {
+                started.send(()).expect("first started");
+                waiting
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("release first");
+                Ok(b"first".to_vec())
+            })
+            .expect("first reader");
+        entered
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first in flight");
+        let missing =
+            std::env::temp_dir().join(format!("zx-no-such-native-file-{}", std::process::id()));
+        let second = workers
+            .spawn(move || std::fs::read(missing))
+            .expect("second reader");
+        assert_eq!(
+            second
+                .recv_timeout(Duration::from_secs(1))
+                .expect("independent completion")
+                .1
+                .expect_err("second file missing")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(matches!(first.try_recv(), Err(TryRecvError::Empty)));
+        release.send(()).expect("release first");
+        assert_eq!(
+            first
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first completion")
+                .1
+                .expect("first file"),
+            b"first"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stalled_native_readers_refuse_a_third_without_retaining_more_than_two() {
+        use std::sync::mpsc::sync_channel;
+        let workers = NativeWorkers(std::sync::Mutex::new(Vec::new()));
+        let (entered, started) = sync_channel(2);
+        let mut releases = Vec::with_capacity(FETCH_CONCURRENCY);
+        for _ in 0..FETCH_CONCURRENCY {
+            let entered = entered.clone();
+            let (release, blocked) = sync_channel::<()>(1);
+            releases.push(release);
+            workers
+                .spawn(move || {
+                    entered.send(()).expect("worker started");
+                    let _ = blocked.recv_timeout(Duration::from_secs(2));
+                    Ok(vec![])
+                })
+                .expect("one of the bounded slots");
+        }
+        for _ in 0..FETCH_CONCURRENCY {
+            started
+                .recv_timeout(Duration::from_secs(1))
+                .expect("both readers active");
+        }
+        let third = workers.spawn(|| Ok(vec![]));
+        assert_eq!(
+            third.expect_err("no third retained blocked reader").kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(workers.0.lock().expect("registry").len(), FETCH_CONCURRENCY);
+        for release in releases {
+            release.send(()).expect("release reader");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn spawn_failure_reaps_finished_readers_before_returning_error() {
+        const CHILD: &str = "ZX_TEST_FINISHED_READER_PANIC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .arg("--exact")
+                .arg("--nocapture")
+                .arg("tests::spawn_failure_reaps_finished_readers_before_returning_error")
+                .env(CHILD, "1")
+                .output()
+                .expect("child test process");
+            assert!(output.status.success(), "child failed: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("zx: native file reader panicked:"),
+                "finished reader panic was not observed: {output:?}"
+            );
+            return;
+        }
+
+        let workers = NativeWorkers(std::sync::Mutex::new(Vec::new()));
+        let finished = std::thread::spawn(|| panic!("intentional finished reader panic"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !finished.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader did not finish"
+            );
+            std::thread::yield_now();
+        }
+        workers.0.lock().expect("registry").push(finished);
+        let error = workers
+            .spawn_with(
+                || Ok(vec![]),
+                |_read, _sender| Err(std::io::Error::other("injected spawn failure")),
+            )
+            .expect_err("spawn failure must propagate");
+        assert_eq!(error.to_string(), "injected spawn failure");
+        assert!(workers.0.lock().expect("registry").is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_read_deadline_is_finite_without_claiming_cancelled_io() {
+        use std::sync::mpsc::sync_channel;
+        let (sender, receiver) = sync_channel(1);
+        let deadline = std::time::Instant::now();
+        let completed_before = deadline - std::time::Duration::from_millis(1);
+        sender
+            .send((completed_before, Ok(b"on time".to_vec())))
+            .expect("worker finished before deadline");
+        assert_eq!(
+            NativeWorkers::receive(&receiver, deadline, "held.rom")
+                .expect("queued result observed after deadline")
+                .expect("completion time wins over polling time"),
+            b"on time"
+        );
+
+        let (late_sender, late_receiver) = sync_channel(1);
+        late_sender
+            .send((std::time::Instant::now(), Ok(b"late".to_vec())))
+            .expect("worker finished after deadline");
+        let error = NativeWorkers::receive(&late_receiver, completed_before, "held.rom")
+            .expect("deadline settled")
+            .expect_err("late bytes cannot become a successful load");
+        assert!(
+            error.contains("held.rom") && error.contains("UNKNOWN"),
+            "{error}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn abandoned_native_read_does_not_hold_shutdown() {
+        use std::sync::mpsc::sync_channel;
+        let workers = NativeWorkers(std::sync::Mutex::new(Vec::new()));
+        let (entered, started) = sync_channel(1);
+        let (release, blocked) = sync_channel(1);
+        let (done, finished) = sync_channel(1);
+        let receiver = workers
+            .spawn(move || {
+                entered.send(()).expect("entered read");
+                blocked
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release read");
+                done.send(()).expect("reader completion");
+                Ok(vec![42])
+            })
+            .expect("reader spawned");
+        started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader started");
+        let start = std::time::Instant::now();
+        drop(workers);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "shutdown is bounded"
+        );
+        release.send(()).expect("release abandoned read");
+        finished
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader completed");
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("read result")
+                .1
+                .expect("file"),
+            [42]
+        );
+    }
+
+    #[test]
+    fn completed_second_load_frees_a_slot_for_third_without_reordering() {
+        let paths = ["held", "second", "third", "fourth"].map(str::to_owned);
+        let started = Rc::new(Cell::new(0));
+        let release_first = Rc::new(Cell::new(false));
+        let mut requests = std::pin::pin!(load_ordered(&paths, {
+            let started = Rc::clone(&started);
+            let release_first = Rc::clone(&release_first);
+            move |path| {
+                let started = Rc::clone(&started);
+                let release_first = Rc::clone(&release_first);
+                async move {
+                    started.set(started.get() + 1);
+                    if path == "held" {
+                        std::future::poll_fn(|context| {
+                            if release_first.get() {
+                                Poll::Ready(())
+                            } else {
+                                context.waker().wake_by_ref();
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                    }
+                    Ok(path.into_bytes())
+                }
+            }
+        }));
+        let waker = futures_util::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut first = Box::pin(requests.next());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert_eq!(started.get(), 3, "third must start after second completes");
+        release_first.set(true);
+        assert_eq!(
+            first.as_mut().poll(&mut context),
+            Poll::Ready(Some(Ok(b"held".to_vec())))
+        );
+        drop(first);
+        let mut remaining = Box::pin(requests.collect::<Vec<_>>());
+        let Poll::Ready(loaded) = remaining.as_mut().poll(&mut context) else {
+            panic!("released files must complete");
+        };
+        assert_eq!(
+            loaded,
+            ["second", "third", "fourth"].map(|path| Ok(path.as_bytes().to_vec()))
+        );
+    }
+
+    #[test]
+    fn first_rom_error_returns_before_a_later_blocked_fetch_finishes() {
+        let paths = ["bad", "stuck", "next"].map(str::to_owned);
+        let started = Rc::new(Cell::new(0));
+        let mut requests = std::pin::pin!(load_ordered(&paths, {
+            let started = Rc::clone(&started);
+            move |path| {
+                let started = Rc::clone(&started);
+                async move {
+                    started.set(started.get() + 1);
+                    if path == "bad" {
+                        Err("ROM rejected".to_owned())
+                    } else {
+                        std::future::pending::<Result<Vec<u8>, String>>().await
+                    }
+                }
+            }
+        }));
+        let first = futures_util::task::noop_waker();
+        let mut context = Context::from_waker(&first);
+        let mut next = Box::pin(requests.next());
+        assert_eq!(
+            next.as_mut().poll(&mut context),
+            Poll::Ready(Some(Err("ROM rejected".to_owned())))
+        );
+        assert_eq!(
+            started.get(),
+            1,
+            "a ready first ROM error must not even poll a later blocked fetch"
+        );
+    }
+
+    #[test]
+    fn file_fetches_have_a_two_request_ceiling_and_keep_errors_ordered() {
+        let paths = ["one", "bad", "three"].map(str::to_owned);
+        let started = Rc::new(Cell::new(0));
+        let released = Rc::new(Cell::new(false));
+        let mut future = Box::pin(async {
+            load_ordered(&paths, {
+                let started = Rc::clone(&started);
+                let released = Rc::clone(&released);
+                move |path| {
+                    let started = Rc::clone(&started);
+                    let released = Rc::clone(&released);
+                    async move {
+                        started.set(started.get() + 1);
+                        std::future::poll_fn(|context| {
+                            if released.get() {
+                                Poll::Ready(())
+                            } else {
+                                context.waker().wake_by_ref();
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                        if path == "bad" {
+                            Err(path)
+                        } else {
+                            Ok(path.into_bytes())
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+        });
+        let waker = futures_util::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        assert_eq!(started.get(), FETCH_CONCURRENCY);
+        released.set(true);
+        let Poll::Ready(loaded) = future.as_mut().poll(&mut context) else {
+            panic!("released requests must complete");
+        };
+        assert_eq!(
+            loaded,
+            vec![
+                Ok(b"one".to_vec()),
+                Err("bad".to_owned()),
+                Ok(b"three".to_vec())
+            ]
+        );
+    }
 
     /// Logical pixels one character of the status font occupies.
     ///
@@ -1075,7 +1839,7 @@ mod tests {
         ((window - STATUS_MARGIN) / CHARACTER_WIDTH) as usize
     }
 
-    fn assert_fits(what: &str, text: &str) {
+    pub(super) fn assert_fits(what: &str, text: &str) {
         let width = text.chars().count();
         let room = columns();
         assert!(
@@ -1127,6 +1891,33 @@ mod tests {
     /// A ROM of nothing but `NOP`, so the clock advances and the cassette with it.
     const NOTHING: [u8; 16 * 1024] = [0x00; 16 * 1024];
 
+    #[test]
+    fn four_catch_up_frames_preserve_every_audio_sample() {
+        let mut machine = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        let mut pacer = Pacer::new();
+        let mut resampler = Resampler::new(audio::cpu_hz(false), 48_000);
+        const FOUR_FRAME_CAPACITY: usize = 4_096;
+        let mut mixed = Vec::with_capacity(FOUR_FRAME_CAPACITY);
+        run_tick(
+            Tick::Paced(Speed::REAL_TIME),
+            Duration::from_millis(80),
+            &mut pacer,
+            || 0.0,
+            || {
+                machine.run_frame();
+                resampler.feed(machine.take_samples(), &mut mixed);
+            },
+        );
+        assert_eq!(pacer.ran(), 4);
+        assert_eq!(machine.dropped_samples(), 0);
+        assert!(mixed.len() > 3_000, "four frames must reach the mixer");
+        assert_eq!(
+            mixed.capacity(),
+            FOUR_FRAME_CAPACITY,
+            "the four-frame buffer must not grow"
+        );
+    }
+
     /// A machine whose 60-T-state cassette has already been played off the end.
     fn a_machine_with_a_spent_cassette() -> Spectrum {
         let mut machine = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
@@ -1149,13 +1940,14 @@ mod tests {
         // from the same file: a mutation that survives is a gate looking at the wrong function.
         let mut machine = a_machine_with_a_spent_cassette();
         let mut status = Status::new();
+        let mut snapshots = snapshot::Writer::new();
 
-        act(Hotkey::PlayTape, &mut machine, &mut status);
+        act(Hotkey::PlayTape, &mut machine, &mut status, &mut snapshots);
         assert_eq!(status.message, drive::AT_THE_END);
 
         // And the empty drive, which is the other press `tape playing` used to answer.
         let mut empty = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
-        act(Hotkey::PlayTape, &mut empty, &mut status);
+        act(Hotkey::PlayTape, &mut empty, &mut status, &mut snapshots);
         assert_eq!(status.message, drive::NO_TAPE);
     }
 
@@ -1168,7 +1960,12 @@ mod tests {
         machine.insert_tape(spectrum::Tape::new(vec![10, 20, 30]));
         let mut status = Status::new();
 
-        act(Hotkey::PlayTape, &mut machine, &mut status);
+        act(
+            Hotkey::PlayTape,
+            &mut machine,
+            &mut status,
+            &mut snapshot::Writer::new(),
+        );
         assert_eq!(status.message, drive::PLAYING);
         report_a_finished_tape(&machine, &mut status);
         assert_eq!(status.message, drive::PLAYING, "nothing has ended yet");
@@ -1230,12 +2027,62 @@ mod tests {
             .max_by_key(|field| field.chars().count())
             .expect("RUNGS is never empty");
         let line = format!(
-            "{WIDEST_RATE:.1} Hz   speed {speed}   dropped {}   frame {}   \
+            "{WIDEST_RATE:.1} Hz   speed {speed}  frame drop {}  frame {}   \
              snd {WIDEST_QUEUE}   arrows {widest}",
             u64::MAX,
             u64::MAX,
         );
         assert_fits("the readout at its widest", &line);
+    }
+
+    #[test]
+    fn bounded_snapshot_rows_leave_notice_audio_loss_and_numeric_readout_visible() {
+        let highest_row = 2 + snapshot::MAX_COMPLETED_OUTCOMES + 1 + 1;
+        assert!(
+            (highest_row + 1) as f32 * STATUS_HEIGHT < window_conf().window_height as f32,
+            "two old outcomes, recovery UNKNOWN, notice and audio loss must fit above the readout"
+        );
+        assert_fits(
+            "widest snapshot completion",
+            &format!("saved snapshot-{}.z80", u32::MAX),
+        );
+        let mut line = String::new();
+        audio_loss_line(u64::MAX, &mut line);
+        assert_fits("widest audio loss", &line);
+    }
+
+    #[test]
+    fn audio_loss_is_labeled_even_when_no_frame_was_dropped() {
+        let mut machine = Spectrum::new(&NOTHING).expect("16 KB is a 48K ROM");
+        machine.run_frames(4);
+        let _ = machine.take_samples();
+        let lost = machine.dropped_samples();
+        assert!(lost > 0, "fixture must overflow the two-frame audio buffer");
+        assert_eq!(Pacer::new().dropped(), 0);
+        let mut line = String::new();
+        audio_loss_line(lost, &mut line);
+        assert_eq!(line, format!("audio samples lost {lost}"));
+        assert_fits("audio loss", &line);
+    }
+
+    #[test]
+    fn the_sound_field_formats_into_the_reused_line_without_growing_it() {
+        let mut status = Status::new();
+        status.audio_queued = i32::MAX;
+        let capacity = status.line.capacity();
+        for _ in 0..100 {
+            status.line.clear();
+            let _ = write!(
+                status.line,
+                "{}",
+                QueueDisplay {
+                    queued: status.audio_queued,
+                    tick: Tick::Paced(Speed::REAL_TIME),
+                }
+            );
+            assert_eq!(status.line, "2147483647");
+            assert_eq!(status.line.capacity(), capacity);
+        }
     }
 
     #[test]
@@ -1246,13 +2093,17 @@ mod tests {
         // fast-forward adds a third case to the same confusion.
         let real_time = Tick::Paced(Speed::REAL_TIME);
         let mut status = Status::new();
-        assert_eq!(status.queue(real_time), NO_DEVICE, "no device yet");
+        assert_eq!(
+            status.queue(real_time).to_string(),
+            NO_DEVICE,
+            "no device yet"
+        );
 
         status.audio_queued = 1024;
-        assert_eq!(status.queue(real_time), "1024", "a live device");
+        assert_eq!(status.queue(real_time).to_string(), "1024", "a live device");
 
         assert_eq!(
-            status.queue(Tick::FlatOut),
+            status.queue(Tick::FlatOut).to_string(),
             MUTED,
             "fast-forward left the last queue depth on the bar, which reads as a live device",
         );
@@ -1263,12 +2114,12 @@ mod tests {
         // it must sound like one. This is the assertion that reddens if `queue` is ever rewritten
         // to ask which rung is selected instead of what the tick resolved to.
         assert_eq!(
-            status.queue(Rung::Automatic.this_tick(false)),
+            status.queue(Rung::Automatic.this_tick(false)).to_string(),
             "1024",
             "an automatic machine with the drive stopped was silenced for no reason",
         );
         assert_eq!(
-            status.queue(Rung::Automatic.this_tick(true)),
+            status.queue(Rung::Automatic.this_tick(true)).to_string(),
             MUTED,
             "an automatic machine running flat out was reported as feeding a device",
         );

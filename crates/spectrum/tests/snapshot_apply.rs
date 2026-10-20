@@ -134,7 +134,7 @@ fn the_fixture_can_separate_a_permutation() {
     assert!(cpu.halted);
     // ...and every field must differ from what a fresh machine holds, or a `restore` that did
     // nothing at all would pass.
-    let fresh = machine().snapshot();
+    let fresh = machine().snapshot().expect("completed instruction");
     assert_ne!(fresh.cpu, snapshot.cpu);
     assert_ne!(fresh.border, snapshot.border);
     assert_ne!(fresh.frame_t_state, snapshot.frame_t_state);
@@ -192,7 +192,7 @@ fn r1_a_snapshot_survives_a_trip_through_the_machine() {
     machine
         .restore(&snapshot)
         .expect("both machines are 48K, so a restore cannot be refused");
-    assert_eq!(machine.snapshot(), snapshot);
+    assert_eq!(machine.snapshot().expect("completed instruction"), snapshot);
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn r1_holds_from_a_machine_that_was_already_running() {
     machine
         .restore(&snapshot)
         .expect("both machines are 48K, so a restore cannot be refused");
-    assert_eq!(machine.snapshot(), snapshot);
+    assert_eq!(machine.snapshot().expect("completed instruction"), snapshot);
 }
 
 #[test]
@@ -229,7 +229,10 @@ fn restoring_twice_is_the_same_as_restoring_once() {
     twice
         .restore(&snapshot)
         .expect("both machines are 48K, so a restore cannot be refused");
-    assert_eq!(once.snapshot(), twice.snapshot());
+    assert_eq!(
+        once.snapshot().expect("completed instruction"),
+        twice.snapshot().expect("completed instruction")
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -249,7 +252,10 @@ fn r3_a_canonical_file_survives_a_trip_through_the_machine() {
     machine
         .restore(&parsed)
         .expect("both machines are 48K, so a restore cannot be refused");
-    assert_eq!(z80::write(&machine.snapshot()), file);
+    assert_eq!(
+        z80::write(&machine.snapshot().expect("completed instruction")),
+        file
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -403,7 +409,7 @@ fn a_snapshot_of_a_fresh_machine_is_the_machine_it_came_from() {
     // The degenerate case, and the one that would catch `snapshot` inventing a value: a
     // machine that has done nothing must snapshot to zeros, a black border, and three banks of
     // zeroed RAM.
-    let snapshot = machine().snapshot();
+    let snapshot = machine().snapshot().expect("completed instruction");
     assert_eq!(snapshot.border, Colour::BLACK);
     assert_eq!(snapshot.frame_t_state, 0);
     assert_eq!(snapshot.cpu, ::z80::CpuState::default());
@@ -472,13 +478,13 @@ fn r1_holds_for_a_128_and_covers_its_sound_chip() {
     // a file — `snapshot::z80` still refuses the 128 hardware modes, which is step 9's work
     // and not sound's — so it comes from a machine, which is what makes this R1 and not R3.
     let source = machine_with_a_configured_chip();
-    let snapshot = source.snapshot();
+    let snapshot = source.snapshot().expect("completed instruction");
 
     let mut target = machine_128();
     target
         .restore(&snapshot)
         .expect("both machines are 128s, so a restore cannot be refused");
-    assert_eq!(target.snapshot(), snapshot);
+    assert_eq!(target.snapshot().expect("completed instruction"), snapshot);
 }
 
 #[test]
@@ -491,7 +497,9 @@ fn the_chips_registers_really_travel_and_are_not_dropped_at_both_ends() {
     //
     // So the restore lands on a machine whose chip already holds **different** values, and
     // what is asserted is that they became the snapshot's.
-    let snapshot = machine_with_a_configured_chip().snapshot();
+    let snapshot = machine_with_a_configured_chip()
+        .snapshot()
+        .expect("completed instruction");
 
     // Rotated by eight rather than mirrored: `15 - r` would coincide with `r + 1` at `r = 7`,
     // leaving one register the same on both sides and invisible to the comparison below.
@@ -534,11 +542,11 @@ fn a_48k_snapshot_carries_no_chip_at_all() {
     // Not zeros — nothing. A 48K does not contain the chip, and a snapshot that carried
     // sixteen zero bytes for it would be describing hardware the machine lacks. It is also
     // what keeps R1 exact on a 48K: there is no field for a restore to fail to put back.
-    let snapshot = machine().snapshot();
+    let snapshot = machine().snapshot().expect("completed instruction");
     let mut target = machine();
     target.restore(&snapshot).expect("both machines are 48K");
     assert!(target.ay().is_none());
-    assert_eq!(target.snapshot(), snapshot);
+    assert_eq!(target.snapshot().expect("completed instruction"), snapshot);
 }
 
 #[test]
@@ -556,7 +564,7 @@ fn a_restore_starts_the_chips_generators_from_power_on() {
     ay_poke(&mut source, 13, 0x0C); // rising, repeating
     ay_poke(&mut source, 8, 0x10); // channel A follows it
     source.run_frame();
-    let snapshot = source.snapshot();
+    let snapshot = source.snapshot().expect("completed instruction");
 
     let mut a = machine_128();
     a.restore(&snapshot).expect("both are 128s");
@@ -592,7 +600,9 @@ fn a_128_written_and_read_back_is_still_a_128() {
     //
     // The information was never missing. `Snapshot::model` has existed since M7 precisely so
     // the applier could refuse a mismatch; the writer simply was not reading it.
-    let snapshot = machine_with_a_configured_chip().snapshot();
+    let snapshot = machine_with_a_configured_chip()
+        .snapshot()
+        .expect("completed instruction");
     assert_eq!(snapshot.model(), spectrum::Model::Spectrum128);
 
     let file = z80::write(&snapshot);
@@ -621,7 +631,7 @@ fn all_eight_banks_survive_the_file() {
         machine.memory_mut().bank_mut(index)[0] = 0xA0 | bank;
         machine.memory_mut().bank_mut(index)[PAGE_SIZE - 1] = 0x50 | bank;
     }
-    let snapshot = machine.snapshot();
+    let snapshot = machine.snapshot().expect("completed instruction");
     let read_back = z80::parse(&z80::write(&snapshot)).expect("our own file must parse");
 
     for bank in 0..8_u8 {
@@ -702,7 +712,7 @@ fn a_128s_frame_position_survives_the_file() {
     // geometry hard-coded and the reader had the same one, so the two agreed with each other
     // and with no 128 ever built.
     for position in [T_STATES_PER_FRAME, T_STATES_PER_FRAME + 1, FRAME_128 - 1] {
-        let mut snapshot = machine_128().snapshot();
+        let mut snapshot = machine_128().snapshot().expect("completed instruction");
         snapshot.frame_t_state = position;
 
         let read_back = z80::parse(&z80::write(&snapshot)).expect("our own file must parse");
@@ -741,7 +751,7 @@ fn the_128s_counter_matches_the_other_half_of_the_format_descriptions_sentence()
         (FRAME_128 - 1, 0, 2),
     ];
     for (position, low, high) in cases {
-        let mut snapshot = machine_128().snapshot();
+        let mut snapshot = machine_128().snapshot().expect("completed instruction");
         snapshot.frame_t_state = position;
         let file = z80::write(&snapshot);
 
@@ -782,7 +792,7 @@ fn a_paged_128s_memory_map_survives_the_file() {
         "the source must have paged, or this proves nothing"
     );
 
-    let snapshot = source.snapshot();
+    let snapshot = source.snapshot().expect("completed instruction");
     let file = z80::write(&snapshot);
     assert_eq!(
         file.get(35),
@@ -812,7 +822,9 @@ fn the_chip_survives_the_file_and_r15_is_written_as_zero() {
     // describes `R15`, which an AY-3-8912 does not have — so a round trip over a file we wrote
     // compares our zero against our zero and would be green whatever went there. It is
     // asserted against the **bytes** instead, which is what `docs/M7.md` Decision 6 asks for.
-    let snapshot = machine_with_a_configured_chip().snapshot();
+    let snapshot = machine_with_a_configured_chip()
+        .snapshot()
+        .expect("completed instruction");
     let file = z80::write(&snapshot);
 
     // Offsets 38 and 39-54: the select latch, then fifteen registers and the absent sixteenth.

@@ -27,6 +27,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{machine, set_pc, write_program};
 use spectrum::joystick::{Direction, KEMPSTON_PORT};
 use spectrum::{Key, Spectrum};
@@ -57,7 +59,7 @@ fn read_joystick(machine: &mut Spectrum) -> u8 {
     write_program(machine, PROGRAM, &[IN_A_N, low]);
     set_pc(machine, PROGRAM);
     machine.step();
-    (machine.cpu_state().af >> 8) as u8
+    (machine.completed().af >> 8) as u8
 }
 
 #[test]
@@ -176,7 +178,7 @@ fn the_whole_family_answers_and_the_keyboards_own_ports_do_not() {
         set_pc(&mut machine, PROGRAM);
         machine.step();
         assert_eq!(
-            (machine.cpu_state().af >> 8) as u8,
+            (machine.completed().af >> 8) as u8,
             FIRE,
             "port {low:#04X} is inside the window"
         );
@@ -187,7 +189,7 @@ fn the_whole_family_answers_and_the_keyboards_own_ports_do_not() {
         set_pc(&mut machine, PROGRAM);
         machine.step();
         assert_ne!(
-            (machine.cpu_state().af >> 8) as u8,
+            (machine.completed().af >> 8) as u8,
             FIRE,
             "port {low:#04X} is outside it"
         );

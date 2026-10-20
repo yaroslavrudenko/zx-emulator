@@ -49,7 +49,7 @@
 //! no cassette the whole per-T-state cost is that one test. The timestamp — a `u64`
 //! multiply-add — sits **inside** the branch. An earlier cut passed it as an argument at the
 //! call site, where it was evaluated before any guard could discard it, and that cost
-//! **+21.9 % on `quiet_48k`**: a machine with no tape paying for one on every T-state.
+//! **+19.6 % on `quiet_48k`**: a machine with no tape paying for one on every T-state.
 //!
 //! ```text
 //! cargo bench -p spectrum --bench frame     # 2026-09-03, lowest median of three runs
@@ -62,7 +62,7 @@
 //! moment's whole price, and it is what the run-late design predicts: the same samples are
 //! generated either way, merely across 33 calls instead of one. `benches/frame.rs`'s
 //! `tape_playing_48k` is the row that says so, and it did not exist when the paragraph above was
-//! written — which is why a 23 % regression on this exact path once shipped green.
+//! written — which is why a +19.6 % regression on this exact path once shipped green.
 //!
 //! A border write that leaves the speaker bit alone costs one comparison, which is why
 //! `Audio::set_beeper` takes the level and compares rather than being called only when the
@@ -316,7 +316,7 @@ impl Audio {
     /// [`crate::Ula::advance`] — the one place time passes — and it runs 3.5 million times a
     /// second rather than once per `OUT`. At that rate the guard is in the wrong place: `t_state`
     /// is an **argument**, so it is evaluated at the call site before this function can discard
-    /// it, and it is a `u64` multiply-add. Measured, that cost +21.9 % on `benches/frame.rs`'s
+    /// it, and it is a `u64` multiply-add. Measured, that cost +19.6 % on `benches/frame.rs`'s
     /// `quiet_48k` — on a machine with no tape in the drive at all.
     ///
     /// So the caller filters now: `Tape::advance` returns whether the level moved, and this is

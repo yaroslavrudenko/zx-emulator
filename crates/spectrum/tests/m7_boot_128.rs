@@ -33,6 +33,8 @@
 //!   contention entirely left the message appearing and only moved the frame it appeared on.
 
 mod common;
+
+use common::Completed;
 mod m7_common;
 
 use m7_common::{screen_text, sinclair_rom_128, tap};
@@ -165,7 +167,7 @@ fn the_machine_is_still_running_its_interrupt_loop_at_the_menu() {
     let Some((machine, _)) = booted() else {
         return;
     };
-    let state = machine.cpu_state();
+    let state = machine.completed();
     assert!(state.iff1, "the menu loop runs with interrupts enabled");
     assert!(!state.halted, "the machine must not be wedged in HALT");
     assert_eq!(machine.frames(), MENU_FRAME);

@@ -58,6 +58,92 @@ been labelled as such; nothing in them changed.
 > **evidence** register, not an API register. Pointing a reader asking *"did this break?"* at a
 > table answering *"is this tested?"* is the same conflation rejected above.
 
+## Unreleased — toolchain · workspace — Rust 1.99.1 pinned
+
+- **Changed.** `rust-toolchain.toml` pins `channel = "1.99.1"` (it said `"stable"`, which floated).
+  The MSRV (`rust-version = "1.98"`) does not move: no code needs 1.99, and the tree builds
+  unchanged on 1.98.0. No source change was needed for 1.99.1 (`clippy -D warnings` clean on host
+  and wasm32).
+- **Re-pinned with the compiler.** `web/perf-baseline.txt` re-recorded on `arm64 rustc 1.99.1`;
+  `crates/z80/tests/codegen.rs` `PINNED_RUSTC` 1.98.0 → 1.99.1 and `EXPECTED_BOUNDS_CHECKS` 7 → 8
+  (one more `registers.rs:148` call site, source unchanged).
+- **Fixed, the slowdown 1.99.1 brought.** Unfixed, `quiet_48k` was +4 to +14 % slower in wall
+  time with instructions flat: LLVM 23's `ReduceSwitchRange` lowered `dispatch`'s prefix `match`
+  with one extra taken branch per unprefixed opcode (proven by a binary patch). `dispatch` now
+  marks the `PREFIX_CB` / `PREFIX_ED` arms `core::hint::cold_path()` (+6 lines, an owner-approved
+  RULE-4 / RV-6 exception); `quiet_48k` is back to 1.98.0's 74 µs, `tape_playing_48k` −5 %,
+  `flat_bus` −10.8 % instructions. `codegen.rs`'s tail-merged bounds-check row moved file
+  (`instructions.rs` → `lib.rs`, still 8 sites). Removing the hints brings the regression back.
+- **Measured.** Emulator output byte-identical on the ten-workload `zx-shot` corpus. Instructions
+  per frame −5.5 to +0.06 % against 1.98.0. The wasm frame is at or below 1.98.0's.
+  `docs/PERFORMANCE.md`, *The toolchain*.
+
+## Unreleased — performance · every crate — batched covered ticks, an exact tape edge, and the surface the prefix-chain work changed
+
+The judges' decision of 2026-10-20 (`docs/PERFORMANCE.md` carries the numbers). Every public
+surface change on the branch is listed here, including the seven that arrived with the bounded
+prefix dispatch, because a signature that started returning `Result` breaks every caller that
+read a field off the old value.
+
+### `crates/z80`
+
+- **Changed (breaking).** `Cpu::state` returns `Result<CpuState, StateCaptureError>`. A CPU part
+  way through a `DD`/`FD` prefix chain has no `CpuState` that describes it, so the old infallible
+  signature would have handed out a false snapshot.
+- **Added.** `StateCaptureError` (`InstructionInProgress`), re-exported at the crate root.
+- **Added.** `Cpu::with_prefix_budget(bus, max_prefix_fetches)`: how many prefix fetches one
+  `step` may consume before it returns mid-chain. `crates/spectrum` builds its CPU with it.
+- **Added (provided trait method, non-breaking).** `Bus::ticks(addr, count)`: `count` consecutive
+  T-states with `addr` on the bus. Its default calls `Bus::tick` once per T-state, so every
+  existing implementor sees exactly the stream it saw before; the core now reports each machine
+  cycle through it, and `docs/ARCHITECTURE.md` Decision 1's 2026-10-20 amendment states the rule
+  an override must keep.
+
+### `crates/spectrum`
+
+- **Changed (breaking).** `Spectrum::cpu_state` and `Spectrum::snapshot` return
+  `Result<_, StateCaptureError>`, for the reason above; `StateCaptureError` is re-exported.
+- **Changed, behaviour.** `Ula` overrides `Bus::ticks` for runs whose contention is already
+  charged and that hold no tape edge: −31 to −39 % instructions per frame, every output
+  byte-identical on ten `zx-shot` workloads.
+- **Changed, audio (a separate change from the line above).** A tape edge that falls inside a
+  contention stall or a port delay is stamped at the T-state it happened, not at the end of the
+  stall — up to 12 T-states earlier. **Today's WAV output changes** on every tape load: at most 722
+  of 32767, 46.6–58.7 dB below the signal; screen and machine state are unchanged.
+
+### `crates/frontend`
+
+- **Changed (breaking).** `media::save` returns `Result<Vec<u8>, StateCaptureError>`.
+- **Added.** `Pacer::run_bounded(elapsed, clock, frame)`: the paced arm the window runs, inside
+  the same 30 ms budget as flat-out. `Pacer::advance` now shares its saturating accounting, so a
+  second suspension no longer aborts on overflow.
+- **Changed, behaviour.** The window renders and uploads the screen only on a display tick where an
+  emulated frame ran; it admits an audio chunk only if it fits whole under the 100 ms backstop,
+  the rule the browser page already applied. *Consequence on the desktop:* a catch-up push of up
+  to four frames (about 80 ms) that would cross 100 ms is now dropped whole, where it was admitted
+  and truncated at the ring's capacity — about 80 ms of sound lost on such a tick instead of about
+  30 ms (`docs/PERFORMANCE.md`, *The budgets*).
+- **Added.** `audio::admits(queued, chunk, target) -> bool`, the admission rule above as one
+  named `const fn`, so a test can hold it and `web/zx_page.js`'s copy to one rule
+  (`the_backstop_admits_a_chunk_only_whole_under_100_ms`).
+
+### `crates/page` (recorded here although this file's scope excludes it — see the note above)
+
+- **Added.** `pub mod telemetry`: `enabled()` (the one `ZX_TELEMETRY` reader), `LatencyHistogram`
+  (`new`, `Default`, `record(Duration)`, `take() -> Summary`) and `Summary` (`samples`, `p50`,
+  `p95`, `p99`, `max`; `Display`). One histogram for the audio callback and the frame loop, which
+  each carried their own. `Default` is beyond the surface the decision listed and is kept because
+  the gate requires it: a public zero-argument `new` without `Default` is clippy's
+  `new_without_default`, an error under `-D warnings` (removing it was tried and went red).
+  `max` is to the microsecond. `take` reports no maximum for a period with no samples (it waits
+  for the take that counts its sample) and never a maximum below the highest bucket counted; a
+  sample landing mid-`take` can still put its maximum in a neighbouring period. Those two guards
+  are +4 code lines on a correctness defect — a recorded RULE-4 (RV-6) exception, judges' Q6.
+- **Removed, report format.** The audio telemetry line no longer prints
+  `callback_us_overflow_ge_N=…`: the merged histogram's tail reaches 5.13 s and counts anything
+  longer in its last bucket, so the separate overflow counter has no successor field. A script
+  that parsed that field must read `max` instead.
+
 ## Unreleased — audio, second wave · `crates/frontend` — the tape as loud as the beeper, and a browser page that stops shedding buffers
 
 The follow-up to the entry below, closing the one audible defect it left open — S4, the tape's
@@ -115,13 +201,14 @@ place the tape's level can change — **on the tape's own edge rather than on ev
 cost on a machine with no tape playing is the `bool` `Tape::advance` was already computing.
 
 > **That sentence said *"the same compare-before-render shape `set_beeper` uses"*, and shipping it
-> that way cost +23% of the emulator's speed.** `set_beeper` compares inside itself, which is right
+> that way cost ~~+23% of the emulator's speed~~ +19.6 % on `quiet_48k`.** *(corrected 2026-10-20: the one figure this repository quotes for P1 is `quiet_48k`'s +19.6 %)* `set_beeper` compares inside itself, which is right
 > for a setter called thousands of times a second; `Ula::advance` runs **69,888 times per frame**,
 > and Rust evaluates arguments *before* the call, so the timestamp — `Clock::t_states`, a 64-bit
 > multiply-add that under this workspace's `overflow-checks = true` compiles to two multiplies and
 > two branch-to-panic edges — ran on every elapsed T-state and was then thrown away by the guard
 > inside the callee. Measured on `benches/frame.rs`: **+19% to +30% across all eleven cases, mean
-> +23%**, on a machine with **no tape in the drive**.
+> +23%**, on a machine with **no tape in the drive**. *(The mean of eleven cases, kept as measured; P1's one quoted
+> figure is `quiet_48k`'s +19.6 %.)*
 >
 > `Tape::advance` already knew when the level moved — `finish_pulse` is the only writer of it and
 > runs right there — so it returns that, and the timestamp is computed only when there is something

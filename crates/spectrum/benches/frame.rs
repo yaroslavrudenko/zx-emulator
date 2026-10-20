@@ -38,6 +38,7 @@
 //! | `tape_playing_48k` | `drained_48k` **plus a cassette actually turning** — a ROM pilot tone under the same `NOP` frame, so the difference between the two rows is the whole of `Tape::advance` → `Audio::set_tape` → `Audio::render_to` and nothing else |
 //! | `border_48k` | a guest flipping the **border** every 18 T-states — about 3900 bands' worth in a frame |
 //! | `quiet_rendered_48k` / `border_rendered_48k` | the same frames **plus a `render`**, which is the only thing that walks the border record. The gap between the pair is what drawing bands costs over drawing one colour |
+//! | `halt_48k` | a `HALT` with interrupts disabled: the whole frame is the halted M1 cycle, a fetch at `PC` and four T-states, repeated. What a game waiting for the next interrupt costs, and what a HALT fast-forward would have to beat |
 //!
 //! `beeper_48k`, `ay_128` and `border_48k` are deliberately far heavier than real software: a
 //! music driver writes the AY about fourteen times per **frame**, not two thousand times, and
@@ -67,7 +68,7 @@
 //! # And on 2026-09-03, with the tape half landed
 //!
 //! Two changes sit between the dates. M8's tape half routed the `EAR` line to the speaker —
-//! and first shipped a per-T-state timestamp with it, the +23 % regression whose account
+//! and first shipped a per-T-state timestamp with it, the +19.6 % regression whose account
 //! `docs/ARCHITECTURE.md` Decision 7's correction carries, reversed the same afternoon and
 //! the reason `tape_playing_48k` exists — and `Memory::is_contended` was folded into a
 //! per-slot cache rebuilt on the paging write instead of walking bank contention per access.
@@ -142,7 +143,7 @@ fn load(machine: &mut Spectrum, address: u16, program: &[u8]) {
 
 /// Point `PC` at `address`.
 fn set_pc(machine: &mut Spectrum, address: u16) {
-    let mut state = machine.cpu_state();
+    let mut state = machine.cpu_state().expect("completed instruction");
     state.pc = address;
     machine.set_cpu_state(state);
 }
@@ -182,6 +183,9 @@ fn case(
 
 /// `NOP`.
 const NOPS: &[u8] = &[0x00];
+
+/// `HALT`, with interrupts disabled from reset, so it never wakes inside the frame.
+const HALTS: &[u8] = &[0x76];
 
 /// `XOR 0x10 : OUT (0xFE),A` — the speaker flipped every eighteen T-states.
 const BEEPER: &[u8] = &[0xEE, 0x10, 0xD3, 0xFE];
@@ -224,6 +228,18 @@ fn quiet_48k(bencher: Bencher) {
         forty_eight,
         UNCONTENDED,
         NOPS,
+        false,
+        FORTY_EIGHT_FRAME,
+    );
+}
+
+#[divan::bench]
+fn halt_48k(bencher: Bencher) {
+    case(
+        bencher,
+        forty_eight,
+        UNCONTENDED,
+        HALTS,
         false,
         FORTY_EIGHT_FRAME,
     );
@@ -331,7 +347,7 @@ const _: () = assert!(PILOT_PULSES as u32 * PILOT_PULSE > FORTY_EIGHT_FRAME);
 /// `quiet_48k` grades that. Nothing graded the other side. `tape_reads_48k` reads the `EAR` port
 /// hard, but with an **empty drive** — the level never moves, so `Tape::advance` returns on its
 /// first guard and `Audio::set_tape` is never reached. Every case in this file was in that state,
-/// and a **+23 % regression on exactly this path shipped green** because of it: the wiring that
+/// and a **+19.6 % regression on exactly this path shipped green** because of it: the wiring that
 /// put a `u64` multiply-add on every elapsed T-state was invisible to all eleven rows.
 ///
 /// A pilot tone is the honest shape to measure. It is what a real load spends most of its time

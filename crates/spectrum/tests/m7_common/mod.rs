@@ -20,6 +20,7 @@
 
 #![allow(dead_code)]
 
+use crate::common::Completed;
 use spectrum::Spectrum;
 use spectrum::memory::PAGE_SIZE;
 use spectrum::timing::Timing;
@@ -188,7 +189,7 @@ pub fn ay_peek(machine: &mut Spectrum) -> u8 {
 /// The same, through a caller's choice of port.
 pub fn ay_peek_via(machine: &mut Spectrum, port: u16) -> u8 {
     run_program(machine, PROGRAM, &in_c_a(port), IN_C_A_STEPS);
-    (machine.cpu_state().af >> 8) as u8
+    (machine.completed().af >> 8) as u8
 }
 
 /// Where [`ay_poke`] and its neighbours assemble: bank 2, which no paging value moves.

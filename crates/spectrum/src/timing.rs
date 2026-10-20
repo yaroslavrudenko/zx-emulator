@@ -169,6 +169,9 @@ use crate::screen::DISPLAY_HEIGHT;
 /// its support either. If that day comes, moving it is a two-line change.
 const DELAY_PATTERN: [u32; 8] = [6, 5, 4, 3, 2, 1, 0, 0];
 
+/// Worst M1 wait, shared by both models; the descending pattern's first slot is its maximum.
+pub(crate) const MAX_CONTENTION_DELAY: u32 = DELAY_PATTERN[0];
+
 const _: () = assert!(DELAY_PATTERN.len().is_power_of_two());
 
 /// T-states per line during which the ULA is fetching, and therefore contending.

@@ -135,6 +135,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     CONTENDED_CODE, HALT, NOP, NOP_T_STATES, UNCONTENDED_CODE, advance_to_absolute,
     cost_of_running, elapsed, enable_interrupts, machine, set_pc, with_cpu_state, write_program,
@@ -325,6 +327,7 @@ fn a_chain_across_the_wrap_costs_what_the_same_bytes_cost_as_separate_instructio
 /// is 1.876 frames. Started at [`TWO_WRAP_START`] it crosses **two** boundaries, which is the
 /// claim: `docs/MACHINE.md` says there is no small maximum for one instruction, and a machine
 /// whose rollover handled one crossing but not two would pass every other case in this file.
+/// The current bounded prefix budget yields several `step()` slices of that one instruction.
 const LONG_CHAIN: usize = 32767;
 const LONG_CHAIN_AT: u16 = 0x8000;
 
@@ -346,13 +349,21 @@ fn one_instruction_can_advance_the_frame_counter_more_than_once() {
 
     set_pc(&mut machine, LONG_CHAIN_AT);
     let before = elapsed(&machine);
-    let nominal = u64::from(machine.step());
+    let first_slice = u64::from(machine.step());
+    assert_eq!(first_slice, 27_952, "worst-case contended-M1 prefix budget");
+    let mut nominal = first_slice;
+    let mut slices = 1;
+    while machine.cpu_state().is_err() {
+        assert!(slices < 6, "bounded instruction did not finish");
+        nominal += u64::from(machine.step());
+        slices += 1;
+    }
     let cost = elapsed(&machine) - before;
 
     assert_eq!(
         nominal,
         chain_nominal(LONG_CHAIN),
-        "one step, {} M1 cycles, {} nominal T-states",
+        "{slices} slices, {} M1 cycles, {} nominal T-states",
         LONG_CHAIN + 1,
         chain_nominal(LONG_CHAIN)
     );
@@ -370,7 +381,7 @@ fn one_instruction_can_advance_the_frame_counter_more_than_once() {
         chain_nominal(LONG_CHAIN)
     );
     assert_eq!(
-        machine.cpu_state().pc,
+        machine.completed().pc,
         0,
         "the chain ends on the last byte of the address space, so consuming its terminal \
          opcode wraps PC to zero"
@@ -591,7 +602,7 @@ fn machine_with_a_handler(start: u64) -> Spectrum {
 fn run_to_acceptance(machine: &mut Spectrum) -> u64 {
     for _ in 0..SPIN_BUDGET {
         machine.step();
-        if machine.cpu_state().pc == HANDLER {
+        if machine.completed().pc == HANDLER {
             return machine.frames();
         }
     }
@@ -625,7 +636,7 @@ fn an_overshoot_past_the_interrupt_window_misses_that_frames_interrupt() {
          interrupt"
     );
     assert_eq!(
-        just_inside.cpu_state().sp,
+        just_inside.completed().sp,
         0xFF00 - 2,
         "and the return address must be on the stack"
     );
@@ -641,7 +652,7 @@ fn an_overshoot_past_the_interrupt_window_misses_that_frames_interrupt() {
         "one T-state later, the chain must overshoot by 32"
     );
     assert!(
-        just_outside.cpu_state().iff1,
+        just_outside.completed().iff1,
         "nothing has been accepted yet"
     );
     assert_eq!(
@@ -674,7 +685,7 @@ fn a_halt_at_the_boundary_resumes_on_the_next_frames_interrupt() {
         (1, 0),
         "the HALT cycle spans the wrap and lands exactly on the new frame"
     );
-    assert!(machine.cpu_state().halted, "and the CPU is still halted");
+    assert!(machine.completed().halted, "and the CPU is still halted");
 
     assert_eq!(
         run_to_acceptance(&mut machine),
@@ -682,7 +693,7 @@ fn a_halt_at_the_boundary_resumes_on_the_next_frames_interrupt() {
         "offset zero is inside the window, so frame one's interrupt must be accepted at once"
     );
     assert!(
-        !machine.cpu_state().halted,
+        !machine.completed().halted,
         "acceptance leaves HALT: the handler must not return into it"
     );
     assert_eq!(

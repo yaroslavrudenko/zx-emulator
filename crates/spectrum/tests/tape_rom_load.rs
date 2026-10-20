@@ -47,6 +47,9 @@
 //!   not graded, because the loader does not depend on it.
 //! - **Turbo loaders.** `.tap` cannot represent one at any speed.
 
+mod common;
+
+use common::Completed;
 use spectrum::Spectrum;
 use spectrum::tape::{Tape, tap};
 use spectrum::timing::T_STATES_PER_FRAME;
@@ -190,7 +193,7 @@ fn elapsed(machine: &Spectrum) -> u64 {
 fn run_until(machine: &mut Spectrum, targets: &[u16]) -> Option<u16> {
     let start = elapsed(machine);
     while elapsed(machine) - start < BUDGET {
-        let pc = machine.cpu_state().pc;
+        let pc = machine.completed().pc;
         if targets.contains(&pc) {
             return Some(pc);
         }
@@ -290,9 +293,9 @@ fn no_shortcut_exists_past_the_ear_bit() {
     // inside the ROM — which is a different observation from having wandered off, and both
     // would otherwise read as "the budget expired".
     assert!(
-        machine.cpu_state().pc < 0x4000,
+        machine.completed().pc < 0x4000,
         "the machine should still be in the ROM's edge-detection loop, not at {:#06X}",
-        machine.cpu_state().pc
+        machine.completed().pc
     );
 }
 

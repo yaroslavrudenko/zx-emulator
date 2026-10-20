@@ -59,9 +59,10 @@
 // — so this ring is a backstop against a producer that has already escaped both, and its size
 // only has to be *comfortably larger* than their figure rather than equal to it.
 //
-// 16384 samples is 341 ms at 48 kHz and 171 ms at 96 kHz, so it clears the main thread's 100 ms
-// bound at every output rate a browser will plausibly run, and it is a power of two so the
-// indices mask instead of branching. 64 KiB, allocated once, for the whole session.
+// Size the backstop from this device's rate, not the default 48 kHz rate. The next power of two
+// above 100 ms clears the upstream full-buffer ceiling, even at the page's maximum accepted
+// 768 kHz. The maximum is 131072 samples (512 KiB), allocated once; rates beyond that bound
+// cannot grow this ring without limit.
 //
 // **When it is full the OLDEST samples go**, which is the opposite of what the desktop ring does
 // and is right for the same reason the desktop's is: the discard has to land on the audio least
@@ -76,23 +77,23 @@
 // an ordinary comment that no tool consumes. It was used here for the field comments below,
 // which read as documentation and were not. JSDoc's `/** */` would be consumed — by nothing this
 // project runs, so plain comments are the honest spelling.
-const CAPACITY = 16384;
+const BACKSTOP_SECONDS = 0.1;
+const MAX_RING_SAMPLES = 131072;
+const CAPACITY = Math.min(
+    2 ** Math.ceil(Math.log2(Math.max(1, sampleRate * BACKSTOP_SECONDS))),
+    MAX_RING_SAMPLES,
+);
 
 // Turns any index into a ring offset. See `CAPACITY`.
 const MASK = CAPACITY - 1;
 
-// Process calls between reports of the backlog to the main thread.
-//
-// The main thread needs the queue depth so Rust can see whether it is running ahead or behind,
-// and a message per `process` call would be ~375 a second for a number nobody reads that often.
-//
-// **8 and not 16, because the number is now a control loop's feedback rather than a readout.**
-// `frontend::audio::Resampler::track` corrects the output rate from this depth once per emulated
-// frame — every 20 ms — and at 16 the depth refreshed every ~42.7 ms, so the loop applied the
-// same stale error twice before seeing its own effect. A controller acting on measurements
-// slower than its own period is how a limit cycle starts, and a limit cycle in this loop is
-// audible as pitch wobble. At 8 the refresh is ~21.3 ms, just inside the frame.
-const REPORT_EVERY = 8;
+// Reports must arrive within a 50Hz frame, including at the lowest accepted device rates.
+// Eight fixed 128-sample quanta take 128ms at 8kHz: the page's 100ms credit fills and drops
+// ordinary frames before its first consumed report. Use one quantum at 8kHz and seven at 48kHz;
+// the count scales with device rate without allocating in the audio callback.
+const RENDER_QUANTUM = 128;
+const EMULATED_HZ = 50;
+const REPORT_EVERY = Math.max(1, Math.floor(sampleRate / (EMULATED_HZ * RENDER_QUANTUM)));
 
 class ZxProcessor extends AudioWorkletProcessor {
     constructor() {
@@ -146,12 +147,10 @@ class ZxProcessor extends AudioWorkletProcessor {
         const start = chunk.length > CAPACITY ? chunk.length - CAPACITY : 0;
         const taken = chunk.length - start;
 
-        const overflow = this.queued + taken - CAPACITY;
-        if (overflow > 0) {
-            this.read = (this.read + overflow) & MASK;
-            this.queued -= overflow;
-            this.consumed += overflow;
-        }
+        const overflow = Math.max(0, this.queued + taken - CAPACITY);
+        this.read = (this.read + overflow) & MASK;
+        this.queued -= overflow;
+        this.consumed += start + overflow;
 
         // At most two `set()` calls: one to the end of the ring, one from the start if the write
         // wrapped. `CAPACITY` being a power of two is what makes the wrap a mask rather than a

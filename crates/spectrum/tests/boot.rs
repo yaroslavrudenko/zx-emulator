@@ -34,6 +34,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::sinclair_rom;
 use spectrum::Spectrum;
 use spectrum::screen::read_text;
@@ -89,7 +91,7 @@ fn the_machine_is_still_running_its_interrupt_loop_at_the_end() {
     let mut machine = Spectrum::new(&rom).expect("the 48K ROM is one page");
     machine.run_frames(FRAMES);
 
-    let state = machine.cpu_state();
+    let state = machine.completed();
     assert!(
         state.iff1,
         "the ROM's editor loop runs with interrupts enabled"

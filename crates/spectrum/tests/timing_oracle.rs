@@ -593,6 +593,9 @@
 //! Provenance, licensing and both SHA-256s are in `testdata/README.md`; `docs/MACHINE.md` carries
 //! the 48K's.
 
+mod common;
+
+use common::Completed;
 use spectrum::Spectrum;
 use spectrum::memory::BankIndex;
 use spectrum::snapshot::Snapshot;
@@ -894,7 +897,7 @@ fn run_group(rom: &[u8], image: &Image, group: u8, contended: bool) -> Reading {
         .memory_mut()
         .write(CONTENDED_FLAG, u8::from(contended));
 
-    let mut state = prologue.cpu_state();
+    let mut state = prologue.completed();
     state.pc = USR_ENTRY;
     state.bc = PROGRAM;
     state.sp = ENTRY_SP;
@@ -903,13 +906,13 @@ fn run_group(rom: &[u8], image: &Image, group: u8, contended: bool) -> Reading {
     // `LD HL,nn` / `PUSH HL` / `PUSH BC` / `RET`. Bounded well above four so a ROM that does
     // something else fails with a position rather than hanging.
     for _ in 0..16 {
-        if prologue.cpu_state().pc == PROGRAM {
+        if prologue.completed().pc == PROGRAM {
             break;
         }
         prologue.step();
     }
     assert_eq!(
-        prologue.cpu_state().pc,
+        prologue.completed().pc,
         PROGRAM,
         "the ROM's USR prologue did not reach {PROGRAM:#06X}"
     );
@@ -927,14 +930,14 @@ fn run_group(rom: &[u8], image: &Image, group: u8, contended: bool) -> Reading {
             .memory_mut()
             .write(0x4000 + u16::try_from(offset).expect("48K of RAM"), *byte);
     }
-    machine.set_cpu_state(prologue.cpu_state());
+    machine.set_cpu_state(prologue.completed());
     assert_eq!(
         (machine.frames(), machine.frame_t_state()),
         (0, 0),
         "the measurement must start at the top of a frame"
     );
 
-    while machine.cpu_state().pc != STOP {
+    while machine.completed().pc != STOP {
         machine.step();
         let elapsed = machine.frames() * u64::from(spectrum::timing::T_STATES_PER_FRAME)
             + u64::from(machine.frame_t_state());
@@ -943,7 +946,7 @@ fn run_group(rom: &[u8], image: &Image, group: u8, contended: bool) -> Reading {
             "test group {group} ({}) ran {elapsed} T-states without reaching {STOP:#06X}; \
              PC={:#06X}",
             label(contended),
-            machine.cpu_state().pc
+            machine.completed().pc
         );
     }
     assert_eq!(
@@ -1366,7 +1369,7 @@ fn at_top_of_frame(file: &[u8]) -> Vec<u8> {
 /// that rather than depending on a snapshot's flags.
 fn machine_128(editor: &[u8], basic: &[u8], snapshot: &Snapshot) -> Spectrum {
     let mut machine = Spectrum::spectrum_128(editor, basic).expect("two page-sized ROMs");
-    let reset = machine.cpu_state();
+    let reset = machine.completed();
     machine
         .restore(snapshot)
         .expect("a 128 snapshot into a 128");
@@ -1418,7 +1421,7 @@ fn run_group_128(
         .memory_mut()
         .write(CONTENDED_FLAG, u8::from(contended));
 
-    let mut state = prologue.cpu_state();
+    let mut state = prologue.completed();
     state.pc = USR_ENTRY;
     state.bc = PROGRAM;
     state.sp = ENTRY_SP;
@@ -1427,13 +1430,13 @@ fn run_group_128(
     // `LD HL,nn` / `PUSH HL` / `PUSH BC` / `RET`. Bounded well above four so a ROM that does
     // something else fails with a position rather than hanging.
     for _ in 0..16 {
-        if prologue.cpu_state().pc == PROGRAM {
+        if prologue.completed().pc == PROGRAM {
             break;
         }
         prologue.step();
     }
     assert_eq!(
-        prologue.cpu_state().pc,
+        prologue.completed().pc,
         PROGRAM,
         "the 128 ROM's USR prologue did not reach {PROGRAM:#06X}"
     );
@@ -1451,7 +1454,7 @@ fn run_group_128(
             .memory_mut()
             .bank_mut(BankIndex::new(u8::try_from(bank).expect("eight banks"))) = *page;
     }
-    machine.set_cpu_state(prologue.cpu_state());
+    machine.set_cpu_state(prologue.completed());
     assert_eq!(
         (machine.frames(), machine.frame_t_state()),
         (0, 0),
@@ -1459,7 +1462,7 @@ fn run_group_128(
     );
 
     let frame = u64::from(Timing::SPECTRUM_128.frame_t_states());
-    while machine.cpu_state().pc != STOP {
+    while machine.completed().pc != STOP {
         machine.step();
         let elapsed = machine.frames() * frame + u64::from(machine.frame_t_state());
         assert!(
@@ -1468,7 +1471,7 @@ fn run_group_128(
              PC={:#06X}. A window of 44 or more does exactly this — the suite's own \
              synchronisation nests and its delay loop never converges",
             label(contended),
-            machine.cpu_state().pc
+            machine.completed().pc
         );
     }
     assert_eq!(machine.fault(), None, "a Spectrum cannot fault");

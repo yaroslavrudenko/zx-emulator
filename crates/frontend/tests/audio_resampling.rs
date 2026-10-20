@@ -12,7 +12,7 @@
 //! DC offset that eats the headroom, a rate that drifts a few samples a minute, and a filter
 //! that quietly removes the signal along with the offset.
 
-use frontend::audio::{Resampler, cpu_hz, mix, queue_target};
+use frontend::audio::{Resampler, admits, cpu_hz, mix, queue_target};
 use spectrum::Sample;
 use spectrum::audio::AMPLITUDE_MAX;
 
@@ -520,4 +520,42 @@ fn the_setpoint_is_half_the_device_buffer() {
     // A 44.1 kHz device gets its own figure rather than the 48 kHz one — the setpoint is a
     // duration, and the sample count that expresses it is the device's.
     assert_eq!(queue_target(44_100), 2205);
+}
+
+#[test]
+fn the_backstop_admits_a_chunk_only_whole_under_100_ms() {
+    // 100 ms at 48 kHz is 4,800 samples; one frame is 960, the pacer's 4-frame catch-up 3,840.
+    let target = queue_target(DEVICE_HZ);
+    let frame = 960;
+    assert!(admits(2_400, frame, target), "at the setpoint a frame fits");
+    assert!(
+        admits(3_840, frame, target),
+        "80 ms + 20 ms is exactly the ceiling"
+    );
+    assert!(
+        !admits(3_841, frame, target),
+        "one sample over refuses the whole frame"
+    );
+    assert!(
+        !admits(2_400, 4 * frame, target),
+        "a catch-up chunk that would cross 100 ms is refused whole, not truncated"
+    );
+    assert!(
+        !admits(i32::MAX, frame, target),
+        "an extreme depth compares, it does not overflow"
+    );
+    // The browser's copy of the rule: the refusal is the exact negation, over the same 100 ms.
+    let page = include_str!("../../../web/zx_page.js");
+    let refusal = "queued + count > audioContext.sampleRate * IN_FLIGHT_SECONDS";
+    assert_eq!(
+        page.matches(refusal).count(),
+        1,
+        "web/zx_page.js: {refusal}"
+    );
+    assert_eq!(page.matches("const IN_FLIGHT_SECONDS = 0.1;").count(), 1);
+    assert_eq!(
+        page::BUFFER_MILLISECONDS,
+        100,
+        "IN_FLIGHT_SECONDS is this, in seconds"
+    );
 }

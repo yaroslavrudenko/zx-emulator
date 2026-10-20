@@ -323,15 +323,15 @@ pub fn offer_download(name: &str, bytes: &[u8]) -> Handoff {
     // moved while the callee runs. `web/zx_page.js`'s `zx_offer_download` builds one
     // `Uint8Array` view per pointer and retains neither view nor pointer past the call. Each
     // view's contents leave wasm memory before anything else happens to them: `name` through
-    // `DECODER.decode` (`zx_page.js:338`), which returns a fresh JavaScript string, and
-    // `bytes` through `.slice()` (`:338`), which returns a fresh `ArrayBuffer` — so the
+    // `DECODER.decode` (`zx_page.js:365`), which returns a fresh JavaScript string, and
+    // `bytes` through `.slice()` (`:370`), which returns a fresh `ArrayBuffer` — so the
     // `Blob`, whose lifetime outlives this call, holds a copy rather than a window onto a
     // buffer that may later grow and detach.
     //
     // **What discharges the reallocation half is the ordering inside the shim, and it used to
     // be a claim about the whole page.** This comment said *"The shim never calls back into
     // Rust, so no reallocation can occur between the views' construction and their last
-    // read."* That is not a property this side can hold: `anchor.click()` at `zx_page.js:360`
+    // read."* That is not a property this side can hold: `anchor.click()` at `zx_page.js:387`
     // is `HTMLElement.click()`, which **synchronously** dispatches a bubbling `click` through
     // `document`, and any listener on that path may call `wasm_exports.*` and grow wasm
     // memory. No listener does today — `rg 'addEventListener\("click"|onclick' web/` returns
@@ -343,7 +343,7 @@ pub fn offer_download(name: &str, bytes: &[u8]) -> Handoff {
     // checks the stated reason would be checking the wrong thing.
     //
     // The ordering is local and is checkable in one file: both last reads of wasm memory
-    // (`:333` and `:338`) complete before `:355` runs. Everything after that point touches
+    // (`:365` and `:370`) complete before `:387` runs. Everything after that point touches
     // only the copies. So re-entrancy through the click is irrelevant to this block, whether
     // or not it ever happens.
     //
@@ -477,31 +477,36 @@ unsafe extern "C" {
     /// stopped being a documentation defect the moment `frontend::audio::Resampler::track`
     /// started consuming this number every 20 ms: a control loop whose sensor systematically
     /// under-reads by one frame is a loop with a bias built into it, and the bias was invisible
-    /// because each of the three answers was locally reasonable. The desktop's is the contract;
-    /// the browser was made to honour it.
+    /// because each of the three answers was locally reasonable. The desktop's former locked
+    /// depth established the include-the-new-chunk contract; its native SPSC replacement now
+    /// returns an atomic post-push occupancy snapshot bounded to 4,800, so concurrent drain
+    /// may already have consumed part of the chunk. The browser was made to count its push too.
     ///
     /// # How the browser honours it, given that the worklet is on another thread
     ///
-    /// `postMessage` is **ordered**, so the page can account for what is in flight rather than
-    /// guess. The worklet tracks `received` — the running total of samples it has ever
-    /// accepted — and reports it beside `queued`; the page tracks `pushed`, the running total
-    /// it has ever handed over, and answers
+    /// `postMessage` is ordered. The page increments `pushed` for each chunk it transfers;
+    /// the worklet increments `consumed` when samples drain to the device **or are discarded**
+    /// by its ring backstop, and periodically reports that cumulative count. The page returns
     ///
     /// ```text
-    /// reportQueued + (pushed - reportReceived)
+    /// pushed - lastDeliveredConsumed
     /// ```
     ///
-    /// `pushed - reportReceived` is *exactly* the samples posted but not yet counted by a
-    /// report, so the systematic omission disappears rather than being estimated away.
+    /// clamped at zero before admitting the next chunk. This includes samples still travelling
+    /// to the worklet as well as those in its ring; it is not a ring-depth report. A rejected
+    /// push adds nothing to `pushed` and is not an accepted chunk.
     ///
     /// # The residual, and which way it errs
     ///
-    /// What is left is the worklet's **drain** since its last report, which the sum above
-    /// cannot see. It is bounded by `REPORT_EVERY` render quanta — 8 × 128 = 1024 samples,
-    /// ≈21.3 ms at 48 kHz, just inside one emulated frame — and it can only make the answer
-    /// **too large**. So the loop errs toward believing the queue is shorter than it is, which
-    /// pushes the correction toward producing *less* audio, which is the safe direction: the
-    /// failure it protects against is a queue that climbs for the life of the tab.
+    /// Drain or backstop loss since the last **delivered** report makes the estimate too large
+    /// relative to samples still awaiting playback, never too small for accepted outstanding
+    /// samples while the ordered counter contract holds. At rates of at least 6.4 kHz, the
+    /// worklet reports no slower than one 50 Hz frame: one 128-sample quantum at 8 kHz (16 ms), seven at
+    /// 48 kHz (≈18.7 ms). Delivery on the main thread can be delayed by a stalled page, so
+    /// that cadence is not an unconditional wall-time bound on staleness. An overestimate
+    /// makes `Resampler::track` produce less audio; it can cause an underrun, not a hidden
+    /// growing backlog. There is no opposite queue underestimate from report lag, but a
+    /// refused chunk is lost output and must not be described as queued.
     fn zx_audio_push(samples: *const f32, count: usize) -> i32;
 }
 
@@ -514,9 +519,9 @@ unsafe extern "C" {
 /// argument turns on. It feeds checked `u32` arithmetic — `frontend::audio::queue_target`
 /// computes `device_hz * BUFFER_MILLISECONDS`, which under this workspace's
 /// `overflow-checks = true` and `panic = "abort"` is a **process abort** for any rate above
-/// 42,949,672 Hz — and it sizes a heap allocation, `mixed.reserve(device_hz / 50 + 64)` in
-/// `crates/frontend`'s frame loop, which a hostile `u32::MAX` turns into a ~344 MB request: a
-/// second abort route on this target. Both are the blank tab that doc refuses. The ABI hole is
+/// 42,949,672 Hz — and it sizes a heap allocation for four catch-up frames,
+/// `mixed.reserve((device_hz / 50 + 64) * MAX_CATCH_UP)` in `crates/frontend`'s frame loop.
+/// A hostile `u32::MAX` would request ~1.37 GB: a second abort route on this target. Both are the blank tab that doc refuses. The ABI hole is
 /// also the same one: the wasm ABI carries this `u32` as `i32`, so a shim returning a negative
 /// number arrives as a value near `u32::MAX` rather than as anything an honest device reports.
 ///
@@ -614,13 +619,18 @@ pub fn audio_push(samples: &[f32]) -> i32 {
     unsafe { zx_audio_push(samples.as_ptr(), samples.len()) }
 }
 
+pub mod telemetry;
+
 /// The desktop device, and the ring the audio callback drains.
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop {
-    use std::collections::VecDeque;
+    use rtrb::{Consumer, Producer, RingBuffer};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     use super::BUFFER_MILLISECONDS;
+    use super::telemetry::{self, LatencyHistogram};
 
     /// Channels the device is opened with.
     ///
@@ -679,26 +689,113 @@ mod desktop {
     /// build failure with the constant named in it.
     const CEILING: usize = (REQUESTED_HZ * BUFFER_MILLISECONDS / 1000) as usize;
 
-    /// Everything generated and not yet played.
-    static RING: OnceLock<Mutex<VecDeque<f32>>> = OnceLock::new();
+    /// Producer calls are serialized; the callback owns the sole consumer and never locks.
+    static PRODUCER: OnceLock<Mutex<Producer<f32>>> = OnceLock::new();
 
     /// Whether a device has been opened, and at what rate. Zero means "not yet, or refused".
     static RATE: OnceLock<u32> = OnceLock::new();
 
-    fn ring() -> &'static Mutex<VecDeque<f32>> {
-        RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(CEILING)))
+    /// Callback-owned counters; the producer prints them, never the real-time thread.
+    static METRICS: OnceLock<Option<AudioMetrics>> = OnceLock::new();
+    const REPORT_PERIOD: Duration = Duration::from_secs(5);
+
+    /// One callback writer; Relaxed counters are observational, not synchronization.
+    /// The producer alone holds `reported_at`; it never locks on the callback thread.
+    /// The process owns this static for the device's lifetime, after pre-open initialization.
+    struct AudioMetrics {
+        callbacks: LatencyHistogram,
+        underruns: AtomicU64,
+        missing_samples: AtomicU64,
+        reported_at: Mutex<Instant>,
+    }
+
+    impl AudioMetrics {
+        fn new() -> Self {
+            Self {
+                callbacks: LatencyHistogram::new(),
+                underruns: AtomicU64::new(0),
+                missing_samples: AtomicU64::new(0),
+                reported_at: Mutex::new(Instant::now()),
+            }
+        }
+
+        fn record(&self, callback_time: Duration, missing: usize) {
+            self.callbacks.record(callback_time);
+            if missing != 0 {
+                self.underruns.fetch_add(1, Ordering::Relaxed);
+                self.missing_samples
+                    .fetch_add(missing as u64, Ordering::Relaxed);
+            }
+        }
+
+        fn report(&self) {
+            let Ok(mut reported_at) = self.reported_at.lock() else {
+                eprintln!("zx audio telemetry reporter lock poisoned; metrics unavailable");
+                return;
+            };
+            if reported_at.elapsed() < REPORT_PERIOD {
+                return;
+            }
+            *reported_at = Instant::now();
+            eprintln!(
+                "zx audio telemetry callbacks {} underruns={} missing_samples={}",
+                self.callbacks.take(),
+                self.underruns.swap(0, Ordering::Relaxed),
+                self.missing_samples.swap(0, Ordering::Relaxed),
+            );
+        }
+    }
+
+    /// Take as much of `samples` as fits under [`CEILING`], and report the new depth.
+    ///
+    /// **Dropped rather than grown.** An unbounded queue does not fix an emulator running fast;
+    /// it converts a small permanent error into a latency that climbs for as long as the
+    /// session lasts, which is the self-amplifying shape `crate::pacing`'s own documentation
+    /// refuses for frames. `web/zx_audio_worklet.js`'s ring is the same rule on the other
+    /// target. The ring's capacity is the ceiling, so what does not fit is the tail of this
+    /// push: the audio already queued is untouched.
+    ///
+    /// Pure, and separated from [`push`] because `push` opens a real device on its first call
+    /// and nothing about it can be tested on a machine in CI; this and [`drain_spsc`] are the
+    /// whole of the policy and need no device.
+    fn enqueue_spsc(producer: &mut Producer<f32>, samples: &[f32]) -> usize {
+        let _accepted = producer.push_partial_slice(samples);
+        CEILING - producer.slots()
+    }
+
+    /// Write one queued sample to every channel of each frame, silence where the ring runs dry,
+    /// and report how many frames were silence.
+    ///
+    /// Underrun is silence, not the previous sample repeated. A repeat is a buzz that sounds
+    /// like a defect in the emulator; silence sounds like a gap, which is what it is, and
+    /// `Pacer::dropped` is already counting the cause on screen.
+    fn drain_spsc(consumer: &mut Consumer<f32>, output: &mut [f32]) -> usize {
+        let mut missing = 0;
+        for chunk in output.chunks_mut(BLOCK * CHANNELS) {
+            let frames = chunk.len().div_ceil(CHANNELS);
+            let mut mono = [0.0; BLOCK];
+            let (received, _) = consumer.pop_partial_slice(&mut mono[..frames]);
+            missing += frames - received.len();
+            for (frame, sample) in chunk.chunks_mut(CHANNELS).zip(mono) {
+                frame.fill(sample);
+            }
+        }
+        missing
     }
 
     /// Open the device once, and report its rate.
     pub fn rate() -> u32 {
         *RATE.get_or_init(|| {
+            METRICS.get_or_init(|| telemetry::enabled().then(AudioMetrics::new));
+            let (producer, mut consumer) = RingBuffer::new(CEILING);
+            PRODUCER.get_or_init(|| Mutex::new(producer));
             let parameters = tinyaudio::OutputDeviceParameters {
                 channels_count: CHANNELS,
                 sample_rate: REQUESTED_HZ as usize,
                 channel_sample_count: BLOCK,
             };
             let result = tinyaudio::run_output_device(parameters, move |output| {
-                fill(output);
+                fill(&mut consumer, output);
             });
             match result {
                 Ok(device) => {
@@ -724,79 +821,15 @@ mod desktop {
         })
     }
 
-    /// Take as much of `samples` as fits under [`CEILING`], and report the new depth.
-    ///
-    /// Pure, and separated from [`push`] for two reasons that turned out to be the same one.
-    /// `push` opens a real audio device on its first call, so nothing about it can be tested
-    /// on a machine in CI; this half is the whole of the policy and needs no device at all.
-    /// And the policy is worth testing: *dropping rather than growing* is argued for in four
-    /// sentences below and was, until this was extracted, asserted by nothing.
-    fn enqueue(queued: &mut VecDeque<f32>, samples: &[f32]) -> usize {
-        // **Dropped rather than grown.** An unbounded queue does not fix an emulator running
-        // fast; it converts a small permanent error into a latency that climbs for as long as
-        // the session lasts, which is the self-amplifying shape `crate::pacing`'s own
-        // documentation refuses for frames. `web/zx_audio_worklet.js`'s ring is the same rule
-        // on the other target, arrived at by the same argument.
-        //
-        // **In bulk, and the bulk is not a micro-optimisation — it is how long this holds the
-        // lock.** This ran as a per-sample `push_back` behind a per-sample `len() >= ceiling`
-        // test: ~958 iterations per frame, fifty times a second, ~48,000 iterations a second,
-        // *all inside the mutex the 93.75 Hz real-time callback below needs*. `extend` over a
-        // `TrustedLen` iterator specialises to a bulk copy, so the critical section becomes one
-        // `memcpy` and the break-on-full semantics are unchanged: `room` is exactly the number
-        // the loop would have pushed before its first `break`.
-        let room = CEILING.saturating_sub(queued.len()).min(samples.len());
-        queued.extend(samples[..room].iter().copied());
-        queued.len()
-    }
-
-    /// Write one queued sample to every channel of each frame, and silence when it runs dry.
-    ///
-    /// The other half of [`fill`] that needs no device — see [`enqueue`].
-    fn drain(queued: &mut VecDeque<f32>, output: &mut [f32]) {
-        for frame in output.chunks_mut(CHANNELS) {
-            // Underrun is silence, not the previous sample repeated. A repeat is a buzz that
-            // sounds like a defect in the emulator; silence sounds like a gap, which is what it
-            // is, and `Pacer::dropped` is already counting the cause on screen.
-            let sample = queued.pop_front().unwrap_or(0.0);
-            frame.fill(sample);
+    /// The audio callback owns the consumer for the lifetime of the device.
+    /// It never acquires the producer mutex, allocates, logs, or waits on I/O.
+    fn fill(consumer: &mut Consumer<f32>, output: &mut [f32]) {
+        let metrics = METRICS.get().and_then(Option::as_ref);
+        let started = metrics.map(|_| Instant::now());
+        let missing = drain_spsc(consumer, output);
+        if let (Some(metrics), Some(started)) = (metrics, started) {
+            metrics.record(started.elapsed(), missing);
         }
-    }
-
-    /// The audio callback. Runs on the device's own thread.
-    fn fill(output: &mut [f32]) {
-        // **This is a real-time thread and this is a blocking lock**, which the comment here
-        // did not say — it addressed poisoning only, and poisoning is the rarer hazard by a
-        // wide margin. `tinyaudio` calls this every `BLOCK` frames, so the deadline is
-        // 512/48000 = 10.67 ms and a miss is an audible hole. The producer holds the same
-        // mutex.
-        //
-        // What bounds the wait is [`enqueue`]'s critical section, which is one bulk copy of at
-        // most `CEILING` `f32`s — microseconds, and no allocation, because the `VecDeque` was
-        // built at `CEILING` capacity and never grows past it. That is a mitigation and not a
-        // proof: a blocking lock on a real-time thread is unbounded priority inversion in
-        // principle, and the fix that removes the possibility is a single-producer
-        // single-consumer lock-free ring. That was weighed and dropped at ~+30 lines for a
-        // window now measured in microseconds — and "measured" became literal on 2026-09-03,
-        // with a standalone harness mirroring [`enqueue`]'s body at steady depth: 63 ns mean
-        // hold, 666 ns for the worst legal shape (a full `CEILING` copy into an empty ring),
-        // 9.9 µs worst observed with the harness preempted mid-hold, against the 10.67 ms
-        // deadline — the worst case is 0.09 % of the budget. The "unbounded in principle" leg
-        // is closed by the platform this figure was taken on: `std::sync::Mutex` on
-        // `aarch64-apple-darwin` lowers to Apple's `pthread_mutex`, one of the two primitives
-        // Apple documents as priority-donating, so a callback that does arrive during a hold
-        // boosts the nanosecond-scale owner ahead of all timeshare work instead of waiting
-        // behind it. **`try_lock` is not the answer** and is written
-        // down here because it looks like one: it would convert a rare few-microsecond wait
-        // into a rare 10.67 ms hole, which is audibly worse than the thing it avoids.
-        let Ok(mut queued) = ring().lock() else {
-            // A poisoned lock means a panic happened while holding it. Silence is the only
-            // thing this callback can do about that, and it must not panic in turn: unwinding
-            // out of an audio callback crosses an FFI boundary.
-            output.fill(0.0);
-            return;
-        };
-        drain(&mut queued, output);
     }
 
     /// Queue `samples`, and report how many are waiting including them.
@@ -804,10 +837,17 @@ mod desktop {
         if rate() == 0 {
             return -1;
         }
-        let Ok(mut queued) = ring().lock() else {
+        let Some(producer) = PRODUCER.get() else {
             return -1;
         };
-        let depth = enqueue(&mut queued, samples);
+        let Ok(mut producer) = producer.lock() else {
+            return -1;
+        };
+        let depth = enqueue_spsc(&mut producer, samples);
+        drop(producer);
+        if let Some(metrics) = METRICS.get().and_then(Option::as_ref) {
+            metrics.report();
+        }
         i32::try_from(depth).unwrap_or(i32::MAX)
     }
 
@@ -818,7 +858,12 @@ mod desktop {
     /// sentences, or `fill`'s underrun-is-silence. The obstacle was structural rather than
     /// anybody's oversight — [`push`] calls [`rate`] first, `rate` opens a real device through
     /// `tinyaudio`, and a machine in CI has none — so the two pure operations were lifted out
-    /// from behind that gate as [`enqueue`] and [`drain`], and they are the whole of the policy.
+    /// from behind that gate as `enqueue` and `drain`, and they are the whole of the policy.
+    ///
+    /// *(2026-10-20, DECISION.md item 7: those two were a `VecDeque` model the shipping path
+    /// stopped using when the callback took the `rtrb` consumer, and nine of these tests kept
+    /// grading the model. They now grade [`enqueue_spsc`] and [`drain_spsc`] — the code the
+    /// device runs — and the model is deleted.)*
     ///
     /// Still uncovered, and named rather than left to be discovered: `push`'s `-1` on a refused
     /// device, `push`'s `-1` on a poisoned lock, and `fill`'s silence on a poisoned lock. The
@@ -828,13 +873,76 @@ mod desktop {
     /// observed at all.
     #[cfg(test)]
     mod tests {
-        use super::{BLOCK, CEILING, CHANNELS, VecDeque, drain, enqueue};
+        use super::{
+            AudioMetrics, BLOCK, CEILING, CHANNELS, Consumer, Mutex, Producer, RingBuffer,
+            drain_spsc, enqueue_spsc,
+        };
 
-        /// A ring at the size `ring()` builds, holding `samples`.
-        fn ring_of(samples: &[f32]) -> VecDeque<f32> {
-            let mut queued = VecDeque::with_capacity(CEILING);
-            queued.extend(samples.iter().copied());
-            queued
+        #[test]
+        fn the_callback_reader_reports_its_deadline_misses_and_underruns() {
+            use std::sync::atomic::Ordering;
+            use std::time::Duration;
+            let metrics = AudioMetrics::new();
+            (0..98).for_each(|_| metrics.record(Duration::from_micros(10), 0));
+            (0..2).for_each(|_| metrics.record(Duration::from_millis(20), 3));
+            let callbacks = metrics.callbacks.take();
+            assert_eq!(callbacks.p50, Duration::from_micros(10));
+            assert_eq!(callbacks.p99, Duration::from_micros(19_912));
+            assert_eq!(metrics.underruns.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.missing_samples.load(Ordering::Relaxed), 6);
+        }
+
+        #[test]
+        fn callback_drains_while_producer_guard_is_held() {
+            use std::sync::{Arc, mpsc::sync_channel};
+            use std::time::Duration;
+            let (producer, mut consumer) = RingBuffer::new(CEILING);
+            let producer = Arc::new(Mutex::new(producer));
+            enqueue_spsc(&mut producer.lock().expect("producer"), &[0.25, 0.75]);
+            let held = producer.lock().expect("producer guard deliberately held");
+            let (done, received) = sync_channel(1);
+            let thread = std::thread::spawn(move || {
+                let mut output = [1.0; 3 * CHANNELS];
+                let missing = drain_spsc(&mut consumer, &mut output);
+                done.send((output, missing)).expect("report output");
+            });
+            let (output, missing) = received
+                .recv_timeout(Duration::from_secs(1))
+                .expect("callback cannot depend on held producer guard");
+            assert_eq!(output, [0.25, 0.25, 0.75, 0.75, 0.0, 0.0]);
+            assert_eq!(missing, 1);
+            drop(held);
+            thread.join().expect("callback completed");
+        }
+
+        #[test]
+        fn spsc_keeps_oldest_samples_at_capacity_and_wraps_without_growth() {
+            let (mut producer, mut consumer) = RingBuffer::new(CEILING);
+            let first = vec![0.5; CEILING - 2];
+            assert_eq!(enqueue_spsc(&mut producer, &first), CEILING - 2);
+            assert_eq!(enqueue_spsc(&mut producer, &[2.0, 3.0, 4.0]), CEILING);
+            assert_eq!(enqueue_spsc(&mut producer, &[9.0]), CEILING);
+            let mut output = vec![0.0; CEILING * CHANNELS];
+            assert_eq!(drain_spsc(&mut consumer, &mut output), 0);
+            assert_eq!(&output[output.len() - 4..], &[2.0, 2.0, 3.0, 3.0]);
+            assert_eq!(enqueue_spsc(&mut producer, &[0.25, 0.75]), 2);
+            let mut second = [0.0; 4];
+            assert_eq!(drain_spsc(&mut consumer, &mut second), 0);
+            assert_eq!(second, [0.25, 0.25, 0.75, 0.75]);
+        }
+
+        /// A ring at the size [`super::rate`] builds, holding `samples`.
+        fn ring_of(samples: &[f32]) -> (Producer<f32>, Consumer<f32>) {
+            let (mut producer, consumer) = RingBuffer::new(CEILING);
+            enqueue_spsc(&mut producer, samples);
+            (producer, consumer)
+        }
+
+        /// Everything the ring holds, in the order the device would play it.
+        fn queued(consumer: &mut Consumer<f32>) -> Vec<f32> {
+            let mut output = vec![0.0; consumer.slots() * CHANNELS];
+            drain_spsc(consumer, &mut output);
+            output.into_iter().step_by(CHANNELS).collect()
         }
 
         #[test]
@@ -849,20 +957,17 @@ mod desktop {
 
         #[test]
         fn a_push_that_fits_is_taken_whole_and_reports_the_new_depth() {
-            let mut queued = ring_of(&[]);
-            assert_eq!(enqueue(&mut queued, &[0.25, 0.5, 0.75]), 3);
-            assert_eq!(enqueue(&mut queued, &[1.0]), 4);
-            assert_eq!(
-                queued.iter().copied().collect::<Vec<f32>>(),
-                vec![0.25, 0.5, 0.75, 1.0],
-            );
+            let (mut producer, mut consumer) = ring_of(&[]);
+            assert_eq!(enqueue_spsc(&mut producer, &[0.25, 0.5, 0.75]), 3);
+            assert_eq!(enqueue_spsc(&mut producer, &[1.0]), 4);
+            assert_eq!(queued(&mut consumer), vec![0.25, 0.5, 0.75, 1.0]);
         }
 
         #[test]
         fn an_empty_push_changes_nothing() {
-            let mut queued = ring_of(&[0.5]);
-            assert_eq!(enqueue(&mut queued, &[]), 1);
-            assert_eq!(queued.len(), 1);
+            let (mut producer, mut consumer) = ring_of(&[0.5]);
+            assert_eq!(enqueue_spsc(&mut producer, &[]), 1);
+            assert_eq!(queued(&mut consumer), vec![0.5]);
         }
 
         #[test]
@@ -871,10 +976,10 @@ mod desktop {
             // audio already queued is untouched, so latency stops climbing instead of the ring
             // absorbing the error. A queue that grew here would pass every other test in this
             // file.
-            let mut queued = ring_of(&[]);
-            let more_than_fits: Vec<f32> = (0..CEILING + 100).map(|_| 0.5).collect();
-            assert_eq!(enqueue(&mut queued, &more_than_fits), CEILING);
-            assert_eq!(queued.len(), CEILING);
+            let (mut producer, mut consumer) = ring_of(&[]);
+            let more_than_fits = vec![0.5; CEILING + 100];
+            assert_eq!(enqueue_spsc(&mut producer, &more_than_fits), CEILING);
+            assert_eq!(queued(&mut consumer).len(), CEILING);
         }
 
         #[test]
@@ -882,77 +987,72 @@ mod desktop {
             // Which end is discarded is not arbitrary. The device is about to play what is at
             // the front, so dropping from the front would put a hole in audio the ring already
             // holds; dropping from the back loses samples nothing has committed to yet.
-            let mut queued = ring_of(&[]);
-            let head: Vec<f32> = (0..CEILING - 2).map(|_| 1.0).collect();
-            assert_eq!(enqueue(&mut queued, &head), CEILING - 2);
-            assert_eq!(enqueue(&mut queued, &[2.0, 3.0, 4.0, 5.0]), CEILING);
-            assert_eq!(queued.front().copied(), Some(1.0));
-            assert_eq!(queued.back().copied(), Some(3.0));
+            let (mut producer, mut consumer) = ring_of(&vec![1.0; CEILING - 2]);
+            assert_eq!(enqueue_spsc(&mut producer, &[2.0, 3.0, 4.0, 5.0]), CEILING);
+            let kept = queued(&mut consumer);
+            assert_eq!(kept.first().copied(), Some(1.0));
+            assert_eq!(kept.last().copied(), Some(3.0));
         }
 
         #[test]
         fn a_push_into_a_full_ring_takes_nothing_and_still_reports_the_depth() {
-            let mut queued = ring_of(&[]);
-            let fills: Vec<f32> = (0..CEILING).map(|_| 0.5).collect();
-            assert_eq!(enqueue(&mut queued, &fills), CEILING);
-            assert_eq!(enqueue(&mut queued, &[9.0]), CEILING);
-            assert_eq!(queued.back().copied(), Some(0.5));
+            let (mut producer, mut consumer) = ring_of(&vec![0.5; CEILING]);
+            assert_eq!(enqueue_spsc(&mut producer, &[9.0]), CEILING);
+            assert_eq!(queued(&mut consumer).last().copied(), Some(0.5));
         }
 
         #[test]
-        fn the_ring_never_reallocates_under_the_ceiling() {
-            // `CEILING` is what `ring()` sizes the `VecDeque` with, and `enqueue` is the only
-            // thing that puts samples in it. If the two ever disagree the allocation happens on
-            // the frame thread while the real-time callback waits for the lock.
-            let mut queued = VecDeque::with_capacity(CEILING);
-            let capacity = queued.capacity();
-            let fills: Vec<f32> = (0..CEILING).map(|_| 0.5).collect();
-            enqueue(&mut queued, &fills);
-            enqueue(&mut queued, &fills);
-            assert_eq!(queued.capacity(), capacity);
+        fn the_ring_never_grows_past_the_ceiling() {
+            // `rate` sizes the ring with `CEILING` and `enqueue_spsc` is the only thing that
+            // puts samples in it. A fixed-capacity ring cannot reallocate; what this pins is
+            // that the capacity it was built with is the ceiling the depth is reported against.
+            let (mut producer, _consumer) = ring_of(&[]);
+            let fills = vec![0.5; CEILING];
+            enqueue_spsc(&mut producer, &fills);
+            enqueue_spsc(&mut producer, &fills);
+            assert_eq!(producer.buffer().capacity(), CEILING);
+            assert_eq!(producer.slots(), 0);
         }
 
         #[test]
         fn every_channel_of_a_frame_gets_the_same_mono_sample() {
-            let mut queued = ring_of(&[0.25, 0.75]);
+            let (_producer, mut consumer) = ring_of(&[0.25, 0.75]);
             let mut output = [-1.0_f32; 2 * CHANNELS];
-            drain(&mut queued, &mut output);
+            assert_eq!(drain_spsc(&mut consumer, &mut output), 0);
             assert_eq!(output, [0.25, 0.25, 0.75, 0.75]);
-            assert!(queued.is_empty());
+            assert!(consumer.is_empty());
         }
 
         #[test]
         fn an_underrun_is_silence_and_not_the_previous_sample_repeated() {
             // A repeat is a buzz that sounds like a defect in the emulator; silence sounds like
-            // a gap, which is what it is. The distinction is argued for in `drain` and this is
-            // the assertion behind it.
-            let mut queued = ring_of(&[0.5]);
+            // a gap, which is what it is. The distinction is argued for in `drain_spsc` and this
+            // is the assertion behind it — with the count of silent frames it reports.
+            let (_producer, mut consumer) = ring_of(&[0.5]);
             let mut output = [-1.0_f32; 3 * CHANNELS];
-            drain(&mut queued, &mut output);
+            assert_eq!(drain_spsc(&mut consumer, &mut output), 2);
             assert_eq!(output, [0.5, 0.5, 0.0, 0.0, 0.0, 0.0]);
         }
 
         #[test]
         fn a_drain_takes_only_what_the_device_asked_for() {
-            let mut queued = ring_of(&[1.0, 2.0, 3.0]);
+            let (_producer, mut consumer) = ring_of(&[1.0, 2.0, 3.0]);
             let mut output = [0.0_f32; CHANNELS];
-            drain(&mut queued, &mut output);
+            assert_eq!(drain_spsc(&mut consumer, &mut output), 0);
             assert_eq!(output, [1.0, 1.0]);
-            assert_eq!(queued.iter().copied().collect::<Vec<f32>>(), vec![2.0, 3.0]);
+            assert_eq!(queued(&mut consumer), vec![2.0, 3.0]);
         }
 
         #[test]
         fn a_full_ring_survives_a_whole_device_block_without_underrunning() {
             // The two halves against each other at the sizes the device actually uses, which is
             // the only place a `CHANNELS`/`BLOCK` mismatch would show: `output` is `BLOCK`
-            // frames of `CHANNELS` samples, so a `drain` consumes `BLOCK` queued samples, not
+            // frames of `CHANNELS` samples, so a drain consumes `BLOCK` queued samples, not
             // `BLOCK * CHANNELS`.
-            let mut queued = ring_of(&[]);
-            let frame: Vec<f32> = (0..BLOCK).map(|_| 0.5).collect();
-            enqueue(&mut queued, &frame);
+            let (_producer, mut consumer) = ring_of(&[0.5; BLOCK]);
             let mut output = vec![0.0_f32; BLOCK * CHANNELS];
-            drain(&mut queued, &mut output);
-            assert!(queued.is_empty());
+            assert_eq!(drain_spsc(&mut consumer, &mut output), 0);
+            assert!(consumer.is_empty());
             assert!(output.iter().all(|&sample| sample == 0.5));
         }
     }
@@ -967,7 +1067,9 @@ pub fn audio_rate() -> u32 {
     desktop::rate()
 }
 
-/// Hand mixed mono samples to the device; returns how many are queued ahead of them.
+/// Hand mixed mono samples to the device; returns a bounded post-push occupancy snapshot.
+/// The callback may drain concurrently, so the sampled depth can already be stale.
+/// `-1` still means no device or a refused producer.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn audio_push(samples: &[f32]) -> i32 {

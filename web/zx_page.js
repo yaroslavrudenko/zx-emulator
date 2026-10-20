@@ -61,6 +61,7 @@
     // worth of bytes alive for the session. Revoking immediately races the download in some
     // browsers; never revoking leaks one Blob per `F2`.
     const REVOKE_AFTER_MS = 60000;
+    const FILE_LOAD_DEADLINE_MS = 5000;
 
     // Built once. Both are stateless and were being constructed per call — the encoder on every
     // `zx_query_length` and `zx_query_copy`, the decoder on every `F2`. The *bytes* are
@@ -127,6 +128,8 @@
     // silently and then play late, all at once, which sounds like a fault rather than a delay.
     let audioContext = null;
     let audioNode = null;
+    let audioFailed = false;
+    let closingAudio = false;
 
     // The two running totals that make `zx_audio_push` answer the question it is documented to
     // answer: **how many samples are queued ahead of the caller, counting the ones just handed
@@ -148,12 +151,12 @@
     // it is sitting in the ring or still travelling. That is the answer, and it is exact for the
     // in-flight part rather than approximate.
     //
-    // What is left over is the worklet's drain *since* its last report, which no message has
-    // carried yet. It is bounded by `REPORT_EVERY` quanta — 8 x 128 = 1024 samples, about
-    // 21.3 ms at 48 kHz, just inside one emulated frame — and it can only make this answer too
-    // **large**, never too small. Erring toward "the queue is deeper than you think" makes the
-    // loop produce slightly less audio, which is the safe direction: the failure being guarded
-    // against is a backlog that climbs for the life of the tab.
+    // Drain or backstop loss since the last *delivered* consumed report makes this estimate
+    // too large, not too small, for accepted samples outstanding. The worklet now derives its
+    // report cadence from the device rate: one 128-sample quantum at 8 kHz, seven at 48 kHz,
+    // each under one 50 Hz frame. Main-thread delivery may lag arbitrarily during a stall, so
+    // the quantum count is not a wall-time bound. A refused push is NOT accepted: it leaves
+    // `audioPushed` unchanged, and its missing audio is not represented as queue depth.
     let audioPushed = 0;
     let audioConsumed = 0;
 
@@ -172,13 +175,28 @@
     // `zx_audio_push` answers "no device" before it touches the pool — so a suspended tab
     // parks at most this many buffers, ~16 KiB at 48 kHz, for as long as it stays suspended.
     const FREE_LIST_MAX = 4;
+    // Transferred, unacknowledged buffers count against the same 100ms audio latency budget.
+    const IN_FLIGHT_SECONDS = 0.1;
 
     // Pool allocation granularity: 4096 bytes = 1024 samples of headroom at 48 kHz, so the
     // ±1-sample drift of `Resampler::track`'s rate correction never forces a reallocation.
     const POOL_GRANULARITY_BYTES = 4096;
 
+    function closeFailedAudio(context) {
+        if (closingAudio) return;
+        closingAudio = true;
+        context.close().then(function () {
+            if (audioContext === context) audioContext = null;
+        }).catch(function (error) {
+            console.error("zx_page: failed to close unusable audio context", error);
+        }).finally(function () {
+            closingAudio = false;
+        });
+    }
+
     function audioStart() {
         if (audioContext !== null) {
+            if (audioFailed) closeFailedAudio(audioContext);
             return;
         }
         const Ctor = window.AudioContext || window.webkitAudioContext;
@@ -186,15 +204,22 @@
             console.warn("zx_page: no Web Audio in this browser; the emulator will be silent");
             return;
         }
-        audioContext = new Ctor();
-        audioContext.audioWorklet
+        const context = new Ctor();
+        audioContext = context;
+        audioFailed = false;
+        audioPushed = 0;
+        audioConsumed = 0;
+        freeBuffers.length = 0;
+        context.audioWorklet
             .addModule("zx_audio_worklet.js")
             .then(function () {
-                audioNode = new AudioWorkletNode(audioContext, "zx-processor", {
+                if (audioContext !== context) return;
+                audioNode = new AudioWorkletNode(context, "zx-processor", {
                     numberOfInputs: 0,
                     outputChannelCount: [2],
                 });
                 audioNode.port.onmessage = function (event) {
+                    if (audioContext !== context) return;
                     // The worklet posts exactly two shapes: a number — its consumed count —
                     // and an exhausted chunk's `ArrayBuffer`, coming home for reuse. *This
                     // comment said "one number and nothing else"* until the buffer pool added
@@ -212,13 +237,15 @@
                         freeBuffers.push(event.data);
                     }
                 };
-                audioNode.connect(audioContext.destination);
+                audioNode.connect(context.destination);
             })
             .catch(function (error) {
-                // Named loudly. A page that is silent for an unstated reason is the failure
-                // this whole project is written against, and the console is the only surface
-                // this function has.
                 console.error("zx_page: the audio worklet failed to load", error);
+                if (audioContext === context) {
+                    audioNode = null;
+                    audioFailed = true;
+                    closeFailedAudio(context);
+                }
             });
     }
 
@@ -227,7 +254,7 @@
     // audio plugin does exactly the same thing for the same reason.
     function audioResume() {
         audioStart();
-        if (audioContext === null || audioContext.state === "running") {
+        if (audioContext === null || audioFailed || audioContext.state === "running") {
             return;
         }
         audioContext.resume().catch(function (error) {
@@ -273,8 +300,12 @@
                 // Nothing to post. Returning before the pool matters: the worklet ignores an
                 // empty chunk without posting its buffer back, so an empty push that popped
                 // the pool would quietly shrink it by one buffer each time.
-                if (count === 0) {
-                    return audioPushed - audioConsumed;
+                const queued = Math.max(0, audioPushed - audioConsumed);
+                // The backstop rule `crates/frontend/src/main.rs` applies before it pushes: a
+                // chunk is admitted only if it fits whole under 100 ms. One rule on both sides
+                // (DECISION.md item 7), so a chunk the Rust side sends is never refused here.
+                if (count === 0 || queued + count > audioContext.sampleRate * IN_FLIGHT_SECONDS) {
+                    return queued;
                 }
                 // The copy out of wasm memory **stays** — a view over wasm memory would alias
                 // a buffer that can grow, detach and be reused underneath it, and the worklet
@@ -310,7 +341,55 @@
         );
     }
 
+    // miniquad's pinned fs_load_file constructs XHR synchronously but leaves it unbounded.
+    // Intercept that construction only for this call; its completion remains miniquad's own.
+    function boundFileLoad(load) {
+        return function (...args) {
+            const OriginalXHR = window.XMLHttpRequest;
+            let request;
+            window.XMLHttpRequest = function () {
+                const xhr = new OriginalXHR();
+                const send = xhr.send;
+                let fileId;
+                let settled = false;
+                xhr.send = function (...sendArgs) {
+                    const handler = xhr.onreadystatechange;
+                    const timer = setTimeout(function () {
+                        if (settled) return;
+                        try { xhr.abort(); } catch (error) {
+                            console.error("zx_page: failed to abort timed-out file request", error);
+                        }
+                        if (!settled) {
+                            settled = true;
+                            wasm_exports.file_loaded(fileId); // absent FS entry is a failed load
+                        }
+                    }, FILE_LOAD_DEADLINE_MS);
+                    xhr.onreadystatechange = function () {
+                        if (xhr.readyState !== 4 || settled) return;
+                        settled = true;
+                        clearTimeout(timer);
+                        handler.call(xhr);
+                    };
+                    try { return send.apply(xhr, sendArgs); }
+                    catch (error) { clearTimeout(timer); throw error; }
+                };
+                request = { setId(id) { fileId = id; }, xhr };
+                return xhr;
+            };
+            try {
+                const id = load(...args);
+                if (request) request.setId(id);
+                return id;
+            } finally {
+                window.XMLHttpRequest = OriginalXHR;
+            }
+        };
+    }
+
     function registerPlugin(importObject) {
+        if (typeof importObject.env.fs_load_file === "function") {
+            importObject.env.fs_load_file = boundFileLoad(importObject.env.fs_load_file);
+        }
         registerAudio(importObject);
         importObject.env.zx_query_length = refusing("zx_query_length", 0, function () {
             return queryBytes().length;

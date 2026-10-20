@@ -289,6 +289,18 @@ pub const fn queue_target(device_hz: u32) -> u32 {
     device_hz * page::BUFFER_MILLISECONDS / MILLISECONDS_PER_SECOND / 2
 }
 
+/// Whether a chunk of `chunk` samples may join a queue `queued` deep: only whole, and only if
+/// the queue stays within twice the setpoint `target` — the backstop both targets share
+/// (DECISION.md item 7). `web/zx_page.js` refuses by the same rule, written as
+/// `queued + count > audioContext.sampleRate * IN_FLIGHT_SECONDS`;
+/// `the_backstop_admits_a_chunk_only_whole_under_100_ms` holds the two to one rule. Public
+/// because its callers — the `zx` binary and that test — are outside this library crate; the
+/// sum is taken in `i64`, so no input can overflow it.
+#[must_use]
+pub const fn admits(queued: i32, chunk: i32, target: u32) -> bool {
+    queued as i64 + chunk as i64 <= target as i64 * 2
+}
+
 /// One [`Sample`]'s five sources as a single level, from `0.0` to [`HEADROOM`] plus
 /// [`TAPE_LEVEL`].
 ///
@@ -428,8 +440,9 @@ impl Resampler {
     /// chose the C-shaped answer. `Option<u32>` says the same thing in the type, so the decoding
     /// of `-1` stays in the one file that owns that ABI.
     ///
-    /// On the desktop the depth is measured inside the same lock that inserted the samples, so it
-    /// is exact. In a browser it comes back from the worklet's periodic report and is therefore
+    /// On desktop the SPSC producer reads an atomic post-push occupancy snapshot, bounded by
+    /// 4,800 samples; concurrent callback drain can make it stale immediately. In a browser it
+    /// comes back from the worklet's periodic report and is therefore
     /// **stale by up to `REPORT_EVERY` render quanta** — see [`MAX_CORRECTION`] for why that
     /// number is 8 rather than 16, and why the staleness bound, not the correction's magnitude, is
     /// what decides whether this loop wobbles.

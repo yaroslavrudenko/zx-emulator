@@ -40,6 +40,8 @@
 //! moves — so the answer is somewhere the experiment cannot disturb.
 
 mod common;
+
+use common::Completed;
 mod m7_common;
 
 use common::{set_pc, write_program};
@@ -107,7 +109,7 @@ fn run(machine: &mut Spectrum) -> u8 {
         machine.step();
     }
     assert!(
-        machine.cpu_state().halted,
+        machine.completed().halted,
         "the program must reach its HALT, not run off the end"
     );
     assert_eq!(machine.fault(), None);
@@ -188,8 +190,8 @@ fn a_snapshot_of_one_machine_is_refused_by_the_other() {
     run(&mut one_two_eight);
     run(&mut forty_eight);
 
-    let from_128 = one_two_eight.snapshot();
-    let from_48 = forty_eight.snapshot();
+    let from_128 = one_two_eight.snapshot().expect("completed instruction");
+    let from_48 = forty_eight.snapshot().expect("completed instruction");
     assert_eq!(from_128.model(), Model::Spectrum128);
     assert_eq!(from_48.model(), Model::Spectrum48K);
 
@@ -219,7 +221,7 @@ fn a_128_snapshot_carries_all_eight_banks_and_the_map_that_arranges_them() {
     // would not describe a machine that could be restored.
     let mut machine = machine_128();
     run(&mut machine);
-    let snapshot = machine.snapshot();
+    let snapshot = machine.snapshot().expect("completed instruction");
 
     let carried: Vec<u8> = (0..8)
         .filter(|&bank| snapshot.bank(BankIndex::new(bank)).is_some())
@@ -247,7 +249,7 @@ fn a_restore_reaches_a_machine_that_has_locked_its_own_paging() {
     // compares still matching.
     let mut machine = machine_128();
     run(&mut machine);
-    let snapshot = machine.snapshot();
+    let snapshot = machine.snapshot().expect("completed instruction");
 
     let mut locked = machine_128();
     write_program(&mut locked, PROGRAM, &m7_common::out_c_a(0x7FFD, 0x20 | 3));

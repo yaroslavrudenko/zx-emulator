@@ -47,6 +47,9 @@
 //! > and `the_files_one_bit_length_is_what_drives_the_pulse_train` is the negative control this
 //! > file could not write.
 
+mod common;
+
+use common::Completed;
 use spectrum::tape::{Tape, tzx};
 use spectrum::timing::T_STATES_PER_FRAME;
 use spectrum::{Model, Spectrum};
@@ -266,7 +269,7 @@ fn elapsed(machine: &Spectrum) -> u64 {
 fn run_until(machine: &mut Spectrum, targets: &[u16]) -> Option<u16> {
     let start = elapsed(machine);
     while elapsed(machine) - start < BUDGET {
-        let pc = machine.cpu_state().pc;
+        let pc = machine.completed().pc;
         if targets.contains(&pc) {
             return Some(pc);
         }
@@ -391,9 +394,9 @@ fn no_shortcut_past_the_ear_bit_for_a_tzx_either() {
     // a machine genuinely waiting for an edge is still inside the ROM — a different observation
     // from having wandered off, and both otherwise read as "the budget expired".
     assert!(
-        machine.cpu_state().pc < 0x4000,
+        machine.completed().pc < 0x4000,
         "the machine should still be in the ROM's edge-detection loop, not at {:#06X}",
-        machine.cpu_state().pc
+        machine.completed().pc
     );
 }
 

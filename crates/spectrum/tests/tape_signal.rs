@@ -340,7 +340,7 @@ fn the_tape_advances_by_contention_as_well_as_by_ticks() {
         for offset in 0..256 {
             machine.memory_mut().write(code + offset, 0x00);
         }
-        let mut snapshot = machine.snapshot();
+        let mut snapshot = machine.snapshot().expect("completed instruction");
         snapshot.cpu = CpuState {
             pc: code,
             ..CpuState::default()

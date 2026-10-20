@@ -97,6 +97,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     InterruptedRun, NOP, PROLOGUE, SLED, UNCONTENDED_CODE, advance_to_absolute, elapsed,
     enable_interrupts, machine, run_recording_interrupts, set_pc, with_cpu_state, write_program,
@@ -423,7 +425,7 @@ fn a_contended_loop_takes_its_interrupt_on_the_iteration_the_stalls_put_it_on() 
         CONTENDED.interrupted_end().0,
         CONTENDED.interrupted_end().1
     );
-    assert_eq!(machine.cpu_state().bc, 0, "the counter must be exhausted");
+    assert_eq!(machine.completed().bc, 0, "the counter must be exhausted");
     assert_eq!(machine.fault(), None);
 }
 
@@ -563,7 +565,7 @@ fn an_acknowledge_is_never_contended_because_the_window_precedes_the_display() {
         let cost = elapsed(&machine) - before;
 
         assert_eq!(
-            machine.cpu_state().pc,
+            machine.completed().pc,
             CONTENDED_HANDLER,
             "offset {offset}: the offer must have been accepted, or the cost below is a NOP's"
         );

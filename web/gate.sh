@@ -1,5 +1,6 @@
 #!/bin/sh
-# M8's gate: T1 + T2 + T3, plus the PERF hot-path ceiling the 2026-09-03 audit asked for.
+# M8's gate: T1 + T2 + T3, plus the PERF hot-path ceiling the 2026-09-03 audit asked for —
+# since 2026-10-20 an instruction count rather than a wall-clock ceiling; see the PERF step.
 #
 #     sh web/gate.sh
 #
@@ -27,9 +28,10 @@
 # locally and enforced nowhere"*, because the session that wrote it could not push `.github/`.
 # Three of this gate's steps are ordinary `cargo test` targets and do run under
 # `cargo test --workspace`; the two that need a `wasm32` build do not, and cannot be, without a
-# nested `cargo` inside a test. The PERF ceiling is a third kind: a bench with a wall-clock
-# threshold, which no default test suite should carry — a timing assertion inside `cargo test`
-# is a flaky suite by design, so it lives here, where the pre-push instrument is.
+# nested `cargo` inside a test. The PERF step is a third kind: a bench with a threshold
+# (an instruction count since 2026-10-20, a wall-clock ceiling before), which no default test
+# suite should carry — a measurement inside `cargo test` would rebuild release benches on every
+# run — so it lives here, where the pre-push instrument is.
 
 set -u
 
@@ -45,7 +47,7 @@ cd "$root" || exit 1
 # ULA, a screen renderer and a macroquad shell are not small, and a module of a few kilobytes is
 # a build of something that is not this.
 #
-#     ls -l target/wasm32-unknown-unknown/release/zx.wasm
+#     ls -l "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/zx.wasm"
 #
 # Measured 624544 bytes on 2026-09-01, before `crates/page` existed. The floor is set at 256 KiB
 # so that ordinary growth and ordinary shrinkage — `opt-level = "z"` has never been tried, and
@@ -159,89 +161,28 @@ if [ "$status" -eq 0 ]; then ok "clippy, wasm32 — the only run that lints the 
 else bad "clippy, wasm32 (exit $status)"; cat "$logs/clippy-wasm.txt"; fi
 
 # ---------------------------------------------------------------------------------------
-# PERF — the hot-path ceiling. Prose does not go red; this number can.
+# PERF — instructions retired per frame, held to 1 % of the recorded baseline.
 # ---------------------------------------------------------------------------------------
-# `benches/frame.rs` and the coverage tables defend the hot path with recorded medians, and
-# the 2026-09-03 audit named the gap in that: every one of those figures is prose, so the
-# next regression lands on whatever baseline the last one left, exactly as the +23 % one did.
-# This step is the number with a gate on it: `quiet_48k` — the defended invariant, one frame
-# of `NOP`s with nobody touching sound — must stay under a recorded ceiling.
+# This step was a wall-clock ceiling: `quiet_48k`'s lowest `fastest` of three runs under
+# 138.7 µs × 1.15, recorded 2026-09-03. Two things retired it on 2026-10-20 (DECISION.md
+# item 2, the judges' common decision). The batched covered ticks took the same case to about
+# 74 µs, so a ceiling at 159.5 µs would let a regression of more than double through; and the
+# judges measured the instrument itself: one unchanged binary's wall floor moved 7–12 % between
+# back-to-back runs at a load of 7, P-core against E-core, so no wall threshold on this host
+# can be tight enough to matter without going red on unchanged code.
 #
-# The derivation, in full, so that a red is diagnosable and a re-baseline is honest:
-#
-#   BASELINE_US    138.7 µs — the per-run `fastest` floor recorded 2026-09-03 on this machine
-#                  (hw.model Mac15,9, rustc 1.98.0), bit-stable across seven undisturbed runs
-#                  in two independent sessions, under a one-minute load of 8.6–11.4 on 16
-#                  cores. The lowest *median* the same sessions recorded is 138.8 µs, which is
-#                  the figure `benches/frame.rs`'s doc header carries.
-#   MARGIN         ×1.15 over the floor. The audit's variance report: a load spike displaces
-#                  a whole run by up to ~10 %, and *"do not set the gate tighter than 8 % on
-#                  this hardware"*. The obvious estimator — lowest median of three, ×1.10 —
-#                  was measured here and disqualified: under a sustained load of 11, three
-#                  consecutive runs' medians all sat at 152.6–152.7 µs, exactly ×1.10 of
-#                  baseline, while the same runs' `fastest` floors stayed at 131.9–142.2. The
-#                  floor is the estimator that survives load, and the ceiling it is held to
-#                  still catches a P1-class regression — +19.6 % on this case, reproduced on
-#                  the floor — with margin to spare.
-#   THE ESTIMATE   the lowest `fastest` across three runs. To breach the ceiling, the best of
-#                  100 samples must exceed it three runs in a row: noise cannot arrange that,
-#                  a regression cannot avoid it.
-#
-# A red here means the hot path is slower than every recorded state of this tree, or the
-# baseline is stale. Re-baseline only from a measurement — re-run, record the new floor with
-# its date and conditions here — never by widening MARGIN until a finding goes away. What
-# this step cannot see: a regression under ~15 % (an M4-sized change is ±3 %; that resolution
-# needs a quiet machine), and anything on hardware that is not the baseline's — there it
-# skips, counted, because this baseline compared against another machine's clock would be a
-# gate grading geography.
-BASELINE_US=138.7
-MARGIN=1.15
-BASELINE_MODEL="Mac15,9"
-step "PERF   quiet_48k stays under its recorded ceiling"
-model=$(sysctl -n hw.model 2>/dev/null || true)
-if [ "$model" != "$BASELINE_MODEL" ]; then
-    skip "hot-path ceiling: this is '${model:-an unknown machine}' and the ${BASELINE_US} µs baseline was recorded on ${BASELINE_MODEL}; re-baseline before gating here"
-else
-    lowest=""
-    for run in 1 2 3; do
-        cargo bench -p spectrum --bench frame quiet_48k > "$logs/bench$run.txt" 2>&1
-        status=$?
-        if [ "$status" -ne 0 ]; then
-            bad "bench run $run failed (exit $status); log: $logs/bench$run.txt"
-            continue
-        fi
-        # The row reads "╰─ quiet_48k  138.7 µs │ <slowest> │ <median> │ <mean> │ …", so the
-        # second whitespace field is the name and the next two are the `fastest` value and
-        # its unit. divan scales units per value, so a regressed run printing "1.02 ms" must
-        # not be read as 1.02: the unit is normalised, and a row this cannot read is a FAIL
-        # rather than a silent green — this script exists to hunt vacuous gates, not to
-        # ship one.
-        micros=$(awk '$2 == "quiet_48k" {
-            value = $3; unit = $4
-            if      (unit == "ns") value /= 1000
-            else if (unit == "µs") value += 0
-            else if (unit == "ms") value *= 1000
-            else if (unit == "s")  value *= 1000000
-            else next
-            printf "%.1f", value
-            exit
-        }' "$logs/bench$run.txt")
-        if [ -z "$micros" ]; then
-            bad "bench run $run has no readable quiet_48k row; log: $logs/bench$run.txt"
-            continue
-        fi
-        ok "run $run: fastest $micros µs"
-        if [ -z "$lowest" ] || awk "BEGIN { exit !($micros < $lowest) }"; then lowest=$micros; fi
-    done
-    if [ -n "$lowest" ]; then
-        ceiling=$(awk "BEGIN { printf \"%.1f\", $BASELINE_US * $MARGIN }")
-        if awk "BEGIN { exit !($lowest <= $ceiling) }"; then
-            ok "lowest of three: $lowest µs, under the $ceiling µs ceiling ($BASELINE_US µs × $MARGIN)"
-        else
-            bad "quiet_48k floor $lowest µs breached the $ceiling µs ceiling ($BASELINE_US µs × $MARGIN, recorded 2026-09-03) — a hot-path regression, or a stale baseline; the derivation above says how to tell them apart"
-        fi
-    fi
-fi
+# Instructions retired are the hard gate instead: the same binary's count moved at most 0.38 %
+# under a load of 186, and `web/perf_gate.sh` carries the derivation, the eleven cases and the
+# mutation proofs that turned it red. Wall time is still required evidence for a change that
+# touches the hot path — `web/perf_ab.sh`, interleaved against the merge base, pasted into the
+# change's record — and never a verdict.
+step "PERF   instructions retired per frame within 1 % of web/perf-baseline.txt"
+sh "$here/perf_gate.sh" > "$logs/perf.txt" 2>&1
+status=$?
+cat "$logs/perf.txt"
+if [ "$status" -eq 0 ]; then ok "instructions per frame"
+elif [ "$status" -eq 3 ]; then skip "instruction gate: $(tail -n 1 "$logs/perf.txt" | sed 's/^ *SKIP //')"
+else bad "instructions per frame regressed, or the gate could not measure (exit $status); log: $logs/perf.txt"; fi
 
 # ---------------------------------------------------------------------------------------
 # T2 — the build, the artefact, and what is inside it
@@ -255,7 +196,7 @@ else bad "wasm32 build (exit $status)"; cat "$logs/build.txt"; fi
 
 # Assertion 2 of Decision 7's three: a build that produced nothing must not pass. `--emit=asm`
 # without `link` is on this project's record as passing a gate vacuously in another language.
-wasm=target/wasm32-unknown-unknown/release/zx.wasm
+wasm="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/zx.wasm"
 step "T2     the artefact exists and is not a stub"
 if [ -f "$wasm" ]; then
     ok "$wasm exists"

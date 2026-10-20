@@ -62,6 +62,12 @@ The CPU does not own memory. That is the decision everything else hangs on.
 > `unsafe_code = "forbid"`*, and the exception is confined to one file: five `unsafe` blocks,
 > two `extern` blocks, one export, each with a `SAFETY:` comment.
 >
+> *(2026-10-20.)* `crates/page/src/telemetry.rs` — the one `ZX_TELEMETRY` reader and the one
+> latency histogram, shared by the desktop audio callback here and `crates/frontend`'s frame loop
+> (DECISION.md item 7b) — sits in this crate because it is the only crate both of them reach
+> (`frontend` depends on `page`, and the callback cannot depend on `frontend`); it opens with
+> `#![forbid(unsafe_code)]`, so the exception above still covers `lib.rs` alone.
+>
 > Two different tests hold the two halves of that, and it is worth saying which does which.
 > `crates/page/tests/unsafe_inventory.rs` asserts the **counts**, because every block is behind
 > `#[cfg(target_arch = "wasm32")]` and a lint fires only on code the current target compiles —
@@ -88,13 +94,12 @@ The CPU does not own memory. That is the decision everything else hangs on.
 > writing: careful writing is what produced this line.
 >
 > The seam pays a second dividend that was not the reason for it and is now the larger one.
-> Because both of `page`'s entry points **compile and behave on every target** — the query
-> string is empty off `wasm32`, the download answers `Handoff::NoPage` — `crates/frontend`
-> contains **no `#[cfg(target…)]` at all**, and `crates/frontend/tests/portability.rs` asserts
-> that absence. That absence is the whole reason a test run on this machine says anything about
-> a browser: the code `cargo test -p frontend` runs and the code a browser runs are the same
-> code. It is a property of every build rather than an observation about one, which is the
-> stronger of the two claims this project knows how to make.
+> `page`'s entry points still compile on every target — the query string is empty off
+> `wasm32`, and a download answers `Handoff::NoPage`. The later native file loader and F2
+> worker added private target routing in `frontend/src/main.rs` and `snapshot.rs`; the
+> current `tests/portability.rs` confines explicit target branches to those two files and
+> keeps headless modules target-independent. Host tests therefore do not certify either
+> file seam's browser behavior; the separate wasm build and live browser observation matter.
 >
 > **`crates/testsupport` is a crate because a policy that lives in two places is two policies.**
 > Several gates read corpora — third-party snapshots, tapes, games — that this repository may
@@ -124,12 +129,22 @@ pub trait Bus {
     /// of an accepted interrupt. Defaulted, on the `fetch` precedent.
     fn acknowledge(&mut self, addr: u16, t_states: u8) { let _ = (addr, t_states); }
 
-    /// One T-state elapses with `addr` on the bus. Called once per T-state, never batched.
+    /// One T-state elapses with `addr` on the bus. A tick that could contend, or a tape edge,
+    /// is always its own call; covered runs may arrive through `ticks` (amendment below).
     fn tick(&mut self, addr: u16);
+
+    /// `count` T-states with `addr` on the bus. Defaulted to `tick` `count` times (2026-10-20).
+    fn ticks(&mut self, addr: u16, count: u8) { (0..count).for_each(|_| self.tick(addr)); }
 }
 
 pub struct Cpu<B> { /* ... */ }
 ```
+
+> **Amended 2026-10-20: the block shows `Bus::ticks` now; `tick`'s comment read "Called once per
+> T-state, never batched" until 2026-10-21.** The core reports a machine cycle's run through `ticks`; a run already covered
+> by charged contention may arrive as one call only where that is indistinguishable from the
+> per-tick loop, and a tick that could contend, or a tape edge, is never batched — the amendment
+> at the end of this decision carries the rule and its proof.
 
 > **Corrected: this block carried `pub struct Cpu<B: Bus>` long after the bound moved to the
 > `impl` blocks.** `STATUS.md` records the struct-level bound's removal in its *Closed* table —
@@ -252,6 +267,38 @@ starting at T. The machine cannot recover the difference afterwards. Corpus vect
 (`ADD HL,BC`) shows seven separate `MC` events, and a batched `tick(7)` loses six of them.
 Across the un-prefixed set, batching loses **88 of the corpus's 166 internal contention
 points** — more than half.
+
+> **Amended 2026-10-20 — every T-state is still reported; a covered run may arrive as one call.**
+> The paragraph above stands for every tick that could contend. What it did not distinguish is a
+> tick that **cannot**: once a memory, fetch or port cycle has opened, its contention is charged
+> at the position it opened, and the T-states that follow are already paid for. Sending those as
+> separate calls cost the core a call and a `Tape::advance` per T-state for a result the ULA could
+> compute in one step. The rule is now, in [`z80::Bus::tick`]'s own words: *a run already covered
+> by charged contention may arrive as one call only where that is indistinguishable from the
+> per-tick loop; a tick that could contend, or a tape edge, is never batched.*
+>
+> The mechanism is `Bus::ticks(addr, count)`, a **provided** method whose default is `tick` once
+> per T-state, so every bus that does not override it — the conformance buses, the test buses,
+> any downstream implementor — sees exactly the stream it saw before. `Ula` overrides it for a
+> run that is wholly covered **and** holds no tape edge (`Tape::flips_within`); everything else
+> takes the per-tick path. The edge guard is not optional: without it, two edges inside one
+> four-T-state fetch collapse into one, which three judges reproduced independently on 1–7 T
+> pulse tapes (3,232 to 75,190 differing audio samples).
+>
+> Proof, all on the tree that ships it (DECISION.md item 3, the judges' common decision):
+> - `crates/spectrum/src/ula.rs` `tests::batched_ticks` — a `proptest` that `ticks(n)` and n ×
+>   `tick` leave identical state and samples after any cycle opener on any tape of 0–7 T pulses,
+>   and a `Cpu<Ula>` against a `Cpu<PerTick>` (the default `ticks`) over the committed
+>   zero- and short-pulse fixtures. Both go **red** when the edge guard is removed.
+> - The `zx-shot` output corpus — screen `.ppm`, whole-machine `.z80` and mixed `.wav` —
+>   **byte-identical** before and after on ten workloads: Manic Miner `.z80`/`.tap`/`.tzx`, Mario
+>   `.tzx`, Exolon `.tap`, Cybernoid (128), R-Type (128, turbo loader, 28,479 frames), and the two
+>   synthetic tapes on a 48K and a 128.
+> - Cost: **−31 to −39 % instructions per frame** (`quiet_48k` 4.20 M → 2.66 M). The figures and
+>   the gate that holds them are in `docs/PERFORMANCE.md`.
+>
+> The +11 code lines and +2 branches this added are a recorded RULE-4 exception taken under
+> performance-first for this change alone, not a precedent.
 
 **The address travels with the tick.** The machine can track the address of the last
 transfer itself, since it sees every `read`/`write`. What it cannot learn is `IR` — the
@@ -467,7 +514,7 @@ called from every opcode of that class. Never inline flag logic per opcode: that
 | EI delay | An interrupt is not accepted until after the instruction *following* `EI`. Many games depend on it. |
 | Register R | Increments on every M1 (opcode fetch), 7-bit, bit 7 preserved. Used by games for randomness and copy protection. |
 | DDCB / FDCB | The displacement byte comes **before** the opcode byte, not after. A naive decoder breaks here. |
-| DD/FD chains | `DD DD DD 21` — each prefix is a separate instruction with its own R increment. |
+| DD/FD chains | `DD DD DD 21` — each prefix is an M1 fetch with its own R increment; `Cpu::step` may return mid-chain and resume the same instruction on the next call. |
 | `RETN` / NMI | IFF1 is restored from IFF2. |
 | HALT | Executes NOPs until an interrupt; PC must not advance past it. |
 
@@ -660,13 +707,14 @@ samples. Between those it does nothing at all.
 > **machine's own passage of time**, not by anything the guest does. That is a third kind of
 > moment and it is unavoidable; what was avoidable was *where the test lived*.
 >
-> **The first wiring polled it, and it cost +23%.** `Ula::advance` read `Tape::level()` on every
+> **The first wiring polled it, and it cost ~~+23%~~ +19.6 % on `quiet_48k` (JOURNAL P1).** *(corrected 2026-10-20: the one figure this repository quotes for P1 is `quiet_48k`'s +19.6 %)* `Ula::advance` read `Tape::level()` on every
 > elapsed T-state and let the audio module compare — the shape `set_beeper` uses, and the wrong
 > one here, because the *timestamp* argument is evaluated at the call site before any guard can
 > discard it, and `Clock::t_states` is a 64-bit multiply-add that under this workspace's
 > `overflow-checks = true` compiles to two multiplies and two branch-to-panic edges. 69,888 calls
 > a frame, on a machine with no tape in the drive. Measured on `benches/frame.rs`: **+19% to +30%
-> across all eleven cases, mean +23%.**
+> across all eleven cases, mean +23%.** *(The mean of eleven cases, kept as measured; P1's one
+> quoted figure is `quiet_48k`'s +19.6 %.)*
 >
 > `Tape::advance` already knew when the level moved — `finish_pulse` is the only thing that
 > writes it, and it runs right there — so it says so, and the timestamp is computed only when
@@ -954,14 +1002,13 @@ mapping that makes Willy jump.
 attribute is argued once under *Crate boundaries* and not repeated here. What belongs in this
 decision is the consequence for the frontend, which is the larger half and was not the reason.
 
-Because `page`'s entry points compile and behave on **every** target, `crates/frontend` contains
-no `#[cfg(target…)]` at all — and the absence is asserted, together with its counterweight: a
-second assertion that the target-conditional code **is** in `crates/page`, without which
-deleting that crate entirely would leave the first test greener than ever. The one thing the
-pair cannot see is stated in the test itself: a `#[cfg]`-free crate can still behave differently
-on two targets, through a dependency, through pointer width, through whatever a browser's WebGL
-does with a texture upload. It grades that this crate does not **branch** on the target, which
-is a real and narrow property, and not that the two targets agree.
+The headless frontend modules do not branch on the target. Private `main.rs` and `snapshot.rs`
+now route native file loading and F2 writing separately from browser HTTP/download handling;
+`tests/portability.rs` checks this narrower inventory, and the native and wasm builds exercise
+both sides. The second assertion still places unsafe browser ABI code in `crates/page`, not in
+`crates/frontend`. A shared headless module can nevertheless behave differently through a
+dependency or pointer width; the gate proves an absence of explicit target branches there, not
+cross-target behavioral parity or browser pixels.
 
 One convention runs through the whole seam and is worth stating once, because it is a property
 of the boundary rather than of any function. **Zero must never mean success.** miniquad replaces
@@ -1125,7 +1172,7 @@ Host for every figure below: Apple M3 Max (16 cores), macOS 25.6.0, rustc 1.98.0
 | …and no call to any bus method | **subject-dependent** — true in the probe, **false** for `Cpu<Ula>` | `no_bus_method_survives_as_an_out_of_line_call` |
 | Decode lowers to **two** tables (119 + 64) | **falsified at M2** — three now: 124 + 119 + 64. Attributed: 119 + 64 are `execute`'s and are M1's two; **124 is `execute_ed`'s**, the `ED` page M2 added | `decode_still_lowers_to_jump_tables` |
 | The execute path allocates nothing | **holds**, and structurally: the crate is `no_std` with no `alloc` | `the_execute_path_allocates_nothing` |
-| Register indexing: `panic_bounds_check` **15** in `Cpu<Ula>` | **reproduced exactly** — 15 = 7 + 6 + 2 | `bounds_checks_in_the_execute_path_have_not_moved` (at 7, its own probe) |
+| Register indexing: `panic_bounds_check` **15** in historical `Cpu<Ula>` build | **historical**, not remeasured after bounded prefix slices — old decomposition 15 = 7 + 6 + 2; the separate NullBus probe pinned **8** from the bounded prefix dispatch (one additional `set` site) and **7** again from 2026-10-20's batched covered ticks (`Bus::ticks`) on rustc 1.98.0, then **8** on rustc 1.99.1 (2026-10-21, source unchanged: one more `registers.rs:148` site survives the tail merge), not a new `Cpu<Ula>` total | `bounds_checks_in_the_execute_path_have_not_moved` (at 8 on 1.99.1, its own probe); remeasure `Cpu<Ula>` before a current total claim |
 | Decision 5's bank masking: **0** in `crates/spectrum/src` | **reproduced exactly** — 0 | ungated; `crates/spectrum` owns its own gates |
 
 ### Throughput
@@ -1155,7 +1202,7 @@ $ cargo bench -p spectrum                  # the real machine: a real Cpu<Ula>, 
 > than workloads and are labelled so: a music driver writes the AY about fourteen times a
 > *frame*, not two thousand.
 >
-> **Re-measured 2026-09-03**, after M8's tape half landed — with the same-day +23 % regression
+> **Re-measured 2026-09-03**, after M8's tape half landed — with the same-day ~~+23 %~~ +19.6 % regression *(corrected 2026-10-20: the one figure this repository quotes for P1 is `quiet_48k`'s +19.6 %)*
 > and its reversal that Decision 7's correction carries — and after `Memory::is_contended` was
 > folded into a per-slot cache rebuilt on the paging write: `quiet_48k` is **138.8 µs — 0.69 %
 > of a frame** — and a cassette actually turning costs **+0.8 µs** over the same frame drained
@@ -1227,6 +1274,11 @@ Ticking once per T-state instead of once per batch is roughly 3× the calls, eac
 arithmetic; it buys the 88 contention points batching discarded, without which M5 and M7 cannot be
 correct at all. At 160× real time the paged bus spends ~125 µs of a 20,000 µs frame — **0.6 % of the
 budget** — which is why the benchmark is kept and the number is not chased.
+
+> *(2026-10-20: part of that price was bought back without giving up a contention point. Runs whose
+> contention was already charged when their cycle opened, with no tape edge inside, now arrive as
+> one `Bus::ticks` call — Decision 1's amendment — for −31 to −39 % instructions per frame;
+> `docs/PERFORMANCE.md` has the figures. Every tick that could contend is still one call.)*
 
 ### `overflow-checks`, and a row that was never reproducible
 
@@ -1526,9 +1578,10 @@ labelled ungated, with the command that re-runs them.
 no bus is named.
 
 **Stability against the toolchain is handled by pinning, not by loosening.** The counts are asserted
-as exact equalities, and `rust-toolchain.toml` says `channel = "stable"`, which floats — so a future
+as exact equalities, and `rust-toolchain.toml` said `channel = "stable"`, which floats *(pinned to `"1.99.1"`
+since 2026-10-21, so a re-pin now arrives only with a deliberate bump)* — so a future
 rustc will eventually turn one of them red. That is deliberate. The failure message reads the
-running `rustc --version`, compares it to the pinned `1.98.0`, and says in the failure text whether
+running `rustc --version`, compares it to the pinned `1.99.1` (`1.98.0` until 2026-10-21), and says in the failure text whether
 this is a re-pin or a real codegen change, with the command to reproduce. A bound (`<= 7`) would
 have been quieter and would have let the number drift downwards unnoticed — and "silently drifted
 while looking green" is the defect being fixed, not a cost worth paying to avoid a re-pin.

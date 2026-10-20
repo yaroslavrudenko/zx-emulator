@@ -187,9 +187,9 @@
 //! ```
 //!
 //! **It is [`media::save`] and nothing else, which is what makes it the same file `F2` writes.**
-//! `src/main.rs`'s `write_snapshot` is [`host::free_path`] for the name and that one call for the
-//! bytes; this is [`Options::snapshot`] for the name and that one call for the bytes. A second
-//! writer would be a second `.z80` encoder to disagree with the first, in a repository whose
+//! The window's private snapshot writer reserves the name off the frame thread; this tool uses
+//! [`Options::snapshot`] for the name. Both call the same [`media::save`] encoder for the bytes.
+//! A second encoder would be a second `.z80` format implementation to disagree with the first, in a repository whose
 //! `media.rs` header already says what a second copy of a decision is for.
 //!
 //! **The state is taken at the instant the frame is rendered**, from the same `machine`, with no
@@ -634,7 +634,11 @@ fn run(arguments: &[String]) -> Result<String, String> {
         // No frame between this and the render above, deliberately: the cover and the cartridge
         // are one instant or they are two claims, and the second is what a reader would have to
         // take on trust.
-        host::save(&path, &media::save(&machine)).map_err(|error| error.to_string())?;
+        host::save(
+            &path,
+            &media::save(&machine).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
         // The model, because the file carries its own and the next command line's `--rom` count
         // has to agree with it. Said here rather than left to the refusal a mismatch earns.
         wrote = format!("{wrote} and {path}: {}", snapshot_note(machine.model()));
@@ -1248,10 +1252,10 @@ mod tests {
         // cassette has wound off changes nothing, so this run ends where an ordinary one does —
         // waiting in the ROM's loader for a header that went past long ago.
         assert!(
-            LD_BYTES.contains(&control.cpu_state().pc),
+            LD_BYTES.contains(&control.cpu_state().expect("completed instruction").pc),
             "a pause past the end of the tape should leave this load stuck in the ROM's loader, \
              and PC is {:#06x} — either the dump changed or the defect has gone",
-            control.cpu_state().pc,
+            control.cpu_state().expect("completed instruction").pc,
         );
 
         // And the premise of the comparison below: a blank screen differs from a blank screen only

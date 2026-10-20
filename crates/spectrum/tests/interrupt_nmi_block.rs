@@ -91,6 +91,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::pattern_rom;
 use spectrum::memory::PAGE_SIZE;
 use spectrum::{Memory, Ula};
@@ -325,7 +327,7 @@ fn run_passes(cpu: &mut Cpu<Ula>, passes: u64) {
 /// Run until the loop leaves, and report where it ended.
 fn run_to_completion(cpu: &mut Cpu<Ula>) -> (u64, u32) {
     for _ in 0..STEP_BUDGET {
-        if cpu.state().pc == CODE + 2 && cpu.state().bc == 0 {
+        if cpu.completed().pc == CODE + 2 && cpu.completed().bc == 0 {
             return position(cpu);
         }
         cpu.step();
@@ -335,7 +337,7 @@ fn run_to_completion(cpu: &mut Cpu<Ula>) -> (u64, u32) {
 
 /// The address the acknowledge pushed.
 fn pushed(cpu: &Cpu<Ula>) -> u16 {
-    let sp = cpu.state().sp;
+    let sp = cpu.completed().sp;
     u16::from_le_bytes([
         cpu.bus().memory().read(sp),
         cpu.bus().memory().read(sp.wrapping_add(1)),
@@ -370,7 +372,7 @@ fn an_nmi_is_accepted_mid_loop_with_maskable_interrupts_disabled_and_no_line_ass
         );
 
         // A maskable offer made at this exact moment changes nothing at all.
-        let before = cpu.state();
+        let before = cpu.completed();
         assert_eq!(
             cpu.interrupt(0xFF),
             0,
@@ -378,14 +380,14 @@ fn an_nmi_is_accepted_mid_loop_with_maskable_interrupts_disabled_and_no_line_ass
             case.name
         );
         assert_eq!(
-            (cpu.state().pc, cpu.state().sp, cpu.state().bc),
+            (cpu.completed().pc, cpu.completed().sp, cpu.completed().bc),
             (before.pc, before.sp, before.bc),
             "{}: and a declined offer must leave the loop exactly as it was",
             case.name
         );
 
         let charged = cpu.nmi();
-        let after = cpu.state();
+        let after = cpu.completed();
 
         assert_eq!(
             after.pc, NMI_VECTOR,
@@ -447,7 +449,7 @@ fn an_nmi_saves_iff1_in_iff2_and_retn_gives_it_back() {
         let case = &CASES[0];
         let mut cpu = loaded(case);
         run_passes(&mut cpu, case.passes_before);
-        let mut state = cpu.state();
+        let mut state = cpu.completed();
         state.iff1 = iff1;
         // The opposite of `iff1`, so a shadow that was merely left alone is not mistaken for
         // one that was written.
@@ -455,7 +457,7 @@ fn an_nmi_saves_iff1_in_iff2_and_retn_gives_it_back() {
         cpu.set_state(state);
 
         cpu.nmi();
-        let accepted = cpu.state();
+        let accepted = cpu.completed();
         assert!(
             !accepted.iff1,
             "iff1 = {iff1}: acceptance must disable maskable interrupts"
@@ -468,7 +470,7 @@ fn an_nmi_saves_iff1_in_iff2_and_retn_gives_it_back() {
         );
 
         cpu.step();
-        let returned = cpu.state();
+        let returned = cpu.completed();
         assert_eq!(
             returned.pc, CODE,
             "iff1 = {iff1}: RETN must return to the instruction's own address"
@@ -541,7 +543,7 @@ fn the_loop_resumes_after_the_handler_and_finishes_the_copy_exactly() {
         run_passes(&mut cpu, case.passes_before);
         cpu.nmi();
         let end = run_to_completion(&mut cpu);
-        let state = cpu.state();
+        let state = cpu.completed();
 
         assert_eq!(state.bc, 0, "{}: the counter must be exhausted", case.name);
         assert_eq!(

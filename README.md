@@ -14,6 +14,10 @@ Every pixel above is the emulator's own output, enlarged 2× and otherwise untou
 verifies that no image contains a colour the machine cannot emit
 ([`docs/images/README.md`](docs/images/README.md)).
 
+## Game shelf
+
+<img src="docs/images/cartridges.png" width="640" alt="A contact sheet of thirty-two game screens captured by the emulator, four to a row, each titled: Manic Miner, Cybernoid, Cybernoid II, Exolon, Mario Bros, Batty, Bomb Jack, Head Over Heels, Nebulus, Rex (both sides), R-Type, Durak, Sea Dragon, Crosswize, Donkey Kong, F1 Tornado, Freddy Hardest (both parts), Game Over (128 and both parts), H.A.T.E., Harrier Attack, Into the Eagle's Nest, Lode Runner, Manic Miner No 2, Zybex, Zynaps, All Hallows, Angry Birds and Asymmetry.">
+
 ## What it is
 
 - **The whole machine**: Z80 CPU core, ULA video with contended memory, beeper and AY-3-8912
@@ -27,7 +31,7 @@ verifies that no image contains a colour the machine cannot emit
 
 ## Quick start
 
-Rust 1.98+ (stable is pinned by `rust-toolchain.toml`). The Sinclair ROMs are committed under
+Rust 1.98+ (MSRV); `rust-toolchain.toml` pins **1.99.1**, which rustup selects inside the repository. The Sinclair ROMs are committed under
 [Amstrad's permission](testdata/README.md); games are never committed — put your own in
 `testdata/games/` (gitignored).
 
@@ -100,8 +104,11 @@ no, and the misses stay on record:
   `cited_names.rs` walk every `path:line` citation and every named test in the docs; a test
   fails if a doc lies. Corrections are made loudly in place, never silently.
 - **The hot path is defended.** Zero per-frame allocation, no trait objects on the execute
-  path, bounds checks provably elided, benchmarks in `crates/spectrum/benches/frame.rs`, and a
-  performance ceiling in `web/gate.sh` that goes red on regression.
+  path, bounds checks provably elided, benchmarks in `crates/spectrum/benches/frame.rs`, and an
+  instruction-count gate (`web/perf_gate.sh`, every case within 1 % of `web/perf-baseline.txt`)
+  that goes red on regression — on the architecture and compiler the baseline names. It fails on
+  another compiler of that architecture, and skips (counted) on another architecture, CI included
+  ([`docs/PERFORMANCE.md`](docs/PERFORMANCE.md), *The gate*).
 - **Overflow checks stay on in release.** The Z80 is meant to wrap, so every wrap is an
   explicit `wrapping_*` call and a silent one is a bug the build refuses to hide.
 - **Screenshots are evidence.** The machine can emit exactly fifteen RGB values; a checker
@@ -112,19 +119,40 @@ The full rules, and the audit of this repository's own false citations:
 
 ## Performance work, measured
 
+**In short:** the core does about a third less work per frame, the emulator's output is unchanged,
+and the project now builds on **Rust 1.99.1** (pinned; MSRV 1.98) with its one slowdown found and
+fixed. Measured 2026-10-20/21; how, and with what, is in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md), *In short*.
+
+| What | Before | After |
+|---|---|---|
+| Instructions per frame (`quiet_48k`) | 4.20 M | 2.66 M (−31 to −39 % across the cases) |
+| One quiet 48K frame / with a tape playing | 138.7 µs / 147 µs | 74 µs / 83 µs |
+| A whole *Exolon* tape load | 53.8 G instructions | 35.1 G (−34.7 %) |
+| Browser (wasm) frame | 282 µs | about 158 µs |
+| Toolchain | Rust `stable` (1.98.0) | Rust 1.99.1 pinned, prefix-match slowdown fixed with `core::hint::cold_path()` |
+
+Tools: batched covered ticks, an exact tape-edge stamp, a lock-free audio ring, one latency
+histogram for the audio callback and the frame loop, an instruction-count gate (`web/perf_gate.sh`),
+an interleaved wall A/B (`web/perf_ab.sh`), a byte-identical `zx-shot` differential, mutation
+proofs, and three independent reviewers plus a panel of judges.
+
 Post-release audits over the whole workspace. Every number below has its measurement recorded in
-[`docs/JOURNAL.md`](docs/JOURNAL.md).
+[`docs/JOURNAL.md`](docs/JOURNAL.md); the budgets, the before/after tables, the gate and the refused
+list are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 | Change | Effect |
 |---|---|
-| Tape-edge reporting instead of a per-tick probe | erased a **+23%** frame-time regression the tape fix had shipped (150.8 → 180.3 µs, back to 146.1 µs) |
+| Batched covered ticks (`Bus::ticks`), 2026-10-20 | **−31 to −39 %** instructions per frame (`quiet_48k` 4.20 M → 2.66 M, 138.7 → 74.1 µs), a whole Exolon load −34.7 %, the browser build 282 → 164.5 µs a frame (a `NOP` frame); every screen, snapshot and WAV byte-identical **for this change alone** |
+| Exact tape-edge stamp, 2026-10-20 (a separate change) | ±0.03 % instructions; an edge inside a contention stall is stamped where it happened instead of up to 12 T-states late — **the WAV of every tape load changes** (at most 722 of 32767, 46.6–58.7 dB below the signal), screens and snapshots stay byte-identical |
+| Tape-edge reporting instead of a per-tick probe | erased a **+19.6 %** frame-time regression the tape fix had shipped (`quiet_48k` 150.8 → 180.3 µs, back to 146.1 µs) |
 | Contended-memory lookup: derived cache | 10 instructions → 4 per test; `quiet_48k` **143.4 → 138.8 µs (−3.2%)** |
 | AY envelope position masked to its range | up to **1.33 M** compare-and-branch pairs/sec and three panic pads removed |
 | Browser worklet: preallocated ring buffer | bounded audio latency; no per-chunk allocation on the audio thread |
-| Desktop audio queue: one bulk `extend` | audio-mutex critical section **~100× shorter** (~99% of hold time gone) |
+| Desktop audio queue: a lock-free `rtrb` ring the callback owns | the callback takes no lock (it was one bulk `extend` under a mutex, ~100× shorter than the loop before it); 0 underruns over 180 s at 1×, 15 in a second run under heavier host load ([`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)) |
 | ROM acknowledgement scan behind `LazyLock` | a whole-ROM scan 60×/sec → **once** per process |
 | Resampler control-loop sign fix | 8.9 s of runaway backlog over 20 min of drift → **74 ms**, stable; closed-loop tests added |
-| `tape_playing_48k` benchmark + gate ceiling | the hole that let the +23% ship green is an instrument now; regressions go red before push |
+| `tape_playing_48k` benchmark + gate ceiling | the hole that let the +19.6 % ship green is an instrument now; the gate counts instructions per frame since 2026-10-20 ([`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)) |
 
 ## Where it is now
 
@@ -132,7 +160,7 @@ Post-release audits over the whole workspace. Every number below has its measure
 
 **R-Type loads and runs** — a `.tzx` turbo loader, 28,429 frames of emulated cassette (nine and
 a half minutes), into its attract loop. Manic Miner, Cybernoid, Cybernoid II and Exolon load
-from tape and play. The workspace suite is **1045 tests, 0 failed**, and it runs on the desktop
+from tape and play. The workspace suite is **1113 tests, 0 failed, 5 ignored** (`cargo test --workspace`, 2026-10-21), and it runs on the desktop
 and in the browser.
 
 Honestly still open: a handful of recorded items in [`docs/STATUS.md`](docs/STATUS.md)'s
@@ -147,6 +175,7 @@ level outside the game mix.
 | [`docs/RUNNING.md`](docs/RUNNING.md) | The full guide: every command, key, format and caveat |
 | [`docs/JOURNAL.md`](docs/JOURNAL.md) | The engineering journal: galleries, milestones, the post-release sound and performance work, the rules |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Crate boundaries, design decisions, measured codegen claims |
+| [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | The budgets, the measured before/after, the instruction gate and how to run it, the refused list with its numbers |
 | [`docs/MACHINE.md`](docs/MACHINE.md) | The machine model and the timing oracle |
 | [`docs/Z80-REFERENCE.md`](docs/Z80-REFERENCE.md) | The CPU reference, undocumented corners included |
 | [`docs/STATUS.md`](docs/STATUS.md) | What is currently true, and the register of what is open |

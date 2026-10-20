@@ -35,6 +35,27 @@ use spectrum::timing::T_STATES_PER_FRAME;
 use spectrum::{Key, Spectrum};
 use z80::{Bus, CpuState, InterruptMode};
 
+/// The CPU's state at an instruction boundary — where every gate that reads it stands, so the
+/// `Result` a capture mid-prefix-chain returns is always `Ok` here. One helper for this crate's
+/// tests in place of the same `.expect("completed instruction")` at every call site
+/// (DECISION.md item 12).
+pub trait Completed {
+    /// The CPU state, which every caller reads between instructions.
+    fn completed(&self) -> CpuState;
+}
+
+impl Completed for Spectrum {
+    fn completed(&self) -> CpuState {
+        self.cpu_state().expect("completed instruction")
+    }
+}
+
+impl<B: Bus> Completed for z80::Cpu<B> {
+    fn completed(&self) -> CpuState {
+        self.state().expect("completed instruction")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Where things live in the address space
 // ---------------------------------------------------------------------------
@@ -175,7 +196,7 @@ pub fn write_program(machine: &mut Spectrum, address: u16, bytes: &[u8]) {
 /// twenty fields, change one, and put them back. Doing that inline is three lines each time
 /// and was already copied four ways across these gates before this existed.
 pub fn with_cpu_state(machine: &mut Spectrum, edit: impl FnOnce(&mut CpuState)) {
-    let mut state = machine.cpu_state();
+    let mut state = machine.completed();
     edit(&mut state);
     machine.set_cpu_state(state);
 }
@@ -396,7 +417,7 @@ pub fn run_recording_interrupts(
         // Taken before the step: see `AcceptedInterrupt`.
         let offered_at = (machine.frames(), machine.frame_t_state());
         let charged = machine.step();
-        let state = machine.cpu_state();
+        let state = machine.completed();
         if state.pc == handler {
             accepted.push(AcceptedInterrupt {
                 frame: offered_at.0,

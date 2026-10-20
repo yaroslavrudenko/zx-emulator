@@ -86,7 +86,7 @@ fn every_message_a_dropped_file_can_produce_is_drawable() {
     // A success too, since it is the message a person sees most often.
     let mut fresh = media::start(&[&rom[..]]).expect("one ROM is a 48K");
     fresh.run_frames(2);
-    let snapshot = media::save(&fresh);
+    let snapshot = media::save(&fresh).expect("completed instruction");
     let message = media::accept(&mut machine, "generated.z80", &snapshot);
     assert_drawable("a successful load", &message);
     produced += 1;

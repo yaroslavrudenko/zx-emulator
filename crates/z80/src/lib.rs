@@ -19,7 +19,7 @@
 //! cpu.set_state(CpuState { pc: 0x8000, sp: 0xFF00, ..CpuState::default() });
 //!
 //! let t_states = cpu.step();
-//! assert_eq!(cpu.state().pc, 0x8001); // a NOP out of blank memory
+//! assert_eq!(cpu.state().expect("completed instruction").pc, 0x8001); // a NOP out of blank memory
 //! assert_eq!(t_states, 4);
 //! ```
 //!
@@ -43,11 +43,12 @@
 //! than transfers are charged explicitly. [`Cpu::step`] returns the total as a
 //! convenience, but the authoritative account is the sequence of `tick` calls.
 //!
-//! **A single step has no upper bound.** A run of `DD`/`FD` prefix bytes is *one*
-//! instruction — each prefix costs its own M1 cycle, and the whole run is uninterruptible,
-//! which is a real technique for protecting a critical section. A machine's frame loop must
-//! therefore treat one step as able to overrun its remaining budget, rather than assuming
-//! any small maximum.
+//! A `DD`/`FD` chain is one instruction with one M1 cycle per prefix, but one call to
+//! [`Cpu::step`] now has a finite prefix-fetch budget. When that budget is spent, it returns
+//! the T-states charged so far with the instruction still in progress; the next call resumes
+//! the same instruction. [`Cpu::state`] refuses capture at that partial boundary, and an
+//! interrupt waits for the instruction to complete. The budget bounds prefix dispatch work,
+//! not the time spent in an individual bus callback or an operating-system suspension.
 //!
 //! # Known deviations from real silicon
 //!
@@ -181,6 +182,15 @@ pub enum StepError {
         /// The byte the device placed on the bus.
         opcode: u8,
     },
+}
+
+/// An architectural snapshot cannot represent an unfinished instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum StateCaptureError {
+    /// The CPU is partway through a prefix chain.
+    #[error("instruction in progress")]
+    InstructionInProgress,
 }
 
 /// A value outside the three interrupt modes the Z80 defines.
@@ -382,6 +392,9 @@ pub struct Cpu<B> {
     t_states: u32,
     /// What stopped the most recent [`Cpu::step`] short, if anything.
     fault: Option<StepError>,
+    prefix_budget: core::num::NonZeroU32,
+    pending_index: Option<Index>,
+    pending_nmi: bool,
 }
 
 /// Where an accepted interrupt vectors.
@@ -414,6 +427,13 @@ fn restart_target(opcode: u8) -> Option<u16> {
 impl<B: Bus> Cpu<B> {
     /// Build a CPU in its post-reset state, taking ownership of the bus.
     pub fn new(bus: B) -> Self {
+        const SWEEP: core::num::NonZeroU32 =
+            core::num::NonZeroU32::new(1 << 16).expect("full PC sweep is nonzero");
+        Self::with_prefix_budget(bus, SWEEP)
+    }
+
+    /// Bound one step to this many leading DD/FD fetches, retaining incomplete state.
+    pub fn with_prefix_budget(bus: B, max_prefix_fetches: core::num::NonZeroU32) -> Self {
         let mut cpu = Self {
             regs: Registers::default(),
             bus,
@@ -424,12 +444,17 @@ impl<B: Bus> Cpu<B> {
             q_prev: 0,
             t_states: 0,
             fault: None,
+            prefix_budget: max_prefix_fetches,
+            pending_index: None,
+            pending_nmi: false,
         };
         cpu.set_state(CpuState::default());
         cpu
     }
 
-    /// Execute exactly one instruction and return the T-states it took.
+    /// Advance one instruction, yielding after the configured leading-prefix budget.
+    /// A partial return charges only that slice's T-states; the next call resumes the
+    /// same instruction. Interrupts are offered only at the completed boundary.
     ///
     /// The bus has already been ticked for each of those T-states, machine cycle by machine
     /// cycle, by the time this returns; the total is a convenience for callers that do not
@@ -442,15 +467,21 @@ impl<B: Bus> Cpu<B> {
     /// Every opcode decodes, so a step cannot fail. Unassigned `ED` encodings are two-byte
     /// `NOP`s, which is the hardware's own rule rather than a fallback.
     pub fn step(&mut self) -> u32 {
-        self.begin_operation();
+        if self.pending_index.is_some() {
+            self.t_states = 0;
+        } else {
+            self.begin_operation();
+        }
 
         if self.halted {
             self.halt_cycle();
             return self.t_states;
         }
 
-        self.dispatch();
-
+        if self.dispatch() && self.pending_nmi {
+            self.pending_nmi = false;
+            self.accept_nmi();
+        }
         self.t_states
     }
 
@@ -464,18 +495,30 @@ impl<B: Bus> Cpu<B> {
     ///
     /// Only the last prefix counts: `DD FD 21` loads `IY`, because each prefix overwrites
     /// the substitution the previous one set up.
-    fn dispatch(&mut self) {
-        let mut index = Index::Hl;
-        loop {
+    fn dispatch(&mut self) -> bool {
+        let mut index = self.pending_index.unwrap_or(Index::Hl);
+        for _ in 0..self.prefix_budget.get() {
             let opcode = self.fetch_opcode();
             match opcode {
                 PREFIX_DD => index = Index::Ix,
                 PREFIX_FD => index = Index::Iy,
-                PREFIX_CB => return self.execute_cb(index),
-                PREFIX_ED => return self.execute_ed(),
-                other => return self.execute(other, index),
+                PREFIX_CB => {
+                    core::hint::cold_path();
+                    self.execute_cb(index);
+                }
+                PREFIX_ED => {
+                    core::hint::cold_path();
+                    self.execute_ed();
+                }
+                other => self.execute(other, index),
+            }
+            if opcode != PREFIX_DD && opcode != PREFIX_FD {
+                self.pending_index = None;
+                return true;
             }
         }
+        self.pending_index = Some(index);
+        false
     }
 
     /// Offer a maskable interrupt, returning the T-states it consumed.
@@ -496,7 +539,11 @@ impl<B: Bus> Cpu<B> {
         // return address on the stack and leaves `PC` unmoved, so the interrupted
         // instruction runs again and each retry leaks two more bytes of stack — driven by
         // a device the machine does not control.
-        if !self.interrupts.iff1 || self.interrupts.ei_pending {
+        if self.pending_index.is_some()
+            || self.pending_nmi
+            || !self.interrupts.iff1
+            || self.interrupts.ei_pending
+        {
             return 0;
         }
         let Some(dispatch) = self.resolve_dispatch(data) else {
@@ -534,10 +581,21 @@ impl<B: Bus> Cpu<B> {
 
     /// Raise a non-maskable interrupt, returning the T-states it consumed.
     ///
-    /// An NMI is always accepted. It saves `iff1` into `iff2` so that `RETN` can restore
-    /// it, then vectors to `0x0066`.
+    /// An NMI at an instruction boundary is accepted immediately. During a prefix
+    /// slice, one edge is latched (additional edges coalesce), acknowledged after the
+    /// terminal opcode, and charged to that final step. It saves `iff1` into `iff2`
+    /// so `RETN` can restore it, then vectors to `0x0066`.
     pub fn nmi(&mut self) -> u32 {
+        if self.pending_index.is_some() {
+            self.pending_nmi = true;
+            return 0;
+        }
         self.begin_operation();
+        self.accept_nmi();
+        self.t_states
+    }
+
+    fn accept_nmi(&mut self) {
         self.leave_halt();
         self.interrupts.iff2 = self.interrupts.iff1;
         self.interrupts.iff1 = false;
@@ -547,8 +605,6 @@ impl<B: Bus> Cpu<B> {
         self.push_word(return_address);
         self.regs.set_pc(NMI_VECTOR);
         self.set_memptr(NMI_VECTOR);
-
-        self.t_states
     }
 
     /// What stopped the most recent operation short, if anything.
@@ -564,9 +620,13 @@ impl<B: Bus> Cpu<B> {
         self.fault
     }
 
-    /// The complete architectural state.
-    pub fn state(&self) -> CpuState {
-        CpuState {
+    /// The complete architectural state, or a typed refusal while a prefix instruction
+    /// has not yet completed (the private index/NMI latch cannot be serialized).
+    pub fn state(&self) -> Result<CpuState, StateCaptureError> {
+        if self.pending_index.is_some() || self.pending_nmi {
+            return Err(StateCaptureError::InstructionInProgress);
+        }
+        Ok(CpuState {
             af: self.regs.pair(pair::AF),
             bc: self.regs.pair(pair::BC),
             de: self.regs.pair(pair::DE),
@@ -587,7 +647,7 @@ impl<B: Bus> Cpu<B> {
             halted: self.halted,
             wz: self.wz,
             q: self.q,
-        }
+        })
     }
 
     /// Replace the complete architectural state.
@@ -614,6 +674,8 @@ impl<B: Bus> Cpu<B> {
         self.interrupts.iff2 = state.iff2;
         self.interrupts.mode = state.im;
         self.interrupts.ei_pending = false;
+        self.pending_index = None;
+        self.pending_nmi = false;
         self.halted = state.halted;
         self.wz = state.wz;
         self.q = state.q;
@@ -758,27 +820,22 @@ impl<B: Bus> Cpu<B> {
     // across the crate boundary into the machine.
     // -----------------------------------------------------------------------------
 
-    /// Advance the clock by one T-state with `address` on the bus.
+    /// Charge one machine cycle: `count` T-states, each with `address` on the bus.
+    ///
+    /// The run reaches the machine as one [`Bus::ticks`] call, whose default is one
+    /// [`Bus::tick`] per T-state. The ULA contends per T-state, so it batches only a run whose
+    /// contention was already charged when the cycle opened and that holds no tape edge
+    /// (`docs/ARCHITECTURE.md` Decision 1, amended 2026-10-20); everything else still arrives
+    /// as a run of ticks.
     #[inline]
-    fn tick(&mut self, address: u16) {
+    fn internal_cycles(&mut self, address: u16, count: u8) {
         // A single instruction is *not* bounded by the 23 T-states of the longest opcode:
         // a run of `DD`/`FD` prefix bytes is one instruction, four T-states per prefix, and
         // guest memory decides how long that run is. A byte-wide accumulator overflowed at
         // 63 prefixes, and with `overflow-checks = true` in every profile that aborted the
         // process on a legal instruction stream.
-        self.t_states += 1;
-        self.bus.tick(address);
-    }
-
-    /// Charge one machine cycle: `count` T-states, each with `address` on the bus.
-    ///
-    /// Never a single batched call. The ULA contends per T-state, so a run of internal
-    /// cycles has to reach the machine as a run.
-    #[inline]
-    fn internal_cycles(&mut self, address: u16, count: u8) {
-        for _ in 0..count {
-            self.tick(address);
-        }
+        self.t_states += u32::from(count);
+        self.bus.ticks(address, count);
     }
 
     /// Read one byte, charging a memory-read cycle.
@@ -934,6 +991,21 @@ mod tests {
     /// The byte every port read returns, distinctive enough to be recognisable.
     const PORT_INPUT: u8 = 0x5A;
 
+    /// The CPU's state at an instruction boundary — where every test that reads it stands, so the
+    /// `Result` `Cpu::state` returns for a capture mid-prefix-chain is always `Ok` here. One helper
+    /// in place of the same `.expect("completed instruction")` at every call site (DECISION.md
+    /// item 12).
+    trait Completed {
+        /// This CPU's state, which every caller reads between instructions.
+        fn completed(&self) -> CpuState;
+    }
+
+    impl<B: Bus> Completed for Cpu<B> {
+        fn completed(&self) -> CpuState {
+            self.state().expect("completed instruction")
+        }
+    }
+
     /// 64K of RAM and a running T-state total — the least a Z80 needs to run.
     ///
     /// The conformance suites in `tests/` drive the core through their own bus; this one
@@ -1020,6 +1092,58 @@ mod tests {
         (t_states, cpu)
     }
 
+    #[test]
+    fn all_prefix_memory_yields_after_one_pc_sweep_without_fabricating_an_opcode() {
+        let mut cpu = Cpu::new(Ram::new(&vec![PREFIX_DD; 1 << 16]));
+        assert_eq!(cpu.step(), (1 << 16) * u32::from(OPCODE_FETCH_T_STATES));
+        assert_eq!(cpu.bus().tick_addresses.len(), (1 << 16) * 4);
+        assert_eq!(cpu.state(), Err(StateCaptureError::InstructionInProgress));
+        assert_eq!(cpu.interrupt(0xff), 0);
+        assert_eq!(cpu.step(), (1 << 16) * u32::from(OPCODE_FETCH_T_STATES));
+        cpu.set_state(ready());
+        assert_eq!(cpu.state().expect("load aborts partial prefix").pc, 0);
+    }
+
+    #[test]
+    fn split_prefix_and_queued_nmi_preserve_instruction_boundary_and_cycles() {
+        let program = [PREFIX_DD, PREFIX_FD, PREFIX_DD, 0x00];
+        let mut reference = Cpu::new(Ram::new(&program));
+        let budget = core::num::NonZeroU32::new(2).expect("two is nonzero");
+        let mut split = Cpu::with_prefix_budget(Ram::new(&program), budget);
+        assert_eq!(split.step(), 8);
+        assert_eq!(split.state(), Err(StateCaptureError::InstructionInProgress));
+        assert_eq!(split.nmi(), 0);
+        assert_eq!(split.nmi(), 0); // multiple edges coalesce
+        assert_eq!(split.interrupt(0xff), 0); // pending NMI outranks /INT
+        assert_eq!(split.step(), 19); // two opcode fetches then one 11-T NMI
+        assert_eq!(reference.step(), 16);
+        assert_eq!(
+            split.bus().tick_addresses.len(),
+            reference.bus().tick_addresses.len() + 11
+        );
+        assert_eq!(split.completed().pc, 0x0066);
+        assert_eq!(split.completed().sp, 0xfffd);
+        assert_eq!(split.bus().peek(0xfffd), 4);
+    }
+
+    #[test]
+    fn maskable_interrupt_is_sampled_only_after_ei_following_instruction_completes() {
+        let budget = core::num::NonZeroU32::new(1).expect("one is nonzero");
+        let mut cpu =
+            Cpu::with_prefix_budget(Ram::new(&[0xfb, PREFIX_DD, PREFIX_FD, 0x00]), budget);
+        cpu.set_state(ready());
+        assert_eq!(cpu.step(), 4); // EI opens the deferral
+        assert_eq!(cpu.interrupt(0xff), 0);
+        assert_eq!(cpu.step(), 4);
+        assert_eq!(cpu.interrupt(0xff), 0); // unfinished prefixed instruction
+        assert_eq!(cpu.step(), 4);
+        assert_eq!(cpu.interrupt(0xff), 0);
+        assert_eq!(cpu.step(), 4); // terminal NOP: deferral closes
+        assert_eq!(cpu.state().expect("boundary").pc, 4);
+        assert_ne!(cpu.interrupt(0xff), 0);
+        assert_eq!(cpu.state().expect("interrupt boundary").pc, 0x38);
+    }
+
     /// A starting state with a usable stack and all flags clear.
     fn ready() -> CpuState {
         CpuState {
@@ -1040,7 +1164,7 @@ mod tests {
     /// The accumulator and flags after one instruction.
     fn accumulator_and_flags(program: &[u8], state: CpuState) -> (u8, u8) {
         let (_, cpu) = run_one(program, state);
-        let [a, f] = cpu.state().af.to_be_bytes();
+        let [a, f] = cpu.completed().af.to_be_bytes();
         (a, f)
     }
 
@@ -1297,7 +1421,7 @@ mod tests {
 
         let (t_taken, cpu) = run_one(&[0xC2, 0x1B, 0xE1], taken);
         assert_eq!(cpu.bus().reads, [0x0000, 0x0001, 0x0002]);
-        assert_eq!(cpu.state().pc, 0xE11B);
+        assert_eq!(cpu.completed().pc, 0xE11B);
 
         let (t_not_taken, cpu) = run_one(&[0xC2, 0x1B, 0xE1], not_taken);
         assert_eq!(
@@ -1305,21 +1429,21 @@ mod tests {
             [0x0000, 0x0001, 0x0002],
             "the operands are fetched either way"
         );
-        assert_eq!(cpu.state().pc, 0x0003);
+        assert_eq!(cpu.completed().pc, 0x0003);
         assert_eq!(t_taken, t_not_taken, "and both paths cost the same");
 
         // `CALL cc` is the case that genuinely loses machine cycles: the operands are
         // still fetched, but nothing is pushed and `PC` does not move — corpus `c4_2`.
         let (t_states, cpu) = run_one(&[0xC4, 0x61, 0x9C], not_taken);
         assert_eq!(cpu.bus().reads, [0x0000, 0x0001, 0x0002]);
-        assert_eq!(cpu.state().pc, 0x0003);
-        assert_eq!(cpu.state().sp, 0xFFFF, "nothing was pushed");
+        assert_eq!(cpu.completed().pc, 0x0003);
+        assert_eq!(cpu.completed().sp, 0xFFFF, "nothing was pushed");
         assert_eq!(t_states, 10, "against 17 when taken");
 
         // `JR cc` skips only the five-T-state address computation.
         let (t_states, cpu) = run_one(&[0x20, 0x40], not_taken);
         assert_eq!(cpu.bus().reads, [0x0000, 0x0001]);
-        assert_eq!(cpu.state().pc, 0x0002);
+        assert_eq!(cpu.completed().pc, 0x0002);
         assert_eq!(t_states, 7);
 
         // `DJNZ` on its final pass, likewise.
@@ -1329,8 +1453,8 @@ mod tests {
         };
         let (t_states, cpu) = run_one(&[0x10, 0xFD], last_pass);
         assert_eq!(cpu.bus().reads, [0x0000, 0x0001]);
-        assert_eq!(cpu.state().bc, 0x0000);
-        assert_eq!(cpu.state().pc, 0x0002);
+        assert_eq!(cpu.completed().bc, 0x0000);
+        assert_eq!(cpu.completed().pc, 0x0002);
         assert_eq!(t_states, 8);
     }
 
@@ -1353,7 +1477,7 @@ mod tests {
         let t_states = cpu.interrupt(0x00); // NOP — not an RST
 
         assert_eq!(t_states, 0, "nothing charged");
-        assert_eq!(cpu.state(), before, "and not one field moved");
+        assert_eq!(cpu.completed(), before, "and not one field moved");
         assert!(cpu.bus().reads.is_empty(), "no transfer");
         assert_eq!(cpu.bus().t_states, 0, "the bus saw no cycles");
         assert_eq!(
@@ -1409,7 +1533,7 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0xDD, 0x44], state);
-        assert_eq!(cpu.state().bc, 0x27B0, "LD B,IXh takes IX's high byte");
+        assert_eq!(cpu.completed().bc, 0x27B0, "LD B,IXh takes IX's high byte");
 
         // `DD 66` — LD H,(IX+d). The byte lands in real `H`; corpus vector `dd66`.
         let mut cpu = Cpu::new(Ram::new(&[0xDD, 0x66, 0x02]));
@@ -1420,8 +1544,8 @@ mod tests {
             ..ready()
         });
         cpu.step();
-        assert_eq!(cpu.state().hl, 0x03A0, "into H, leaving L alone");
-        assert_eq!(cpu.state().ix, 0x1000, "IX is not the destination");
+        assert_eq!(cpu.completed().hl, 0x03A0, "into H, leaving L alone");
+        assert_eq!(cpu.completed().ix, 0x1000, "IX is not the destination");
 
         // `DD 74` — LD (IX+d),H. Stores real `H` (0x01), not `IXh` (0x10). Corpus `dd74`.
         let mut cpu = Cpu::new(Ram::new(&[0xDD, 0x74, 0x02]));
@@ -1439,7 +1563,7 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0xDD, 0x64], state);
-        assert_eq!(cpu.state().ix, 0xEFC7);
+        assert_eq!(cpu.completed().ix, 0xEFC7);
     }
 
     #[test]
@@ -1458,7 +1582,7 @@ mod tests {
         cpu.step();
         assert_eq!(cpu.bus().peek(0x1002), 0x43, "0xA1 rotated left circular");
         assert_eq!(
-            cpu.state().bc,
+            cpu.completed().bc,
             0xFFFF,
             "no register copy for the 110 encoding"
         );
@@ -1473,7 +1597,7 @@ mod tests {
         });
         cpu.step();
         assert_eq!(cpu.bus().peek(0x1002), 0x43, "memory still gets the result");
-        assert_eq!(cpu.state().bc, 0x43E4, "and so does B");
+        assert_eq!(cpu.completed().bc, 0x43E4, "and so does B");
     }
 
     #[test]
@@ -1481,8 +1605,8 @@ mod tests {
         // `DD FD 00` — three M1 cycles, three refreshes. Corpus vector `ddfd00`.
         let (t_states, cpu) = run_one(&[0xDD, 0xFD, 0x00], ready());
         assert_eq!(t_states, 12, "three opcode fetches");
-        assert_eq!(cpu.state().r, 3, "each prefix refreshes memory");
-        assert_eq!(cpu.state().pc, 0x0003);
+        assert_eq!(cpu.completed().r, 3, "each prefix refreshes memory");
+        assert_eq!(cpu.completed().pc, 0x0003);
 
         // Each prefix overwrites the previous substitution, so `DD FD 23` is `INC IY`.
         let state = CpuState {
@@ -1491,8 +1615,8 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0xDD, 0xFD, 0x23], state);
-        assert_eq!(cpu.state().iy, 0x2223, "the last prefix decides");
-        assert_eq!(cpu.state().ix, 0x1111);
+        assert_eq!(cpu.completed().iy, 0x2223, "the last prefix decides");
+        assert_eq!(cpu.completed().ix, 0x1111);
     }
 
     #[test]
@@ -1506,7 +1630,7 @@ mod tests {
         });
         cpu.step();
         assert_eq!(
-            cpu.state().af.to_be_bytes()[0],
+            cpu.completed().af.to_be_bytes()[0],
             0x57,
             "negative displacement"
         );
@@ -1522,9 +1646,13 @@ mod tests {
             ..ready()
         });
         cpu.step();
-        let [_, f] = cpu.state().af.to_be_bytes();
+        let [_, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(f, flags::BIT5 | flags::HALF_CARRY);
-        assert_eq!(cpu.state().wz, 0xA381, "the indexed access recorded MEMPTR");
+        assert_eq!(
+            cpu.completed().wz,
+            0xA381,
+            "the indexed access recorded MEMPTR"
+        );
     }
 
     #[test]
@@ -1543,8 +1671,8 @@ mod tests {
 
         let t_states = cpu.step();
         assert_eq!(t_states, 14);
-        assert_eq!(cpu.state().pc, 0x1234, "returned through the stack");
-        assert!(cpu.state().iff1, "IFF1 restored from IFF2");
+        assert_eq!(cpu.completed().pc, 0x1234, "returned through the stack");
+        assert!(cpu.completed().iff1, "IFF1 restored from IFF2");
     }
 
     #[test]
@@ -1583,7 +1711,7 @@ mod tests {
         });
 
         let t_states = cpu.step();
-        let after = cpu.state();
+        let after = cpu.completed();
         let [_, f] = after.af.to_be_bytes();
 
         assert_eq!(t_states, 16);
@@ -1611,11 +1739,11 @@ mod tests {
         let (_, cpu) = run_one(&[0xDD, 0xED, 0x44], state);
 
         assert_eq!(
-            cpu.state().af.to_be_bytes()[0],
+            cpu.completed().af.to_be_bytes()[0],
             0xFF,
             "NEG of 1 is 0xFF, unaffected by the DD"
         );
-        assert_eq!(cpu.state().r, 3, "three M1 cycles all the same");
+        assert_eq!(cpu.completed().r, 3, "three M1 cycles all the same");
     }
 
     #[test]
@@ -1637,9 +1765,9 @@ mod tests {
         let t_states = cpu.step();
 
         assert_eq!(t_states, 1204, "301 opcode fetches at four T-states each");
-        assert_eq!(cpu.state().pc, 301, "one byte consumed per fetch");
+        assert_eq!(cpu.completed().pc, 301, "one byte consumed per fetch");
         // 301 increments of a 7-bit counter from zero: 301 - 256 = 45.
-        assert_eq!(cpu.state().r, 45, "every prefix refreshes memory");
+        assert_eq!(cpu.completed().r, 45, "every prefix refreshes memory");
     }
 
     #[test]
@@ -1658,8 +1786,12 @@ mod tests {
         cpu.step();
 
         assert_eq!(cpu.bus().peek(0x1002), 0x43, "memory took the result");
-        assert_eq!(cpu.state().hl, 0x4366, "and so did real H, leaving L alone");
-        assert_eq!(cpu.state().ix, 0x1000, "IXh is untouched");
+        assert_eq!(
+            cpu.completed().hl,
+            0x4366,
+            "and so did real H, leaving L alone"
+        );
+        assert_eq!(cpu.completed().ix, 0x1000, "IXh is untouched");
 
         // The `L` encoding, for the other half of the same asymmetry.
         let mut cpu = Cpu::new(Ram::new(&[0xDD, 0xCB, 0x02, 0x05]));
@@ -1671,8 +1803,8 @@ mod tests {
         });
         cpu.step();
 
-        assert_eq!(cpu.state().hl, 0x5543, "real L, not IXl");
-        assert_eq!(cpu.state().ix, 0x1000);
+        assert_eq!(cpu.completed().hl, 0x5543, "real L, not IXl");
+        assert_eq!(cpu.completed().ix, 0x1000);
     }
 
     #[test]
@@ -1698,13 +1830,13 @@ mod tests {
         cpu.set_state(ready());
 
         cpu.step(); // CP 0x28
-        let [a, f] = cpu.state().af.to_be_bytes();
+        let [a, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(a, 0x00, "CP discards its result");
         assert_eq!(f, 0xBB, "bits 3 and 5 come from the operand");
-        assert_eq!(cpu.state().q, 0xBB, "and the comparison latched them");
+        assert_eq!(cpu.completed().q, 0xBB, "and the comparison latched them");
 
         cpu.step(); // SCF
-        let [_, f] = cpu.state().af.to_be_bytes();
+        let [_, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(f, 0x81, "a latch stuck at zero would give 0xA9");
     }
 
@@ -1731,7 +1863,7 @@ mod tests {
                 ..ready()
             });
             cpu.step();
-            cpu.state().af.to_be_bytes()[1]
+            cpu.completed().af.to_be_bytes()[1]
         };
 
         assert_eq!(
@@ -1760,16 +1892,20 @@ mod tests {
         cpu.set_state(ready());
 
         cpu.step(); // OR 0x28
-        assert_eq!(cpu.state().q, 0x2C, "an ALU op latches the flags it wrote");
+        assert_eq!(
+            cpu.completed().q,
+            0x2C,
+            "an ALU op latches the flags it wrote"
+        );
         cpu.step(); // LD A,0x00
         assert_eq!(
-            cpu.state().q,
+            cpu.completed().q,
             0x00,
             "an instruction writing no flags clears it"
         );
         cpu.step(); // SCF
 
-        let [_, f] = cpu.state().af.to_be_bytes();
+        let [_, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(f, 0x2D);
     }
 
@@ -1795,10 +1931,14 @@ mod tests {
         });
 
         cpu.step(); // POP AF
-        assert_eq!(cpu.state().q, 0x00, "variant A: the load does not latch");
+        assert_eq!(
+            cpu.completed().q,
+            0x00,
+            "variant A: the load does not latch"
+        );
         cpu.step(); // SCF
 
-        let [_, f] = cpu.state().af.to_be_bytes();
+        let [_, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(f, 0x29, "variant B would give 0x01");
     }
 
@@ -1841,18 +1981,18 @@ mod tests {
 
         let first = cpu.step();
         assert_eq!(first, 21, "a repeating pass costs 21 T-states");
-        assert_eq!(cpu.state().pc, 0x0000, "PC rewound onto the ED byte");
-        assert_eq!(cpu.state().bc, 0x0002);
-        assert_eq!(cpu.state().r, 2, "two M1 cycles per pass");
+        assert_eq!(cpu.completed().pc, 0x0000, "PC rewound onto the ED byte");
+        assert_eq!(cpu.completed().bc, 0x0002);
+        assert_eq!(cpu.completed().r, 2, "two M1 cycles per pass");
 
         cpu.step();
-        assert_eq!(cpu.state().pc, 0x0000);
-        assert_eq!(cpu.state().r, 4, "and two more");
+        assert_eq!(cpu.completed().pc, 0x0000);
+        assert_eq!(cpu.completed().r, 4, "and two more");
 
         let last = cpu.step();
         assert_eq!(last, 16, "the final pass does not rewind");
-        assert_eq!(cpu.state().pc, 0x0002, "so execution moves on");
-        assert_eq!(cpu.state().bc, 0x0000);
+        assert_eq!(cpu.completed().pc, 0x0002, "so execution moves on");
+        assert_eq!(cpu.completed().bc, 0x0000);
 
         assert_eq!(cpu.bus().peek(0x5000), 0xAA);
         assert_eq!(cpu.bus().peek(0x5001), 0xBB);
@@ -1875,10 +2015,14 @@ mod tests {
             ..ready()
         });
         cpu.step();
-        assert_eq!(cpu.state().pc, 0x0000, "no match yet, so it rewinds");
+        assert_eq!(cpu.completed().pc, 0x0000, "no match yet, so it rewinds");
         cpu.step();
-        assert_eq!(cpu.state().pc, 0x0002, "match found, the loop exits");
-        assert_eq!(cpu.state().bc, 0x0002, "with the counter still non-zero");
+        assert_eq!(cpu.completed().pc, 0x0002, "match found, the loop exits");
+        assert_eq!(
+            cpu.completed().bc,
+            0x0002,
+            "with the counter still non-zero"
+        );
 
         // No match anywhere: it runs until the counter is exhausted.
         let mut cpu = Cpu::new(Ram::new(&[0xED, 0xB1]));
@@ -1889,10 +2033,10 @@ mod tests {
             ..ready()
         });
         cpu.step();
-        assert_eq!(cpu.state().pc, 0x0000);
+        assert_eq!(cpu.completed().pc, 0x0000);
         cpu.step();
-        assert_eq!(cpu.state().pc, 0x0002, "counter exhausted");
-        assert_eq!(cpu.state().bc, 0x0000);
+        assert_eq!(cpu.completed().pc, 0x0002, "counter exhausted");
+        assert_eq!(cpu.completed().bc, 0x0000);
     }
 
     #[test]
@@ -1916,10 +2060,10 @@ mod tests {
         // Bit 7 is a latch that only `LD R,A` can change; the M1 increment must roll 0x7F
         // round to 0x00 without touching it.
         let (_, cpu) = run_one(&[0x00], CpuState { r: 0x7F, ..ready() });
-        assert_eq!(cpu.state().r, 0x00);
+        assert_eq!(cpu.completed().r, 0x00);
 
         let (_, cpu) = run_one(&[0x00], CpuState { r: 0xFF, ..ready() });
-        assert_eq!(cpu.state().r, 0x80, "bit 7 must survive the wrap");
+        assert_eq!(cpu.completed().r, 0x80, "bit 7 must survive the wrap");
     }
 
     #[test]
@@ -1928,12 +2072,12 @@ mod tests {
         cpu.set_state(ready());
 
         cpu.step();
-        let after_first = cpu.state();
+        let after_first = cpu.completed();
         assert!(after_first.halted);
         assert_eq!(after_first.pc, 0x0000, "PC must not advance past HALT");
 
         cpu.step();
-        let after_second = cpu.state();
+        let after_second = cpu.completed();
         assert_eq!(after_second.pc, 0x0000, "PC still held");
         assert_eq!(
             after_second.r,
@@ -1956,15 +2100,23 @@ mod tests {
 
         let t_states = cpu.step();
         assert_eq!(t_states, 4, "a halted step is one M1 cycle");
-        assert_eq!(cpu.state().pc, 0x0000, "PC does not move while halted");
-        assert_eq!(cpu.state().af.to_be_bytes()[0], 0x00, "INC A did not run");
+        assert_eq!(cpu.completed().pc, 0x0000, "PC does not move while halted");
+        assert_eq!(
+            cpu.completed().af.to_be_bytes()[0],
+            0x00,
+            "INC A did not run"
+        );
 
         cpu.set_state(CpuState {
             halted: false,
-            ..cpu.state()
+            ..cpu.completed()
         });
         cpu.step();
-        assert_eq!(cpu.state().af.to_be_bytes()[0], 0x01, "INC A ran on resume");
+        assert_eq!(
+            cpu.completed().af.to_be_bytes()[0],
+            0x01,
+            "INC A ran on resume"
+        );
     }
 
     #[test]
@@ -1973,7 +2125,7 @@ mod tests {
         cpu.set_state(ready());
 
         cpu.step();
-        assert!(cpu.state().iff1, "EI enables interrupts");
+        assert!(cpu.completed().iff1, "EI enables interrupts");
         assert!(
             cpu.ei_pending(),
             "acceptance is deferred over the next instruction"
@@ -1984,7 +2136,7 @@ mod tests {
             !cpu.ei_pending(),
             "the deferral expires after one instruction"
         );
-        assert!(cpu.state().iff1, "but interrupts stay enabled");
+        assert!(cpu.completed().iff1, "but interrupts stay enabled");
     }
 
     #[test]
@@ -1996,7 +2148,7 @@ mod tests {
         cpu.step();
         assert!(cpu.ei_pending());
 
-        cpu.set_state(cpu.state());
+        cpu.set_state(cpu.completed());
         assert!(
             !cpu.ei_pending(),
             "the deferral does not survive a state load"
@@ -2011,8 +2163,8 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0xF3], state);
-        assert!(!cpu.state().iff1);
-        assert!(!cpu.state().iff2);
+        assert!(!cpu.completed().iff1);
+        assert!(!cpu.completed().iff2);
     }
 
     #[test]
@@ -2021,7 +2173,7 @@ mod tests {
         let mut cpu = Cpu::new(Ram::new(&[0x00]));
         cpu.set_state(ready());
         assert_eq!(cpu.interrupt(0xFF), 0, "declined while IFF1 is clear");
-        assert_eq!(cpu.state().pc, 0x0000, "and nothing happened");
+        assert_eq!(cpu.completed().pc, 0x0000, "and nothing happened");
 
         // Enabled, but `EI`'s deferral is still open.
         let mut cpu = Cpu::new(Ram::new(&[0xFB]));
@@ -2043,7 +2195,7 @@ mod tests {
         });
 
         let t_states = cpu.interrupt(0xFF);
-        let after = cpu.state();
+        let after = cpu.completed();
 
         assert_eq!(t_states, 13, "acknowledge (7) plus two pushes (3 + 3)");
         assert_eq!(after.pc, 0x0038);
@@ -2072,7 +2224,7 @@ mod tests {
         let t_states = cpu.interrupt(0x40);
 
         assert_eq!(t_states, 19, "mode 2 adds a vector read (3 + 3)");
-        assert_eq!(cpu.state().pc, 0x4321, "little-endian vector");
+        assert_eq!(cpu.completed().pc, 0x4321, "little-endian vector");
     }
 
     #[test]
@@ -2087,7 +2239,7 @@ mod tests {
         });
         // 0xFF is RST 38h — what a Spectrum's floating bus supplies.
         assert_eq!(cpu.interrupt(0xFF), 13);
-        assert_eq!(cpu.state().pc, 0x0038);
+        assert_eq!(cpu.completed().pc, 0x0038);
         assert!(cpu.fault().is_none());
 
         let mut cpu = Cpu::new(Ram::new(&[0x00]));
@@ -2117,11 +2269,11 @@ mod tests {
         });
 
         cpu.step();
-        assert!(cpu.state().halted);
-        assert_eq!(cpu.state().pc, 0x0000);
+        assert!(cpu.completed().halted);
+        assert_eq!(cpu.completed().pc, 0x0000);
 
         cpu.interrupt(0xFF);
-        let after = cpu.state();
+        let after = cpu.completed();
         assert!(!after.halted, "the interrupt resumes the CPU");
         assert_eq!(after.pc, 0x0038);
         assert_eq!(cpu.bus().peek(0xFFFD), 0x01, "returns to HALT + 1");
@@ -2140,7 +2292,7 @@ mod tests {
         });
 
         let t_states = cpu.nmi();
-        let after = cpu.state();
+        let after = cpu.completed();
 
         assert_eq!(t_states, 11, "acknowledge (5) plus two pushes (3 + 3)");
         assert_eq!(after.pc, NMI_VECTOR);
@@ -2162,16 +2314,16 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0x80], state); // ADD A,B
-        let after = cpu.state();
+        let after = cpu.completed();
         let [_, f] = after.af.to_be_bytes();
         assert_eq!(after.q, f, "an ALU op latches the flags it wrote");
 
         // An instruction that writes no flags leaves the latch clear.
         let (_, cpu) = run_one(&[0x00], state); // NOP
-        assert_eq!(cpu.state().q, 0);
+        assert_eq!(cpu.completed().q, 0);
 
         let (_, cpu) = run_one(&[0x41], state); // LD B,C
-        assert_eq!(cpu.state().q, 0);
+        assert_eq!(cpu.completed().q, 0);
     }
 
     #[test]
@@ -2183,7 +2335,7 @@ mod tests {
         };
         let (_, cpu) = run_one(&[0xC5], state);
 
-        assert_eq!(cpu.state().sp, 0xFFFD);
+        assert_eq!(cpu.completed().sp, 0xFFFD);
         assert_eq!(
             cpu.bus().peek(0xFFFE),
             0x12,
@@ -2203,7 +2355,7 @@ mod tests {
         cpu.set_state(ready());
 
         cpu.step();
-        let after_call = cpu.state();
+        let after_call = cpu.completed();
         assert_eq!(after_call.pc, 0x0006);
         assert_eq!(after_call.sp, 0xFFFD);
         assert_eq!(cpu.bus().peek(0xFFFE), 0x00);
@@ -2214,7 +2366,7 @@ mod tests {
         );
 
         cpu.step();
-        let after_ret = cpu.state();
+        let after_ret = cpu.completed();
         assert_eq!(after_ret.pc, 0x0003);
         assert_eq!(after_ret.sp, 0xFFFF);
     }
@@ -2223,8 +2375,8 @@ mod tests {
     fn rst_calls_its_page_zero_vector() {
         // RST 38h — the vector the Spectrum's frame interrupt lands on.
         let (_, cpu) = run_one(&[0xFF], ready());
-        assert_eq!(cpu.state().pc, 0x0038);
-        assert_eq!(cpu.state().sp, 0xFFFD);
+        assert_eq!(cpu.completed().pc, 0x0038);
+        assert_eq!(cpu.completed().sp, 0xFFFD);
     }
 
     #[test]
@@ -2235,7 +2387,7 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0x10, 0x02], state);
-        let after = cpu.state();
+        let after = cpu.completed();
 
         assert_eq!(after.bc, 0x0100, "B decremented, C untouched");
         assert_eq!(after.pc, 0x0004, "branch taken: PC + displacement");
@@ -2247,7 +2399,7 @@ mod tests {
     fn jr_displacement_is_signed_and_measured_from_after_the_operand() {
         // JR -2 is the idiomatic tight spin: it jumps back onto itself.
         let (_, cpu) = run_one(&[0x18, 0xFE], ready());
-        assert_eq!(cpu.state().pc, 0x0000);
+        assert_eq!(cpu.completed().pc, 0x0000);
     }
 
     #[test]
@@ -2262,10 +2414,10 @@ mod tests {
         });
 
         cpu.step();
-        assert_eq!(cpu.state().hl, 0x1234);
+        assert_eq!(cpu.completed().hl, 0x1234);
         assert_eq!(cpu.bus().peek(0x8000), 0xCD);
         assert_eq!(cpu.bus().peek(0x8001), 0xAB);
-        assert_eq!(cpu.state().sp, 0x8000, "SP is unchanged");
+        assert_eq!(cpu.completed().sp, 0x8000, "SP is unchanged");
     }
 
     #[test]
@@ -2279,14 +2431,14 @@ mod tests {
         };
 
         let (_, cpu) = run_one(&[0xD9], state); // EXX
-        assert_eq!(cpu.state().bc, 0x4444);
-        assert_eq!(cpu.state().bc_shadow, 0x2222);
-        assert_eq!(cpu.state().af, 0x1111, "EXX does not touch AF");
+        assert_eq!(cpu.completed().bc, 0x4444);
+        assert_eq!(cpu.completed().bc_shadow, 0x2222);
+        assert_eq!(cpu.completed().af, 0x1111, "EXX does not touch AF");
 
         let (_, cpu) = run_one(&[0x08], state); // EX AF,AF'
-        assert_eq!(cpu.state().af, 0x3333);
-        assert_eq!(cpu.state().af_shadow, 0x1111);
-        assert_eq!(cpu.state().bc, 0x2222, "EX AF,AF' does not touch BC");
+        assert_eq!(cpu.completed().af, 0x3333);
+        assert_eq!(cpu.completed().af_shadow, 0x1111);
+        assert_eq!(cpu.completed().bc, 0x2222, "EX AF,AF' does not touch BC");
     }
 
     #[test]
@@ -2413,11 +2565,11 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0x04], state); // INC B
-        let [_, f] = cpu.state().af.to_be_bytes();
+        let [_, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(f & flags::CARRY, flags::CARRY, "carry survives INC");
 
         let (_, cpu) = run_one(&[0x05], state); // DEC B
-        let [_, f] = cpu.state().af.to_be_bytes();
+        let [_, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(f & flags::CARRY, flags::CARRY, "carry survives DEC");
         assert_eq!(f & flags::ADD_SUBTRACT, flags::ADD_SUBTRACT, "DEC sets N");
     }
@@ -2432,9 +2584,9 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0x09], state); // ADD HL,BC
-        let [_, f] = cpu.state().af.to_be_bytes();
+        let [_, f] = cpu.completed().af.to_be_bytes();
 
-        assert_eq!(cpu.state().hl, 0x0001);
+        assert_eq!(cpu.completed().hl, 0x0001);
         assert_eq!(f, preserved, "only H, N and C are defined by ADD HL,ss");
     }
 
@@ -2448,7 +2600,7 @@ mod tests {
             ..ready()
         };
         let (_, cpu) = run_one(&[0x29], state);
-        assert_eq!(cpu.state().hl, 0x2468);
+        assert_eq!(cpu.completed().hl, 0x2468);
     }
 
     #[test]
@@ -2559,7 +2711,7 @@ mod tests {
         };
 
         let (_, cpu) = run_one(&[0xDB, 0xFE], state); // IN A,(0xFE)
-        let [a, f] = cpu.state().af.to_be_bytes();
+        let [a, f] = cpu.completed().af.to_be_bytes();
         assert_eq!(cpu.bus().last_port, Some(0x7FFE));
         assert_eq!(a, PORT_INPUT);
         assert_eq!(f, flags::ZERO, "IN A,(n) affects no flags");
@@ -2585,7 +2737,7 @@ mod tests {
     #[test]
     fn reset_state_matches_real_hardware() {
         let cpu = Cpu::new(Ram::new(&[]));
-        let state = cpu.state();
+        let state = cpu.completed();
 
         assert_eq!(state.af, 0xFFFF);
         assert_eq!(state.sp, 0xFFFF);
@@ -2627,6 +2779,6 @@ mod tests {
 
         let mut cpu = Cpu::new(Ram::new(&[]));
         cpu.set_state(state);
-        assert_eq!(cpu.state(), state);
+        assert_eq!(cpu.completed(), state);
     }
 }

@@ -50,10 +50,11 @@ use std::sync::OnceLock;
 
 /// The toolchain the numbers below were pinned against.
 ///
-/// `rust-toolchain.toml` says `channel = "stable"`, which floats, so this *will* eventually
-/// disagree. That is not a flaw in the gate: a failure message that can say "your rustc is
-/// not the pinned one" turns an otherwise baffling red into a two-minute re-pin.
-const PINNED_RUSTC: &str = "1.98.0";
+/// `rust-toolchain.toml` pins `channel = "1.99.1"` (since 2026-10-21; it said `"stable"`, which
+/// floated, before), so this disagrees only when someone bumps that file — and then it should:
+/// a failure message that can say "your rustc is not the pinned one" turns an otherwise
+/// baffling red into a two-minute re-pin, made in the same commit as the bump.
+const PINNED_RUSTC: &str = "1.99.1";
 
 /// `panic_bounds_check` call sites attributable to `crates/z80/src`, for [`PROBE_MAIN`].
 ///
@@ -109,7 +110,33 @@ const PINNED_RUSTC: &str = "1.98.0";
 ///   to seven.
 ///
 /// The full account, with the eight-tree table, is in `docs/ARCHITECTURE.md`.
-const EXPECTED_BOUNDS_CHECKS: usize = 7;
+/// 2026-10-01: bounded/resumable DD/FD dispatch makes one additional `set` call site
+/// survive LLVM's tail merge on rustc 1.98. The gate went red at 7; the new pin was
+/// 8, not an assertion of a speedup.
+///
+/// *(Corrected 2026-10-20, cold. This said the bounded dispatch was faster — "flat median
+/// 100.4→90.49 µs". Four judges re-measured it and it is not: against the commit before it,
+/// the bounded dispatch costs **+0.34 to +0.41 % instructions per frame** on `quiet_48k`,
+/// **+5.06 %** per sample on `flat_bus`, and **+3.3 %** wall time on the `quiet_48k` floor
+/// (instructions retired, `/usr/bin/time -l`, slope of 1500 − 500 samples; DECISION.md
+/// item 4). A reshape of `dispatch` that recovers it was measured and refused: on the
+/// batched-tick tree below it is performance-null and longer, so RULE 4 drops it. It is
+/// required only if the batched ticks are ever removed.)*
+///
+/// 2026-10-20: **7 again.** The batched covered ticks (`Bus::ticks`, DECISION.md item 3)
+/// delete `Cpu::tick` and shorten every machine cycle's call path, and with it one of the
+/// `registers.rs:148` sites tail-merges again. Every batched tree the judges built measured
+/// 7, and so did this one.
+///
+/// 2026-10-21: **8 on rustc 1.99.1**, with the source unchanged. On 1.98.0 the same tree
+/// measures 7; 1.99.1's inliner keeps a fourth call site at `registers.rs:148` apart instead
+/// of tail-merging it. A compiler re-pin, not a code change.
+///
+/// 2026-10-21: still **8** after `dispatch` marked the `CB`/`ED` arms cold
+/// (`core::hint::cold_path`); only the tail-merged cold block's file moved, from
+/// `src/instructions.rs` to `src/lib.rs` (line 0 in both), because that merge now lands in
+/// `dispatch`.
+const EXPECTED_BOUNDS_CHECKS: usize = 8;
 
 /// Where those checks sit, so a change says *which* index moved rather than only that one did.
 ///
@@ -128,9 +155,9 @@ const EXPECTED_BOUNDS_CHECKS: usize = 7;
 /// side by side is a two-minute re-pin, which is cheaper than the machinery. The third row's
 /// `0` cannot rot — it is not a line number at all; see [`EXPECTED_BOUNDS_CHECKS`].
 const EXPECTED_BOUNDS_SITES: &[(&str, u32, usize)] = &[
-    ("src/instructions.rs", 0, 1), // a tail-merged cold block; its `Location` is registers.rs:148
-    ("src/registers.rs", 143, 3),  // `self.regs[index.0]`
-    ("src/registers.rs", 148, 3),  // `self.regs[index.0] = value`
+    ("src/lib.rs", 0, 1), // a tail-merged cold block; its `Location` is registers.rs:148
+    ("src/registers.rs", 143, 3), // `self.regs[index.0]`
+    ("src/registers.rs", 148, 4), // `self.regs[index.0] = value`
 ];
 
 /// Decode's jump tables, largest first. **Two at M1 (119 + 64); the 124-entry table
@@ -237,7 +264,7 @@ fn drive(mode: InterruptMode, steps: u32) -> u64 {
     acc = acc.wrapping_add(u64::from(cpu.interrupt(black_box(0xC7))));
     acc = acc.wrapping_add(u64::from(cpu.nmi()));
 
-    let state = cpu.state();
+    let state = cpu.state().expect("completed instruction");
     acc.wrapping_add(u64::from(state.pc))
         .wrapping_add(u64::from(state.af))
         .wrapping_add(u64::from(state.r))
@@ -292,7 +319,7 @@ fn workspace_root() -> PathBuf {
 /// Where cargo is putting build output for the run that is executing this test.
 fn target_root() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
+        .map(|path| std::path::absolute(path).expect("cargo target path"))
         .unwrap_or_else(|| workspace_root().join("target"))
 }
 

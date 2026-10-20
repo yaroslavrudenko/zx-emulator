@@ -376,8 +376,8 @@ fn the_fastest_multiplier_produces_the_same_machine_as_real_time() {
     assert_eq!(fast.frames(), FRAMES, "the fast run did not finish");
 
     assert_eq!(
-        slow.cpu_state(),
-        fast.cpu_state(),
+        slow.cpu_state().expect("completed instruction"),
+        fast.cpu_state().expect("completed instruction"),
         "the same forty frames left the CPU in two different states",
     );
     let (slow_screen, fast_screen) = (screen(&slow), screen(&fast));
@@ -412,7 +412,10 @@ fn the_comparison_can_fail() {
     let mut late = Spectrum::new(&rom).expect("a page-sized ROM");
     late.run_frames(FRAMES + 1);
 
-    assert_ne!(early.cpu_state(), late.cpu_state());
+    assert_ne!(
+        early.cpu_state().expect("completed instruction"),
+        late.cpu_state().expect("completed instruction")
+    );
     assert!(
         first_difference(&screen(&early), &screen(&late)).is_some(),
         "one more frame changed nothing on screen, so this ROM cannot tell two runs apart and \
@@ -466,8 +469,8 @@ fn a_tape_plays_the_same_signal_at_every_multiplier() {
     // pass on which the `EAR` bit was high and keeps the running total in the top-left byte of the
     // screen, so a single extra or missing edge moves the picture.
     assert_eq!(
-        slow.cpu_state(),
-        fast.cpu_state(),
+        slow.cpu_state().expect("completed instruction"),
+        fast.cpu_state().expect("completed instruction"),
         "the same forty frames over the same tape left the CPU in two different states",
     );
     assert_eq!(
@@ -665,8 +668,8 @@ fn a_tape_loaded_under_automatic_is_the_same_tape() {
         "the same forty frames left the head in two different places",
     );
     assert_eq!(
-        paced.cpu_state(),
-        automatic.cpu_state(),
+        paced.cpu_state().expect("completed instruction"),
+        automatic.cpu_state().expect("completed instruction"),
         "the same forty frames over the same tape left the CPU in two different states",
     );
     assert_eq!(

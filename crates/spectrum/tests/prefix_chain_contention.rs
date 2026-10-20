@@ -50,6 +50,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     CONTENDED_CODE, NOP, NOP_T_STATES, UNCONTENDED_CODE, advance_to, cost_of_running, machine,
     set_pc, with_cpu_state, write_program,
@@ -220,6 +222,43 @@ fn cost_of(chain: &Chain, code_at: u16, at: u32) -> u64 {
 }
 
 #[test]
+fn both_models_yield_a_contended_prefix_chain_within_one_bus_frame() {
+    use spectrum::memory::PAGE_SIZE;
+    use z80::StateCaptureError;
+
+    const PREFIX_COUNT: usize = 7_100;
+    const CODE_AT: u16 = 0x4000;
+    let mut program = vec![PREFIX_DD; PREFIX_COUNT + 1];
+    program[PREFIX_COUNT] = NOP;
+    for mut machine in [
+        spectrum::Spectrum::new(&[0; PAGE_SIZE]).expect("48K ROM"),
+        spectrum::Spectrum::spectrum_128(&[0; PAGE_SIZE], &[0; PAGE_SIZE]).expect("128K ROMs"),
+    ] {
+        write_program(&mut machine, CODE_AT, &program);
+        set_pc(&mut machine, CODE_AT);
+        let frame_t_states = machine.ula().clock().timing().frame_t_states();
+        let _nominal = machine.step();
+        assert_eq!(
+            machine.cpu_state(),
+            Err(StateCaptureError::InstructionInProgress),
+            "an M1 may cost 10 bus T-states, not just its nominal four"
+        );
+        let elapsed =
+            machine.frames() * u64::from(frame_t_states) + u64::from(machine.frame_t_state());
+        assert!(
+            elapsed <= u64::from(frame_t_states),
+            "one bounded slice crossed a bus frame"
+        );
+        machine.step();
+        let resumed = machine
+            .cpu_state()
+            .expect("terminal NOP completes the instruction");
+        assert_eq!(resumed.pc, CODE_AT + (PREFIX_COUNT + 1) as u16);
+        assert_eq!(resumed.r & 0x7f, ((PREFIX_COUNT + 1) % 128) as u8);
+    }
+}
+
+#[test]
 fn a_prefix_chain_is_one_instruction_of_as_many_m1_cycles_as_it_has_bytes() {
     // The structural claim, and the reason the timing below is one number rather than a sum
     // over several. `Cpu::dispatch` consumes prefixes in a loop *within* one `step()`, so a
@@ -243,9 +282,9 @@ fn a_prefix_chain_is_one_instruction_of_as_many_m1_cycles_as_it_has_bytes() {
         with_cpu_state(&mut machine, |state| state.r = REFRESH_WITH_THE_LATCH_SET);
         set_pc(&mut machine, UNCONTENDED_CODE);
 
-        let before = machine.cpu_state();
+        let before = machine.completed();
         let nominal = u64::from(machine.step());
-        let after = machine.cpu_state();
+        let after = machine.completed();
 
         assert_eq!(
             nominal,

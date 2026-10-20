@@ -190,6 +190,9 @@
 //! one** — `tzx_corpus.rs` sweeps what is fetched, and every block the local `.tzx` games contain
 //! is handled.
 
+mod common;
+
+use common::Completed;
 use spectrum::Spectrum;
 use spectrum::tape::{Tape, tzx};
 use spectrum::{Model, timing::T_STATES_PER_FRAME};
@@ -946,7 +949,7 @@ fn run_with(tape: Tape, thresholds: Thresholds) -> Run {
     let start = elapsed(&machine);
     let mut stayed_in_ram = true;
     while elapsed(&machine) - start < BUDGET {
-        let pc = machine.cpu_state().pc;
+        let pc = machine.completed().pc;
         stayed_in_ram &= pc >= FIRST_RAM_ADDRESS;
         if pc == program.stop {
             break;

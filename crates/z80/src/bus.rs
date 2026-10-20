@@ -189,8 +189,27 @@ pub trait Bus {
     /// as one seven-T-state block — batching them would collapse seven contention points
     /// into one and put every subsequent access at the wrong frame position.
     ///
+    /// *(Amended 2026-10-20, `docs/ARCHITECTURE.md` Decision 1's amendment: every T-state is
+    /// still reported, and the core now reports a machine cycle's run through
+    /// [`Bus::ticks`], whose default is this method once per T-state. "Never batched" now
+    /// reads: a run already covered by charged contention may arrive as one call only where
+    /// that is indistinguishable from the per-tick loop; a tick that could contend, or a tape
+    /// edge, is never batched.)*
+    ///
     /// `addr` is the address the Z80 actually drives during that T-state. For the cycles
     /// that follow an opcode fetch that is the refresh address `IR`, which is why a
     /// contended machine cannot reconstruct it from the transfer addresses alone.
     fn tick(&mut self, addr: u16);
+
+    /// Advance the clock by `count` consecutive T-states, each with `addr` on the bus.
+    ///
+    /// The default is [`Bus::tick`] `count` times, so a machine that does not override it
+    /// sees exactly the per-T-state stream. Override it only where the result is
+    /// indistinguishable from that loop: a machine may take a run whose contention was already
+    /// charged when its cycle opened as one step, and must still contend, and still emit every
+    /// observable event, T-state by T-state everywhere else.
+    #[inline]
+    fn ticks(&mut self, addr: u16, count: u8) {
+        (0..count).for_each(|_| self.tick(addr));
+    }
 }

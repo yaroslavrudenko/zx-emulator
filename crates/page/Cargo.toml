@@ -6,13 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "The browser page's half of the frontend's host seam, and the only `unsafe` in this workspace."
 
-# NOTE — this crate has no dependencies, and that is the point.
-#
-# `docs/M8.md` Decision 4 weighed three routes to a download button and took option B: keep
-# `unsafe_code = "forbid"` on `crates/frontend`, and confine the FFI to a crate small enough to
-# read in one sitting. Option C — take a dependency that contains the `unsafe` — was priced
-# higher than it looks because `docs/ARCHITECTURE.md` pins every dependency to a stated
-# verification date. A crate that adds one of its own would be paying that price twice.
+# NOTE — this crate originally had no dependencies beyond its native device driver.
+# `docs/M8.md` Decision 4 confined the FFI here so frontend keeps unsafe_code=forbid.
+# The owner approved one additional native-only dependency, rtrb 0.4.0, for a safe
+# SPSC queue: the audio callback must never wait for a producer mutex. Its license is
+# MIT OR Apache-2.0, declared MSRV 1.38, and it has no normal dependencies.
 
 # The desktop audio device. **Target-gated at the manifest level**, so it is never resolved for
 # `wasm32` — where it has no backend this project uses, and where the AudioWorklet in
@@ -33,6 +31,7 @@ description = "The browser page's half of the frontend's host seam, and the only
 # turns out to matter.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tinyaudio = "1.1.0"
+rtrb = "0.4.0"
 
 [lints.rust]
 # Deliberately NOT `unsafe_code = "forbid"`, and this is the only crate in the workspace that
