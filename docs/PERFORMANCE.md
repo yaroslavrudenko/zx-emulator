@@ -1,12 +1,39 @@
 # Performance
 
+## In short (2026-10-20 / 21)
+
+**What we did.** The emulator core now does about a third less work per frame: instructions
+retired per emulated frame fell **31–39 %** (`quiet_48k` 4.20 M → 2.66 M), one quiet 48K frame went
+from about **138.7 to 74 µs** and a frame with a tape playing from about **147 to 83 µs**, a whole
+*Exolon* tape load needs **34.7 %** fewer instructions, and the browser build's frame fell from
+**282 to about 158 µs**. The emulator's output did not change: screens and snapshots are
+byte-identical, and the WAV differs only through the exact tape-edge stamp, 47–59 dB below the
+signal.
+
+**What we used.** Batched covered ticks (`Bus::ticks`, overridden by `Ula` for runs whose contention
+is already charged); an exact tape-edge stamp; a lock-free single-producer audio ring the callback
+owns; one `page::telemetry` latency histogram for the audio callback and the frame loop; an
+instruction-count gate (`web/perf_gate.sh`, 1 %, guarded by architecture and compiler); the
+interleaved wall-clock A/B (`web/perf_ab.sh`); the `zx-shot` byte-identical differential over ten
+workloads; mutation proofs that each gate goes red; and three independent reviewers plus a panel of
+judges for the contested decisions.
+
+**The toolchain.** The project moved to **Rust 1.99.1**, the latest stable, pinned in
+`rust-toolchain.toml` (the MSRV stays 1.98). 1.99.1 at first made quiet code up to 14 % slower; the
+cause — LLVM 23 lowering the prefix `match` with one extra branch per opcode — was found and fixed
+with `core::hint::cold_path()` on the two rare prefix arms. Against 1.98.0 the fixed build is level
+on `quiet_48k` and about 5 % faster on `tape_playing_48k`.
+
+Details: *Before and after*, *The gate* and *The toolchain* below.
+
 Where the time goes, what it was measured to cost before and after the 2026-10-20 work, the gate
 that holds it, how to measure it again, and what was tried and refused with its numbers. Every
 figure carries the command that produced it; **re-run rather than quote** — a bare number is a
 measurement with its subject deleted. The decisions behind each item are the judges' common
 decision of 2026-10-20 (DECISION.md, items 1–14; N1–N4 are the next batch).
 
-Host for every figure unless stated: Apple M3 Max (Mac15,9, 16 cores), macOS 25.6, rustc 1.98.0,
+Host for every figure unless stated: Apple M3 Max (Mac15,9, 16 cores), macOS 25.6, **rustc 1.98.0**
+(every figure dated 2026-10-20; the toolchain moved to 1.99.1 on 2026-10-21 — *The toolchain*, below),
 the release profile as committed (`opt-level = 3`, `lto = "fat"`, `codegen-units = 1`,
 `panic = "abort"`, `overflow-checks = true`). The machine was shared; the load average is given with
 each wall-clock figure, and the instruction counts do not depend on it.
@@ -111,18 +138,86 @@ gate run, the file restored and diffed back:
 
 A count belongs to a binary: the gate skips (counted) on another architecture, and fails on another
 compiler of the same architecture (below).
-**So it does not run in CI, by design:** the baseline is `arm64 rustc 1.98.0`, and `ci/ci.yml`'s gate
+**So it does not run in CI, by design:** the baseline is `arm64 rustc 1.99.1`, and `ci/ci.yml`'s gate
 job runs on `ubuntu-latest` (x86_64), where the step exits 3 and `web/gate.sh` counts a SKIP. It is a
 pre-push gate on the machine the baseline was recorded on. The toolchain is the other half, and
 the gate now treats it as a failure rather than a question: **same architecture with a different
 rustc, or a baseline with no `# toolchain` header, is FAIL (exit 1)**; another architecture is SKIP
 (exit 3); a match runs. A compiler change is therefore never silent — it is a commit that bumps
 `rust-toolchain.toml` and re-records from the merge base together. The judges decided (Q4,
-2026-10-20) to pin `rust-toolchain.toml` to `channel = "1.98.0"` — the MSRV, the same build
-(`88d9e12ae`) as today's stable, so the recorded baseline stays valid — installed once with a bare
-`rustup toolchain install` in the repository. **Pending:** that install is about 1.5 GB and waits for
-the owner's approval, so the file still says `stable` today; until it is pinned, a `rustup update`
-past 1.98.0 turns this gate red here, which is the intended prompt.
+2026-10-20) to pin the toolchain; the owner then ordered the latest Rust, so since 2026-10-21
+`rust-toolchain.toml` says `channel = "1.99.1"` and the baseline names `arm64 rustc 1.99.1`.
+
+## The toolchain — 1.98.0 → 1.99.1 (2026-10-21)
+
+**What the move itself needed in the source: nothing.** The tree built, linted (`clippy -D
+warnings`, host and wasm32) and formatted clean on 1.99.1 with no edit; the one source change in
+this section is the later `cold_path()` fix for the slowdown, below (+6 lines). 1113 tests pass, 0
+fail, on 1.99.1. On 1.98.0 one of them fails **by design**:
+`bounds_checks_in_the_execute_path_have_not_moved` is pinned to 1.99.1 and reports a compiler
+mismatch as a re-pin (`docs/ARCHITECTURE.md`, *Stability against the toolchain*). The
+MSRV stays **1.98** (`Cargo.toml`'s `rust-version`): nothing in the code needs a 1.99 feature — it
+compiles unchanged on 1.98.0 — so raising it would refuse users for no reason. The emulator's
+output is identical: the ten-workload `zx-shot` corpus gives byte-identical screen, snapshot and WAV
+under both compilers.
+
+**Instructions retired per frame before the fix** (`sh web/perf_gate.sh --measure` on 1.98.0, then
+`--record` on 1.99.1, same tree, no `cold_path()` yet — the committed baseline is the fixed one):
+
+| Case | rustc 1.98.0 | rustc 1.99.1 unfixed | Δ |
+|---|---|---|---|
+| `quiet_48k` | 2,660,179 | 2,661,663 | +0.06 % |
+| `quiet_128` | 2,695,849 | 2,697,305 | +0.05 % |
+| `contended_48k` | 2,713,039 | 2,711,396 | −0.06 % |
+| `drained_48k` | 2,841,423 | 2,842,722 | +0.05 % |
+| `beeper_48k` | 2,933,079 | 2,895,206 | −1.29 % |
+| `tape_reads_48k` | 2,581,000 | 2,553,225 | −1.08 % |
+| `tape_playing_48k` | 2,711,339 | 2,712,383 | +0.04 % |
+| `border_48k` | 2,661,521 | 2,626,525 | −1.31 % |
+| `ay_128` | 3,312,872 | 3,250,021 | −1.90 % |
+| `halt_48k` | 1,558,323 | 1,489,978 | −4.39 % |
+| `flat_bus` (z80 `step`) | 1,996,741 | 2,046,699 | **+2.50 %** (re-checked: three slopes per compiler, 1,996–1,999 k against 2,046–2,048 k) |
+
+**Wall time found what the instruction count could not, and the cause is known.** Unfixed, 1.99.1
+made `quiet_48k` **+4.3 to +13.7 %** slower in the interleaved wall A/B (`sh web/perf_ab.sh <1.98.0
+tree> .`, four sessions, load 8–67: 74.04 → 83.12, 77.20, 79.91; 69.08 → 78.54 µs) with the
+instruction count flat — cycles per frame ~353 k → ~398 k. **Cause** (the performance
+investigation, 2026-10-21): LLVM 23's SimplifyCFG `ReduceSwitchRange` lowers `dispatch`'s prefix
+`match` (`crates/z80/src/lib.rs`, the `PREFIX_DD`/`FD`/`CB`/`ED` arms) so that every **unprefixed**
+opcode takes one extra taken branch before reaching `execute`. Proven by a 10-instruction binary
+patch of the 1.99.1 bench that restores 1.98.0's branch shape: `quiet_48k` 79.99 → 69.45 µs (1.98.0:
+74.04). Code alignment and the extra `registers.rs:148` bounds-check site were each tested and ruled
+out.
+
+**The fix (owner-approved, 2026-10-21):** `core::hint::cold_path()` on the `PREFIX_CB` and
+`PREFIX_ED` arms, which steers the switch lowering back to unprefixed-first. +6 lines (rustfmt
+blocks two arms) — a recorded RULE-4 (RV-6) exception, approved by the owner for a measured win.
+Output unchanged (the `zx-shot` corpus byte-identical 10/10). Measured on the fixed tree, rustc
+1.99.1 against the 1.98.0 step-A tree, `sh web/perf_ab.sh`, two sessions at load 8:
+
+| Case | 1.98.0 | 1.99.1 unfixed | 1.99.1 + fix |
+|---|---|---|---|
+| `quiet_48k` wall floor | 74.04 / 74.08 µs | 77.2–83.1 µs | **74.04 / 74.12 µs (+0.0 / +0.1 %)** |
+| `tape_playing_48k` | 87.16 / 87.41 µs | 81.5–87.3 µs | **82.74 / 82.83 µs (−5.1 / −5.2 %)** |
+| `halt_48k` | 41.58 µs | 38.9–41.6 µs | 41.62 / 41.66 µs (+0.1 / +0.2 %) |
+| `ay_128` | 137.2 / 138.7 µs | 128–137 µs | 137.9 / 139.5 µs (+0.5 / +0.6 %) |
+
+**The proof it is the hint:** the same tree with the two `cold_path()` calls removed, built with
+1.99.1 and run directly, read 79.8–90.9 µs against the fixed binary's 74.0–75.6 µs over six
+interleaved runs, and `perf_ab` against 1.98.0 gave 74.04 → 81.87 µs (+10.6 %) — the regression
+back. **Instructions with the fix** (re-recorded baseline, `web/perf-baseline.txt`): `flat_bus`
+1,825,146, −10.8 % against unfixed 1.99.1, `halt_48k` −1.2 %, every other case within ±0.03 %.
+Those two effects are separate (the final performance review, the same fixed source on both
+compilers): **the compiler alone**, 1.98.0 → 1.99.1, is `flat_bus` +1.55 % and `halt_48k` −4.50 %,
+every other case within ±1.9 %; **the hint alone** on 1.98.0 is `flat_bus` −10.1 % and `halt_48k`
+−1.1 %; together, against the unfixed 1.98.0 tree, −8.7 % and −5.6 %. **The
+browser build:** `zx.wasm` 701,399 B (gz 224,892); the zero-ROM wasm frame 158.5 / 158.2 µs against
+154.7 / 154.0 unfixed and 165.3 / 159.4 on 1.98.0 — the hint costs the browser 2–3 % of what 1.99.1
+gained there, and it is still at or below 1.98.0.
+
+**Next (an RFC, not this batch):** fold the four prefixes into `execute`'s own jump table (F4), so
+no compiler's switch lowering can put a branch in front of the unprefixed opcodes; estimated a
+further ~6 % on quiet code.
 
 **Re-recording, the rule.** When the toolchain or the architecture changes, or a change makes any
 case faster by more than 1 % (the gate prints `gain > 1 %: re-record the baseline` beside the row,

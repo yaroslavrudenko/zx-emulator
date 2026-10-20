@@ -50,10 +50,11 @@ use std::sync::OnceLock;
 
 /// The toolchain the numbers below were pinned against.
 ///
-/// `rust-toolchain.toml` says `channel = "stable"`, which floats, so this *will* eventually
-/// disagree. That is not a flaw in the gate: a failure message that can say "your rustc is
-/// not the pinned one" turns an otherwise baffling red into a two-minute re-pin.
-const PINNED_RUSTC: &str = "1.98.0";
+/// `rust-toolchain.toml` pins `channel = "1.99.1"` (since 2026-10-21; it said `"stable"`, which
+/// floated, before), so this disagrees only when someone bumps that file — and then it should:
+/// a failure message that can say "your rustc is not the pinned one" turns an otherwise
+/// baffling red into a two-minute re-pin, made in the same commit as the bump.
+const PINNED_RUSTC: &str = "1.99.1";
 
 /// `panic_bounds_check` call sites attributable to `crates/z80/src`, for [`PROBE_MAIN`].
 ///
@@ -126,7 +127,16 @@ const PINNED_RUSTC: &str = "1.98.0";
 /// delete `Cpu::tick` and shorten every machine cycle's call path, and with it one of the
 /// `registers.rs:148` sites tail-merges again. Every batched tree the judges built measured
 /// 7, and so did this one.
-const EXPECTED_BOUNDS_CHECKS: usize = 7;
+///
+/// 2026-10-21: **8 on rustc 1.99.1**, with the source unchanged. On 1.98.0 the same tree
+/// measures 7; 1.99.1's inliner keeps a fourth call site at `registers.rs:148` apart instead
+/// of tail-merging it. A compiler re-pin, not a code change.
+///
+/// 2026-10-21: still **8** after `dispatch` marked the `CB`/`ED` arms cold
+/// (`core::hint::cold_path`); only the tail-merged cold block's file moved, from
+/// `src/instructions.rs` to `src/lib.rs` (line 0 in both), because that merge now lands in
+/// `dispatch`.
+const EXPECTED_BOUNDS_CHECKS: usize = 8;
 
 /// Where those checks sit, so a change says *which* index moved rather than only that one did.
 ///
@@ -145,9 +155,9 @@ const EXPECTED_BOUNDS_CHECKS: usize = 7;
 /// side by side is a two-minute re-pin, which is cheaper than the machinery. The third row's
 /// `0` cannot rot — it is not a line number at all; see [`EXPECTED_BOUNDS_CHECKS`].
 const EXPECTED_BOUNDS_SITES: &[(&str, u32, usize)] = &[
-    ("src/instructions.rs", 0, 1), // a tail-merged cold block; its `Location` is registers.rs:148
-    ("src/registers.rs", 143, 3),  // `self.regs[index.0]`
-    ("src/registers.rs", 148, 3),  // `self.regs[index.0] = value`
+    ("src/lib.rs", 0, 1), // a tail-merged cold block; its `Location` is registers.rs:148
+    ("src/registers.rs", 143, 3), // `self.regs[index.0]`
+    ("src/registers.rs", 148, 4), // `self.regs[index.0] = value`
 ];
 
 /// Decode's jump tables, largest first. **Two at M1 (119 + 64); the 124-entry table

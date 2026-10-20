@@ -31,7 +31,7 @@ verifies that no image contains a colour the machine cannot emit
 
 ## Quick start
 
-Rust 1.98+ (`rust-toolchain.toml` selects the channel, `stable` today). The Sinclair ROMs are committed under
+Rust 1.98+ (MSRV); `rust-toolchain.toml` pins **1.99.1**, which rustup selects inside the repository. The Sinclair ROMs are committed under
 [Amstrad's permission](testdata/README.md); games are never committed — put your own in
 `testdata/games/` (gitignored).
 
@@ -118,6 +118,24 @@ The full rules, and the audit of this repository's own false citations:
 [`docs/JOURNAL.md`](docs/JOURNAL.md), *Engineering rules*.
 
 ## Performance work, measured
+
+**In short:** the core does about a third less work per frame, the emulator's output is unchanged,
+and the project now builds on **Rust 1.99.1** (pinned; MSRV 1.98) with its one slowdown found and
+fixed. Measured 2026-10-20/21; how, and with what, is in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md), *In short*.
+
+| What | Before | After |
+|---|---|---|
+| Instructions per frame (`quiet_48k`) | 4.20 M | 2.66 M (−31 to −39 % across the cases) |
+| One quiet 48K frame / with a tape playing | 138.7 µs / 147 µs | 74 µs / 83 µs |
+| A whole *Exolon* tape load | 53.8 G instructions | 35.1 G (−34.7 %) |
+| Browser (wasm) frame | 282 µs | about 158 µs |
+| Toolchain | Rust `stable` (1.98.0) | Rust 1.99.1 pinned, prefix-match slowdown fixed with `core::hint::cold_path()` |
+
+Tools: batched covered ticks, an exact tape-edge stamp, a lock-free audio ring, one latency
+histogram for the audio callback and the frame loop, an instruction-count gate (`web/perf_gate.sh`),
+an interleaved wall A/B (`web/perf_ab.sh`), a byte-identical `zx-shot` differential, mutation
+proofs, and three independent reviewers plus a panel of judges.
 
 Post-release audits over the whole workspace. Every number below has its measurement recorded in
 [`docs/JOURNAL.md`](docs/JOURNAL.md); the budgets, the before/after tables, the gate and the refused

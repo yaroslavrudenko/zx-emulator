@@ -58,6 +58,26 @@ been labelled as such; nothing in them changed.
 > **evidence** register, not an API register. Pointing a reader asking *"did this break?"* at a
 > table answering *"is this tested?"* is the same conflation rejected above.
 
+## Unreleased — toolchain · workspace — Rust 1.99.1 pinned
+
+- **Changed.** `rust-toolchain.toml` pins `channel = "1.99.1"` (it said `"stable"`, which floated).
+  The MSRV (`rust-version = "1.98"`) does not move: no code needs 1.99, and the tree builds
+  unchanged on 1.98.0. No source change was needed for 1.99.1 (`clippy -D warnings` clean on host
+  and wasm32).
+- **Re-pinned with the compiler.** `web/perf-baseline.txt` re-recorded on `arm64 rustc 1.99.1`;
+  `crates/z80/tests/codegen.rs` `PINNED_RUSTC` 1.98.0 → 1.99.1 and `EXPECTED_BOUNDS_CHECKS` 7 → 8
+  (one more `registers.rs:148` call site, source unchanged).
+- **Fixed, the slowdown 1.99.1 brought.** Unfixed, `quiet_48k` was +4 to +14 % slower in wall
+  time with instructions flat: LLVM 23's `ReduceSwitchRange` lowered `dispatch`'s prefix `match`
+  with one extra taken branch per unprefixed opcode (proven by a binary patch). `dispatch` now
+  marks the `PREFIX_CB` / `PREFIX_ED` arms `core::hint::cold_path()` (+6 lines, an owner-approved
+  RULE-4 / RV-6 exception); `quiet_48k` is back to 1.98.0's 74 µs, `tape_playing_48k` −5 %,
+  `flat_bus` −10.8 % instructions. `codegen.rs`'s tail-merged bounds-check row moved file
+  (`instructions.rs` → `lib.rs`, still 8 sites). Removing the hints brings the regression back.
+- **Measured.** Emulator output byte-identical on the ten-workload `zx-shot` corpus. Instructions
+  per frame −5.5 to +0.06 % against 1.98.0. The wasm frame is at or below 1.98.0's.
+  `docs/PERFORMANCE.md`, *The toolchain*.
+
 ## Unreleased — performance · every crate — batched covered ticks, an exact tape edge, and the surface the prefix-chain work changed
 
 The judges' decision of 2026-10-20 (`docs/PERFORMANCE.md` carries the numbers). Every public

@@ -1172,7 +1172,7 @@ Host for every figure below: Apple M3 Max (16 cores), macOS 25.6.0, rustc 1.98.0
 | …and no call to any bus method | **subject-dependent** — true in the probe, **false** for `Cpu<Ula>` | `no_bus_method_survives_as_an_out_of_line_call` |
 | Decode lowers to **two** tables (119 + 64) | **falsified at M2** — three now: 124 + 119 + 64. Attributed: 119 + 64 are `execute`'s and are M1's two; **124 is `execute_ed`'s**, the `ED` page M2 added | `decode_still_lowers_to_jump_tables` |
 | The execute path allocates nothing | **holds**, and structurally: the crate is `no_std` with no `alloc` | `the_execute_path_allocates_nothing` |
-| Register indexing: `panic_bounds_check` **15** in historical `Cpu<Ula>` build | **historical**, not remeasured after bounded prefix slices — old decomposition 15 = 7 + 6 + 2; the separate NullBus probe pinned **8** from the bounded prefix dispatch (one additional `set` site) and **7** again from 2026-10-20's batched covered ticks (`Bus::ticks`), not a new `Cpu<Ula>` total | `bounds_checks_in_the_execute_path_have_not_moved` (at 7, its own probe); remeasure `Cpu<Ula>` before a current total claim |
+| Register indexing: `panic_bounds_check` **15** in historical `Cpu<Ula>` build | **historical**, not remeasured after bounded prefix slices — old decomposition 15 = 7 + 6 + 2; the separate NullBus probe pinned **8** from the bounded prefix dispatch (one additional `set` site) and **7** again from 2026-10-20's batched covered ticks (`Bus::ticks`) on rustc 1.98.0, then **8** on rustc 1.99.1 (2026-10-21, source unchanged: one more `registers.rs:148` site survives the tail merge), not a new `Cpu<Ula>` total | `bounds_checks_in_the_execute_path_have_not_moved` (at 8 on 1.99.1, its own probe); remeasure `Cpu<Ula>` before a current total claim |
 | Decision 5's bank masking: **0** in `crates/spectrum/src` | **reproduced exactly** — 0 | ungated; `crates/spectrum` owns its own gates |
 
 ### Throughput
@@ -1578,9 +1578,10 @@ labelled ungated, with the command that re-runs them.
 no bus is named.
 
 **Stability against the toolchain is handled by pinning, not by loosening.** The counts are asserted
-as exact equalities, and `rust-toolchain.toml` says `channel = "stable"`, which floats — so a future
+as exact equalities, and `rust-toolchain.toml` said `channel = "stable"`, which floats *(pinned to `"1.99.1"`
+since 2026-10-21, so a re-pin now arrives only with a deliberate bump)* — so a future
 rustc will eventually turn one of them red. That is deliberate. The failure message reads the
-running `rustc --version`, compares it to the pinned `1.98.0`, and says in the failure text whether
+running `rustc --version`, compares it to the pinned `1.99.1` (`1.98.0` until 2026-10-21), and says in the failure text whether
 this is a re-pin or a real codegen change, with the command to reproduce. A bound (`<= 7`) would
 have been quieter and would have let the number drift downwards unnoticed — and "silently drifted
 while looking green" is the defect being fixed, not a cost worth paying to avoid a re-pin.

@@ -502,8 +502,14 @@ impl<B: Bus> Cpu<B> {
             match opcode {
                 PREFIX_DD => index = Index::Ix,
                 PREFIX_FD => index = Index::Iy,
-                PREFIX_CB => self.execute_cb(index),
-                PREFIX_ED => self.execute_ed(),
+                PREFIX_CB => {
+                    core::hint::cold_path();
+                    self.execute_cb(index);
+                }
+                PREFIX_ED => {
+                    core::hint::cold_path();
+                    self.execute_ed();
+                }
                 other => self.execute(other, index),
             }
             if opcode != PREFIX_DD && opcode != PREFIX_FD {

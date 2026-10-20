@@ -1,15 +1,15 @@
 # Instructions retired per frame (per sample for step), median of three slopes.
 # Written by `sh web/perf_gate.sh --record`; checked by `sh web/perf_gate.sh`.
-# recorded 2026-10-20 on Mac15,9
-# toolchain arm64 rustc 1.98.0
-frame quiet_48k 2660247
-frame quiet_128 2695865
-frame contended_48k 2713151
-frame drained_48k 2841237
-frame beeper_48k 2933255
-frame tape_reads_48k 2580951
-frame tape_playing_48k 2710795
-frame border_48k 2661072
-frame ay_128 3313062
-frame halt_48k 1558419
-step flat_bus 1999036
+# recorded 2026-10-21 on Mac15,9
+# toolchain arm64 rustc 1.99.1
+frame quiet_48k 2661740
+frame quiet_128 2696849
+frame contended_48k 2710788
+frame drained_48k 2842405
+frame beeper_48k 2895211
+frame tape_reads_48k 2552970
+frame tape_playing_48k 2712043
+frame border_48k 2626969
+frame ay_128 3249544
+frame halt_48k 1472557
+step flat_bus 1825146
