@@ -20,6 +20,7 @@ them — so that a picture making a claim about the machine can be re-taken rath
 | `tape-loading-sound.png` | campaign | *Exolon*'s header just read — the frame the tape-sound work shows |
 | `rtype-loader.png` | campaign | *R-Type*'s Torasoft loader on the **128**, its `.tzx` mid-play |
 | `rtype-spec.png` | campaign | *R-Type*'s attract screen, mid-way through typing its specification |
+| `cartridges.png` (1280 × 2048, added 2026-10-20) | the game shelf | `tools/forge.sh`'s contact sheet `cartridges/_all.png`, copied: thirty-two cartridge covers, four to a row, each titled |
 
 Five games: *Cybernoid*, *Manic Miner*, *Cybernoid II*, *Exolon*, *R-Type*. Two machines. Three of
 the twelve frames are **128**s — *Cybernoid* and both *R-Type*s — and the rest are 48Ks, named per
@@ -37,6 +38,13 @@ command below.
 ---
 
 ## Which pixels are the machine's
+
+> **A thirteenth file, and it is not like the twelve (2026-10-20).** `cartridges.png` is a
+> *composition*: `tools/forge.sh` tiles each cartridge's cover frame and writes the game's title
+> above it, so it has gutters and captions, and the paragraph below is about the other twelve. Its
+> colours still pass the decision procedure below — its PNG palette holds fifteen entries, all
+> machine colours (read from the `PLTE` chunk) — and the frames inside it are `zx-shot` output; the
+> layout and the lettering are the forge's, not the machine's.
 
 **All of them, in all twelve files. There is no surround, no margin, no gutter and no caption
 baked into any image**, so the question the first version of this page had to argue — *where

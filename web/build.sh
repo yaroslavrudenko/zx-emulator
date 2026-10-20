@@ -9,9 +9,9 @@
 #     sh web/build.sh
 #     cd target/web && python3 -m http.server 8000     # then http://localhost:8000/
 #
-# It writes to `target/web/` and nowhere else. That is deliberate: `target/` is already the
-# only entry in `.gitignore`, so the assembled page — which contains a copy of a Sinclair ROM —
-# cannot be committed by accident, and no `.gitignore` change is needed to keep it out.
+# The assembled page goes to `target/web/`; Cargo's build artefacts follow `CARGO_TARGET_DIR`
+# when set. `target/` is already ignored, so the assembled page — which contains a copy of a
+# Sinclair ROM — cannot be committed by accident.
 # `testdata/README.md` names every committed ROM individually, precisely so that a new copy of
 # one has to be argued for rather than swept in by a glob.
 #
@@ -31,7 +31,7 @@ cargo build --release \
     --target wasm32-unknown-unknown \
     --bin zx
 
-wasm="$root/target/wasm32-unknown-unknown/release/zx.wasm"
+wasm="${CARGO_TARGET_DIR:-$root/target}/wasm32-unknown-unknown/release/zx.wasm"
 [ -f "$wasm" ] || { echo "no artefact at $wasm" >&2; exit 1; }
 
 echo "==> assembling $out"

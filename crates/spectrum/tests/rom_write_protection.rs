@@ -29,6 +29,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     UNCONTENDED_CODE, machine, pattern_rom, set_pc, write_program, write_through_the_bus,
 };
@@ -174,7 +176,7 @@ fn a_write_the_cpu_performs_into_rom_is_discarded() {
     machine.step();
 
     assert_eq!(
-        machine.cpu_state().af >> 8,
+        machine.completed().af >> 8,
         u16::from(INTRUDER),
         "the program did not run as written: A should hold the byte it was about to store"
     );

@@ -109,6 +109,23 @@ const PINNED_RUSTC: &str = "1.98.0";
 ///   to seven.
 ///
 /// The full account, with the eight-tree table, is in `docs/ARCHITECTURE.md`.
+/// 2026-10-01: bounded/resumable DD/FD dispatch makes one additional `set` call site
+/// survive LLVM's tail merge on rustc 1.98. The gate went red at 7; the new pin was
+/// 8, not an assertion of a speedup.
+///
+/// *(Corrected 2026-10-20, cold. This said the bounded dispatch was faster — "flat median
+/// 100.4→90.49 µs". Four judges re-measured it and it is not: against the commit before it,
+/// the bounded dispatch costs **+0.34 to +0.41 % instructions per frame** on `quiet_48k`,
+/// **+5.06 %** per sample on `flat_bus`, and **+3.3 %** wall time on the `quiet_48k` floor
+/// (instructions retired, `/usr/bin/time -l`, slope of 1500 − 500 samples; DECISION.md
+/// item 4). A reshape of `dispatch` that recovers it was measured and refused: on the
+/// batched-tick tree below it is performance-null and longer, so RULE 4 drops it. It is
+/// required only if the batched ticks are ever removed.)*
+///
+/// 2026-10-20: **7 again.** The batched covered ticks (`Bus::ticks`, DECISION.md item 3)
+/// delete `Cpu::tick` and shorten every machine cycle's call path, and with it one of the
+/// `registers.rs:148` sites tail-merges again. Every batched tree the judges built measured
+/// 7, and so did this one.
 const EXPECTED_BOUNDS_CHECKS: usize = 7;
 
 /// Where those checks sit, so a change says *which* index moved rather than only that one did.
@@ -237,7 +254,7 @@ fn drive(mode: InterruptMode, steps: u32) -> u64 {
     acc = acc.wrapping_add(u64::from(cpu.interrupt(black_box(0xC7))));
     acc = acc.wrapping_add(u64::from(cpu.nmi()));
 
-    let state = cpu.state();
+    let state = cpu.state().expect("completed instruction");
     acc.wrapping_add(u64::from(state.pc))
         .wrapping_add(u64::from(state.af))
         .wrapping_add(u64::from(state.r))
@@ -292,7 +309,7 @@ fn workspace_root() -> PathBuf {
 /// Where cargo is putting build output for the run that is executing this test.
 fn target_root() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
+        .map(|path| std::path::absolute(path).expect("cargo target path"))
         .unwrap_or_else(|| workspace_root().join("target"))
 }
 

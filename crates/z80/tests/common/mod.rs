@@ -32,6 +32,23 @@
 // `#[expect]` would itself warn in the binaries where the items *are* used.
 #![allow(dead_code)]
 
+use z80::{Bus, Cpu, CpuState};
+
+/// The CPU's state at an instruction boundary — where every gate that reads it stands, so the
+/// `Result` a capture mid-prefix-chain returns is always `Ok` here. One helper for this crate's
+/// tests in place of the same `.expect("completed instruction")` at every call site
+/// (DECISION.md item 12).
+pub trait Completed {
+    /// This CPU's state, which every caller reads between instructions.
+    fn completed(&self) -> CpuState;
+}
+
+impl<B: Bus> Completed for Cpu<B> {
+    fn completed(&self) -> CpuState {
+        self.state().expect("completed instruction")
+    }
+}
+
 pub mod cpm;
 pub mod flags;
 pub mod machine;

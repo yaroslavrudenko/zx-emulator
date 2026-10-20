@@ -14,6 +14,7 @@
   with its size, SHA-256 and provenance in `web/README.md`.
 
   Load order matters and is not cosmetic:
+    0. A classic prelude declares `register_plugin` for quad-net's strict-mode assignment.
     1. mq_js_bundle.js  defines `miniquad_add_plugin`, `load`, and the `env` import object.
     2. zx_page.js       calls `miniquad_add_plugin`, which must happen before instantiation.
     3. load("zx.wasm")  registers the plugins and instantiates the module.
@@ -148,6 +149,10 @@
   </p>
 </footer>
 
+<!-- The pinned bundle starts in strict mode, but quad-net assigns `register_plugin` without
+     declaring it. A classic-script var provides that global binding before the vendor runs;
+     changing the vendored, hash-checked bundle would hide the upstream defect. -->
+<script>var register_plugin;</script>
 <script src="mq_js_bundle.js"></script>
 <script src="zx_page.js"></script>
 <script>load("zx.wasm");</script>

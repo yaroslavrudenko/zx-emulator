@@ -161,8 +161,10 @@ Conditional instructions cost differently by outcome:
 
 Traps, all of them found by reading the corpus rather than by reading a specification:
 
-- `DD DD DD 21` is three separate one-byte instructions followed by an `LD IX,nn`. Each
-  prefix is its own M1 cycle and increments `R` on its own.
+- `DD DD DD 21` consumes three distinct prefix M1 cycles followed by `LD IX,nn`; each
+  prefix increments `R`. In the current core a `step()` can return at a bounded prefix
+  boundary with the instruction still in progress; the next `step()` resumes that same
+  instruction. These are not four complete instructions.
 - A prefix followed by an opcode that does not involve `HL` behaves as if the prefix were a
   `NOP` — but it still cost its 4 T-states and its `R` increment.
 - **`ED` ignores an index prefix entirely.** `DD ED 44` is `NEG` at three M1 cycles.

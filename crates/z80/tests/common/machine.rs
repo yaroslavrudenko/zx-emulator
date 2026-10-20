@@ -57,6 +57,7 @@
 
 use z80::{Bus, Cpu, CpuState, InterruptMode, StepError};
 
+use super::Completed;
 use super::vectors::{EventKind, Registers, Setup, State, Transfer};
 
 /// The Z80 address space. Every `u16` address is in range by construction, so indexing
@@ -282,7 +283,7 @@ impl Machine {
     /// of `BIT n,(HL)` and only in aggregate, so a rule can be wrong in a way that folds into
     /// the same CRC. This reads all sixteen bits directly.
     pub fn memptr(&self) -> u16 {
-        self.cpu.state().wz
+        self.cpu.completed().wz
     }
 
     /// Put a known value in `MEMPTR` before stepping.
@@ -294,7 +295,7 @@ impl Machine {
     pub fn set_memptr(&mut self, memptr: u16) {
         let state = CpuState {
             wz: memptr,
-            ..self.cpu.state()
+            ..self.cpu.completed()
         };
         self.cpu.set_state(state);
     }
@@ -375,7 +376,7 @@ fn cpu_state(registers: &Registers, state: &State) -> CpuState {
 
 /// The core's public state struct -> the shape the corpus comparison speaks.
 fn snapshot(cpu: &Cpu<TestBus>) -> (Registers, State) {
-    let state = cpu.state();
+    let state = cpu.completed();
     let registers = Registers {
         af: state.af,
         bc: state.bc,

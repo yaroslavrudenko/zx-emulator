@@ -541,15 +541,13 @@ impl<'a> Player<'a> {
             RETURN_FROM_SEQUENCE => self.return_from_sequence(block),
             STOP_TAPE_IN_48K => Ok(self.stop_in_48k()),
             SET_SIGNAL_LEVEL => self.set_signal_level(block),
-            CSW_RECORDING | GENERALIZED_DATA => Err(Error::UnplayableBlock {
+            CSW_RECORDING | GENERALIZED_DATA | SELECT_BLOCK => Err(Error::UnplayableBlock {
                 offset: block.offset,
                 id: block.id,
             }),
             // Everything else is metadata or presentation: a group's name, a description, a
-            // message, the archive and hardware tables, a custom or deprecated payload, the
-            // glue between two concatenated files — and `ID 28`, which asks for a menu this
-            // emulator does not have and which therefore falls through to the next block, as
-            // it does in any player without one. None of them changes the signal.
+            // message, the archive and hardware tables, a custom or deprecated payload, and the
+            // glue between two concatenated files. None of them changes the signal.
             _ => Ok(Step::Next),
         }
     }
@@ -1326,6 +1324,28 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn select_block_is_refused_at_its_id_and_truncated_payload_stays_truncated() {
+        let select = [SELECT_BLOCK, 0x04, 0x00, 0x01, 0x01, 0x00, 0x00];
+        let tone = [PURE_TONE, 0x10, 0x00, 0x01, 0x00];
+        assert_eq!(
+            parse(&file(&[&select, &tone]), Model::Spectrum48K),
+            Err(Error::UnplayableBlock {
+                offset: HEADER_LENGTH,
+                id: SELECT_BLOCK
+            })
+        );
+        let truncated = [SELECT_BLOCK, 0x03, 0x00, 0x00];
+        assert_eq!(
+            parse(&file(&[&truncated]), Model::Spectrum48K),
+            Err(Error::Truncated {
+                offset: HEADER_LENGTH + 1,
+                needed: 5,
+                available: 3
+            })
+        );
     }
 
     #[test]

@@ -126,6 +126,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     AcceptedInterrupt, InterruptedRun, PROLOGUE, advance_to, elapsed, enable_interrupts, machine,
     run_recording_interrupts, set_pc, with_cpu_state, write_program,
@@ -513,7 +515,7 @@ fn the_loop_resumes_after_the_handler_and_runs_to_completion() {
     for direction in &DIRECTIONS {
         let mut machine = loaded(direction, true);
         let outcome = run(&mut machine);
-        let state = machine.cpu_state();
+        let state = machine.completed();
 
         assert_eq!(
             state.bc, 0,

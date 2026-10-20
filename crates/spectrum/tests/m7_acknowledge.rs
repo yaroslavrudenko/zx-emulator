@@ -43,6 +43,8 @@
 //! seeing the wrong one.
 
 mod common;
+
+use common::Completed;
 mod m7_common;
 
 use m7_common::{machine_128, pattern_rom};
@@ -122,7 +124,7 @@ fn positioned(mut cpu: Cpu<Ula>, i: u8) -> Cpu<Ula> {
         iff1: true,
         iff2: true,
         im: InterruptMode::Mode1,
-        pc: cpu.state().pc,
+        pc: cpu.completed().pc,
         ..CpuState::default()
     });
     cpu
@@ -187,7 +189,7 @@ fn an_accepted_interrupt_with_a_contended_refresh_address_is_charged_one_stall_a
         charge, SEVEN_CYCLES,
         "the per-T-state model must be refuted"
     );
-    assert_eq!(cpu.state().pc, 0x0038, "mode 1 vectors to 0x0038");
+    assert_eq!(cpu.completed().pc, 0x0038, "mode 1 vectors to 0x0038");
 }
 
 #[test]
@@ -290,11 +292,11 @@ fn the_acknowledge_leaves_no_machine_cycle_half_open() {
     );
     cpu.set_state(CpuState {
         af: 0x0000,
-        ..cpu.state()
+        ..cpu.completed()
     });
 
     cpu.interrupt(0xFF);
-    assert_eq!(cpu.state().pc, 0x0038);
+    assert_eq!(cpu.completed().pc, 0x0038);
 
     let before = cpu.bus().clock().frame_t_state();
     cpu.step();

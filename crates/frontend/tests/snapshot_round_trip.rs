@@ -65,7 +65,54 @@ use std::collections::BTreeSet;
 use frontend::palette::{self, CHANNELS, RGBA_BYTES};
 use frontend::{keymap, media};
 use macroquad::input::KeyCode;
-use spectrum::{Frame, Model, Spectrum};
+use spectrum::{Frame, Model, Spectrum, StateCaptureError};
+
+#[test]
+fn partial_prefix_refuses_every_snapshot_surface_then_saves_after_completion() {
+    let rom = [0; 16 * 1024];
+    let models = [
+        (Spectrum::new(&rom).expect("48K ROM"), 17_472),
+        (
+            Spectrum::spectrum_128(&rom, &rom).expect("128K ROMs"),
+            17_727,
+        ),
+    ];
+    for (mut machine, expected_budget) in models {
+        let mut cpu = machine.cpu_state().expect("initial boundary");
+        cpu.pc = 0x4000;
+        machine.set_cpu_state(cpu);
+        let budget = machine.ula().clock().timing().frame_t_states() / 4;
+        assert_eq!(budget, expected_budget);
+        for address in 0x4000..0x4000 + budget {
+            machine.ula_mut().memory_mut().write(address as u16, 0xdd);
+        }
+        let first_slice = machine.step();
+        assert!(first_slice > 0 && first_slice < budget * 4);
+        assert!(matches!(
+            machine.cpu_state(),
+            Err(StateCaptureError::InstructionInProgress)
+        ));
+        assert!(matches!(
+            machine.snapshot(),
+            Err(StateCaptureError::InstructionInProgress)
+        ));
+        assert!(matches!(
+            media::save(&machine),
+            Err(StateCaptureError::InstructionInProgress)
+        ));
+        let mut slices = 1;
+        while machine.cpu_state().is_err() {
+            assert!(slices < 4, "bounded prefix chain must finish");
+            machine.step();
+            slices += 1;
+        }
+        let bytes = media::save(&machine).expect("instruction completed");
+        assert_eq!(
+            bytes,
+            spectrum::snapshot::z80::write(&machine.snapshot().expect("boundary"))
+        );
+    }
+}
 
 /// The game this file loads, under `testdata/games/`.
 ///
@@ -244,7 +291,7 @@ fn the_cover_is_the_cartridge_seen() {
         colours(&played),
     );
 
-    let cartridge = media::save(&loaded);
+    let cartridge = media::save(&loaded).expect("completed instruction");
     let restored = photograph(&machine_restored_from(&cartridge));
 
     assert!(
@@ -260,7 +307,7 @@ fn the_restored_machine_goes_on_being_the_game() {
         return;
     };
 
-    let cartridge = media::save(&loaded);
+    let cartridge = media::save(&loaded).expect("completed instruction");
     let before = photograph(&loaded);
     let mut restored = machine_restored_from(&cartridge);
 

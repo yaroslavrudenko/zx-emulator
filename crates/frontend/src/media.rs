@@ -375,8 +375,7 @@ fn verb(kind: Kind) -> &'static str {
 /// `.z80` and not `.sna` because `crates/spectrum` has no `.sna` writer, and
 /// [`spectrum::snapshot::sna`] explains why: the format cannot represent a machine that has
 /// not pushed its `PC`, so writing one means corrupting the stack of the machine being saved.
-#[must_use]
-pub fn save(machine: &Spectrum) -> Vec<u8> {
-    let state: Snapshot = machine.snapshot();
-    z80::write(&state)
+pub fn save(machine: &Spectrum) -> Result<Vec<u8>, spectrum::StateCaptureError> {
+    let state: Snapshot = machine.snapshot()?;
+    Ok(z80::write(&state))
 }

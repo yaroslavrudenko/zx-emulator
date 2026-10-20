@@ -105,6 +105,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     CONTENDED_CODE, UNCONTENDED_CODE, advance_to, cost_of_running, elapsed, machine, set_pc,
     with_cpu_state, write_program,
@@ -795,7 +797,7 @@ fn a_repeating_transfer_is_re_priced_at_every_iteration() {
         let before = elapsed(&machine);
         machine.step();
         costs.push(elapsed(&machine) - before);
-        program_counters.push(machine.cpu_state().pc);
+        program_counters.push(machine.completed().pc);
     }
 
     assert_eq!(
@@ -826,7 +828,7 @@ fn a_repeating_transfer_is_re_priced_at_every_iteration() {
         "the pass that exhausts BC must step past the instruction"
     );
 
-    let state = machine.cpu_state();
+    let state = machine.completed();
     assert_eq!(state.bc, 0, "the counter must be exhausted");
     assert_eq!(state.hl, HL_FREE + ITERATIONS, "HL walks up one per pass");
     assert_eq!(state.de, DE_HELD + ITERATIONS, "DE walks up one per pass");

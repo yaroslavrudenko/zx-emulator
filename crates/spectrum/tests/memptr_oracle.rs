@@ -134,6 +134,8 @@
 
 mod common;
 
+use common::Completed;
+
 use std::collections::BTreeMap;
 
 use common::{elapsed, sinclair_rom, write_program};
@@ -335,7 +337,7 @@ fn machine_with(rom: &[u8], tape: Tape) -> Spectrum {
         iff1: false,
         iff2: false,
         im: InterruptMode::Mode1,
-        ..machine.cpu_state()
+        ..machine.completed()
     });
     machine.insert_tape(tape);
     machine.tape_mut().play();
@@ -714,7 +716,7 @@ fn the_memptr_exerciser_reports_the_verdict_this_core_earns() {
             }
         }
 
-        let pc = machine.cpu_state().pc;
+        let pc = machine.completed().pc;
         if pc == LOAD_FAILED || pc == RETURNED {
             break;
         }
@@ -725,7 +727,7 @@ fn the_memptr_exerciser_reports_the_verdict_this_core_earns() {
     transcript.absorb(read_text(machine.memory()));
 
     let t_states = elapsed(&machine) - start;
-    let pc = machine.cpu_state().pc;
+    let pc = machine.completed().pc;
 
     // Printed on success as well as on failure. A passing run that prints nothing is
     // indistinguishable from a run that verified nothing, which is the exact defect

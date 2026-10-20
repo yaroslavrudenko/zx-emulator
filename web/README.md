@@ -47,7 +47,10 @@ http://localhost:8000/?snapshot=fire.z80
 
 The query string becomes the same argument list a command line would have carried, read by the
 same `frontend::host::partition` — so the two sources cannot disagree about `--rom`, about
-repeats, or about case. `crates/frontend/tests/argument_sources.rs` is the gate, and it asserts
+repeats, or about case. The pinned miniquad XHR import is privately wrapped by `zx_page.js`:
+file requests have a 5-second deadline, abort the underlying XHR, and settle the wasm file id
+once as a failed load if timed out; a late success cannot publish bytes. Other XHR constructors
+are restored immediately after each synchronous import invocation. `crates/frontend/tests/argument_sources.rs` is the gate, and it asserts
 agreement rather than parsing. Paths are relative to the page, are **not** percent-decoded (the
 value goes straight back into an HTTP request), and a `rom` key works for an extensionless path
 because it emits `--rom`.
@@ -154,9 +157,9 @@ sh web/gate.sh
 | Step | Class | Runs under `cargo test --workspace`? |
 |---|---|---|
 | Every existing frontend gate, plus the query/`argv` agreement table and the download's refusal codes | **proven** | yes |
-| `crates/frontend` contains no `cfg(target`, and `crates/page` does | **proven** | yes |
+| Headless frontend modules have no `cfg(target`; private `main.rs` and `snapshot.rs` route native/browser file I/O; `crates/page` owns unsafe ABI | **proven source inventory, not target parity** | yes |
 | The `unsafe` surface is five blocks each with a `SAFETY:` comment, two extern blocks whose obligations are discharged at the call sites (each call is one of the five blocks), and one attribute whose linker assertion is discharged in its own `# Safety` doc section — `EXPECTED_BLOCKS`, `EXPECTED_EXTERN_BLOCKS` and `EXPECTED_UNSAFE_ATTRIBUTES` in `crates/page/tests/unsafe_inventory.rs`. *This row said all three kinds carried a `SAFETY:` comment; only the blocks do, and only the blocks are what the comment gate grades* | **proven** | yes |
-| `quiet_48k` stays under a recorded hot-path ceiling — the lowest `fastest` of three bench runs against 138.7 µs × 1.15, the derivation dated and spelled out at the step itself | **measured**, on the machine the baseline was recorded on; skipped, and counted as an unanswered question, anywhere else | **no** |
+| ~~`quiet_48k` stays under a recorded hot-path ceiling — the lowest `fastest` of three bench runs against 138.7 µs × 1.15, the derivation dated and spelled out at the step itself~~ *Superseded 2026-10-20 (DECISION.md item 2):* instructions retired per frame, eleven cases, each within 1 % of `web/perf-baseline.txt` — `web/perf_gate.sh`, derivation and mutation proofs in `docs/PERFORMANCE.md` | **measured**, on the architecture and rustc the baseline names; **fails** on another rustc of that architecture or with no `# toolchain` header; skipped, and counted as an unanswered question, on another architecture — CI's x86_64 runner included | **no** |
 | `cargo clippy --target wasm32-unknown-unknown` — the only run that lints the `unsafe` blocks at all | **proven**, of the wasm build | **no** |
 | The crate builds and **links** for `wasm32-unknown-unknown` | **proven**, of the link | **no** |
 | The artefact exists, clears a size floor, and carries the imports `zx_page.js` provides and the exports `gl.js` calls | **proven**, of the artefact | **no** |

@@ -33,16 +33,14 @@
 //!   never from [`std::time::Instant`]. `Instant::now` is the usual thing that makes an
 //!   otherwise-portable frame loop fail on `wasm32-unknown-unknown`, and [`crate::pacing`]
 //!   takes a `Duration` and a `f64` precisely so it never has to ask what a clock is.
-//! - Bytes come in through [`macroquad::file::load_file`], which is `async` on both targets
-//!   and is a `fetch` in a browser. The `async fn main` that `#[macroquad::main]` already
-//!   provides is what makes that free.
-//! - Nothing on the **per-frame** path touches the filesystem. *This said "nothing in the frame
-//!   loop", and the frame loop is where `F2` is handled:* [`save`] runs from inside it, and
-//!   [`free_path`] probes up to `NAME_LIMIT` candidate names with a [`Path::exists`] each before
-//!   `std::fs::write`. `free_path`'s own doc already draws the finer line — *"not on any
-//!   per-frame path"* — which is right about *per-frame* and was wrong about *in the frame
-//!   loop*. On a cold filesystem that is a visible hitch on the thread that draws, once, on a
-//!   keypress; `free_path` says what it costs.
+//! - Bytes are read by the binary's private loader: native `std::fs` runs on at most two
+//!   owned workers with a finite read deadline, while `macroquad::file::load_file` is the
+//!   browser's XHR path. Both hand bytes to the same parsing functions afterwards; the
+//!   host does not infer that their I/O and cancellation behaviour is identical.
+//! - Nothing on the **per-frame** path touches the filesystem. `F2` now hands an owned
+//!   snapshot to the binary's private, supervised writer, which reserves and writes on its own
+//!   thread. [`free_path`] and [`save`] remain public with their original semantics for other
+//!   callers; they are no longer the native `F2` path.
 //!
 //! # Why there is still no `#[cfg]` here
 //!
@@ -52,11 +50,11 @@
 //! [`page::Handoff::NoPage`], which is what routes [`save`] back to the filesystem, and the
 //! audio pair falls through to a `tinyaudio` device.
 //!
-//! So the target-conditional code in this workspace is confined to one crate that exists for
-//! it, and `tests/portability.rs` asserts the absence here as a property rather than leaving
-//! it to habit. `docs/M8.md` Decision 7 leans on that absence hard, because it is the only
-//! thing that makes a host-run test say anything about a `wasm32` build: the code
-//! `cargo test -p frontend` runs and the code a browser runs are the same code.
+//! This **module** has no target branch. The browser FFI still belongs to `crates/page`,
+//! but private `frontend/src/main.rs` and `snapshot.rs` now route native and browser file I/O
+//! separately. `tests/portability.rs` inventories their approved branch sites and keeps
+//! headless modules branch-free; host tests cannot certify browser I/O or pixels. The native
+//! and wasm builds, then browser observation, answer different questions.
 //!
 //! > **This section used to say something weaker and true, and the difference is worth
 //! > keeping.** It said both functions *"compile for `wasm32-unknown-unknown` as they stand"*

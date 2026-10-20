@@ -71,7 +71,7 @@ fn main() -> ExitCode {
         println!("|{line}|");
     }
 
-    let state = machine.cpu_state();
+    let state = machine.cpu_state().expect("completed instruction");
     println!();
     println!(
         "after {FRAMES} frames: PC={:#06X} SP={:#06X} IM={:?} IFF1={} halted={} border={}",

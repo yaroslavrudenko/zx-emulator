@@ -427,7 +427,7 @@ fn a_restore_drops_the_bands_the_saved_machine_painted() {
     let mut source = machine();
     write_border_at(&mut source, 8_000, 2);
     assert!(rendered_rows(&source).contains(&2));
-    let snapshot = source.snapshot();
+    let snapshot = source.snapshot().expect("completed instruction");
 
     let mut target = machine();
     target.restore(&snapshot).expect("both machines are 48K");

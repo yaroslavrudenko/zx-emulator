@@ -661,6 +661,14 @@ impl Ula {
     /// T-state above; this is the write side of the same trade, and it is taken for the same
     /// reason — a mid-advance timestamp would need the tape to report *when* it flipped rather
     /// than *that* it did, which is a wider signature for a third of a sample.
+    ///
+    /// *(Superseded 2026-10-20, DECISION.md item 5. The tape now reports when: `Tape::advance`
+    /// returns the T-states since its last flip, and the edge is stamped at `now − since`, the
+    /// T-state the per-tick loop stamps it at. The paragraph above stays as the record of the
+    /// trade: the "wider signature" turned out to be a `u32` already in a register, and the
+    /// stamp error it bought — 50–59 dB below the signal on real loaders, at most 722 of 32767
+    /// — is gone. Two edges inside one stall still reach the speaker as one, the later; a stall
+    /// is at most 6 T-states and no loader writes pulses that short.)*
     #[inline]
     fn advance(&mut self, t_states: u32) {
         self.clock.advance(t_states);
@@ -672,12 +680,12 @@ impl Ula {
         // unconditionally and let `Audio::set_tape` compare — the shape `set_beeper` uses, and
         // the wrong one here, because the *timestamp* argument is evaluated at the call site
         // before any guard can discard it. `Clock::t_states` is a `u64` multiply-add, and paying
-        // it on every elapsed T-state cost **+21.9% on `benches/frame.rs`'s `quiet_48k`** — a
+        // it on every elapsed T-state cost **+19.6 % on `benches/frame.rs`'s `quiet_48k`** — a
         // machine with no tape in the drive. `Tape::advance` already knew when the level moved;
         // now it says so, and the multiply happens only when there is something to timestamp.
-        if self.tape.advance(t_states) {
+        if let Some(since) = self.tape.advance(t_states) {
             self.audio
-                .set_tape(self.tape.level(), self.clock.t_states());
+                .set_tape(self.tape.level(), self.clock.t_states() - u64::from(since));
         }
     }
 
@@ -905,6 +913,22 @@ impl Bus for Ula {
     #[inline]
     fn acknowledge(&mut self, address: u16, t_states: u8) {
         self.begin_memory_cycle(address, t_states);
+    }
+
+    /// A run of `count` T-states, taken in one step only when every one of them is already
+    /// paid for and no tape edge falls inside it — the two conditions under which one
+    /// `advance` is indistinguishable from `count` `tick`s. Anything else takes
+    /// the per-tick path. `docs/ARCHITECTURE.md` Decision 1's 2026-10-20 amendment carries the
+    /// differential that proved it, and the `batched_ticks` tests below pin it.
+    #[inline]
+    fn ticks(&mut self, address: u16, count: u8) {
+        match self.covered_t_states.checked_sub(count) {
+            Some(rest) if !self.tape.flips_within(count) => {
+                self.covered_t_states = rest;
+                self.advance(u32::from(count));
+            }
+            _ => (0..count).for_each(|_| self.tick(address)),
+        }
     }
 
     #[inline]
@@ -1284,5 +1308,188 @@ mod tests {
         assert_eq!(ula.clock, Clock::new());
         assert_eq!(ula.border(), Colour::BLACK);
         assert_eq!(ula.memory().read(0x8000), 0xA5);
+    }
+
+    /// An edge that falls inside a contention stall is stamped at the T-state it happened on,
+    /// not at the end of the stall (DECISION.md item 5): the same stream as letting the six
+    /// T-states pass one at a time.
+    #[test]
+    fn a_tape_edge_inside_a_stall_is_stamped_where_it_fell() {
+        let loading = || {
+            let mut ula = at(FIRST_CONTENDED_T_STATE);
+            ula.insert_tape(Tape::new(vec![2, 100_000]));
+            ula.tape_mut().play();
+            ula
+        };
+        let (mut stalled, mut stepped) = (loading(), loading());
+        let stall = stalled.clock.delay_now();
+        assert_eq!(
+            stall, 6,
+            "the longest stall, with the edge two T-states into it"
+        );
+
+        stalled.contend(CONTENDED);
+        (0..stall).for_each(|_| stepped.advance(1));
+        for ula in [&mut stalled, &mut stepped] {
+            ula.advance(200);
+        }
+        assert_eq!(stalled.take_samples(), stepped.take_samples());
+    }
+
+    proptest::proptest! {
+        /// Any stall or port delay with at most one edge inside it — every pulse longer than the
+        /// longest advance, 12 T-states — stamps that edge where T-state-by-T-state time would:
+        /// the WAV changes item 5 makes are confined to edges that fell inside a multi-T-state
+        /// advance, and are those edges moving to where they happened.
+        #[test]
+        fn an_advance_stamps_its_edge_where_single_t_states_would(
+            tape in proptest::collection::vec(13_u32..64, 1..64),
+            advances in proptest::collection::vec(1_u32..=12, 1..512),
+        ) {
+            let loading = || {
+                let mut ula = at(FIRST_CONTENDED_T_STATE);
+                ula.insert_tape(Tape::new(tape.clone()));
+                ula.tape_mut().play();
+                ula
+            };
+            let (mut whole, mut stepped) = (loading(), loading());
+            for t_states in advances {
+                whole.advance(t_states);
+                (0..t_states).for_each(|_| stepped.advance(1));
+            }
+            proptest::prop_assert_eq!(whole.take_samples(), stepped.take_samples());
+        }
+    }
+
+    /// `Bus::ticks` on the `Ula` against the trait's own default — one `tick` per T-state —
+    /// on tapes built to put edges inside a covered run (DECISION.md item 3).
+    mod batched_ticks {
+        use super::*;
+        use crate::model::Model;
+        use crate::tape::tzx;
+        use proptest::prelude::*;
+        use z80::{Cpu, CpuState};
+
+        /// Codex's acceptance pattern: an edge, a zero-length pulse, then two more edges, all
+        /// inside one four-T-state fetch.
+        const SHORT_AND_ZERO: [u32; 5] = [1, 0, 1, 1, 5];
+
+        /// A `Ula` in every respect except that it does not override `Bus::ticks`, so a run
+        /// reaches it as the trait's default: one `tick` per T-state. The reference.
+        #[derive(Debug)]
+        struct PerTick(Ula);
+
+        impl Bus for PerTick {
+            fn fetch(&mut self, address: u16) -> u8 {
+                self.0.fetch(address)
+            }
+            fn read(&mut self, address: u16) -> u8 {
+                self.0.read(address)
+            }
+            fn acknowledge(&mut self, address: u16, t_states: u8) {
+                self.0.acknowledge(address, t_states);
+            }
+            fn write(&mut self, address: u16, value: u8) {
+                self.0.write(address, value);
+            }
+            fn in_port(&mut self, port: u16) -> u8 {
+                self.0.in_port(port)
+            }
+            fn out_port(&mut self, port: u16, value: u8) {
+                self.0.out_port(port, value);
+            }
+            fn tick(&mut self, address: u16) {
+                self.0.tick(address);
+            }
+        }
+
+        fn playing(pulses: Vec<u32>) -> Ula {
+            let mut ula = ula();
+            ula.insert_tape(Tape::new(pulses));
+            ula.tape_mut().play();
+            ula
+        }
+
+        /// Everything observable about two machines: the whole state and every sample.
+        fn assert_same(batched: &mut Ula, per_tick: &mut Ula) {
+            assert_eq!(format!("{batched:?}"), format!("{per_tick:?}"));
+            assert_eq!(batched.take_samples(), per_tick.take_samples());
+        }
+
+        /// A guest that fetches, reads, writes, does pair arithmetic and reads the `EAR` port,
+        /// in uncontended ROM and again in the contended screen bank.
+        fn busy(tape: Vec<u32>) -> Ula {
+            const LOOP: [u8; 8] = [0x23, 0x7E, 0x77, 0x09, 0xDB, 0xFE, 0x00, 0x00];
+            let mut ula = playing(tape);
+            for (offset, byte) in LOOP.iter().cycle().take(0x400).enumerate() {
+                let offset = u16::try_from(offset).expect("a short program");
+                ula.memory_mut().write(CONTENDED + offset, *byte);
+            }
+            ula
+        }
+
+        /// One machine on the batched bus and one on the per-tick reference, stepped
+        /// instruction by instruction for three frames of a loading tape.
+        fn assert_machines_agree(tape: &[u32]) {
+            let mut batched = Cpu::new(busy(tape.to_vec()));
+            let mut per_tick = Cpu::new(PerTick(busy(tape.to_vec())));
+            let start = CpuState {
+                pc: CONTENDED,
+                ..CpuState::default()
+            };
+            batched.set_state(start);
+            per_tick.set_state(start);
+            while batched.bus().clock.frames() < 3 {
+                assert_eq!(batched.step(), per_tick.step());
+            }
+            assert_same(batched.bus_mut(), &mut per_tick.bus_mut().0);
+        }
+
+        /// A fixture's pulses after its 3223-pulse pilot, which would otherwise fill the three
+        /// frames with 2168-T-state pulses and never reach the short ones.
+        fn fixture(bytes: &[u8]) -> Vec<u32> {
+            const PILOT: usize = 3223;
+            let tape = tzx::parse(bytes, Model::Spectrum48K).expect("a well-formed fixture");
+            tape.pulses()[PILOT..].to_vec()
+        }
+
+        #[test]
+        fn a_machine_on_batched_ticks_matches_one_on_per_tick_ticks() {
+            assert_machines_agree(&SHORT_AND_ZERO.repeat(20_000));
+            assert_machines_agree(&fixture(include_bytes!("../tests/fixtures/zero_pulse.tzx")));
+            assert_machines_agree(&fixture(include_bytes!(
+                "../tests/fixtures/short_pulse.tzx"
+            )));
+            for length in 0..=7 {
+                assert_machines_agree(&vec![length; 20_000]);
+            }
+        }
+
+        proptest! {
+            /// `ticks(n)` ≡ n × `tick`, on any tape of zero-length and 1–7 T-state pulses, after
+            /// any cycle opener — covered, partly covered or not covered at all.
+            #[test]
+            fn a_batched_run_is_indistinguishable_from_its_ticks(
+                tape in prop::collection::vec(0_u32..=7, 1..256),
+                runs in prop::collection::vec((0_u8..4, any::<bool>(), 0_u8..=7), 1..256),
+            ) {
+                let mut batched = playing(tape.clone());
+                let mut per_tick = playing(tape);
+                for (opener, contended, count) in runs {
+                    let address = if contended { CONTENDED } else { UNCONTENDED };
+                    for ula in [&mut batched, &mut per_tick] {
+                        match opener {
+                            0 => drop(ula.fetch(address)),
+                            1 => drop(ula.read(address)),
+                            2 => drop(ula.in_port(0x00FE)),
+                            _ => {}
+                        }
+                    }
+                    batched.ticks(address, count);
+                    (0..count).for_each(|_| per_tick.tick(address));
+                }
+                assert_same(&mut batched, &mut per_tick);
+            }
+        }
     }
 }

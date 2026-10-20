@@ -44,6 +44,7 @@
 
 mod common;
 
+use common::Completed;
 use common::flags;
 use common::machine::Machine;
 use common::vectors::{MemoryBlock, Registers, Setup, State};
@@ -546,7 +547,7 @@ fn an_interrupt_acknowledge_refreshes_without_fetching() {
     );
     assert_eq!(
         1,
-        cpu.state().r,
+        cpu.completed().r,
         "yet R advanced, because the acknowledge is still an M1 cycle",
     );
 }
@@ -756,7 +757,7 @@ fn started() -> CpuState {
 fn tally(program: &[u8], state: CpuState, steps: usize) -> Tally {
     let mut cpu = Cpu::new(M1Counter::new(program));
     cpu.set_state(state);
-    let before = cpu.state().r;
+    let before = cpu.completed().r;
 
     for _ in 0..steps {
         cpu.step();
@@ -772,7 +773,7 @@ fn tally(program: &[u8], state: CpuState, steps: usize) -> Tally {
     Tally {
         fetches: cpu.bus().fetches,
         reads: cpu.bus().reads,
-        refresh: (before, cpu.state().r),
-        pc: cpu.state().pc,
+        refresh: (before, cpu.completed().r),
+        pc: cpu.completed().pc,
     }
 }

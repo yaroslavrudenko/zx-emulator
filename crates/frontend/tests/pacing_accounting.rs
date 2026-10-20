@@ -22,6 +22,51 @@ const FRAME: Duration = Duration::from_millis(20);
 const LOSS_WINDOW: f64 = 1.0;
 
 #[test]
+fn bounded_callbacks_credit_only_completed_frames_and_drop_the_rest() {
+    let time = std::cell::Cell::new(0.0);
+    let mut completed = 0;
+    let mut pacer = Pacer::new();
+    assert_eq!(
+        pacer.run_bounded(Duration::from_millis(19), || time.get(), || completed += 1),
+        0
+    );
+    assert_eq!(
+        pacer.run_bounded(
+            Duration::from_millis(81),
+            || time.get(),
+            || {
+                completed += 1;
+                time.set(time.get() + 0.030);
+            }
+        ),
+        1
+    );
+    assert_eq!((completed, pacer.ran(), pacer.dropped()), (1, 1, 4));
+    assert_eq!(
+        pacer.advance(FRAME),
+        1,
+        "legacy accounting remains available"
+    );
+}
+
+#[test]
+fn bounded_frames_stop_at_clock_boundary_even_when_one_frame_exceeds_budget() {
+    let time = std::cell::Cell::new(0.0);
+    let mut pacer = Pacer::new();
+    assert_eq!(
+        pacer.run_bounded(FRAME * 4, || time.get(), || time.set(time.get() + 0.010)),
+        3
+    );
+    assert_eq!((pacer.ran(), pacer.dropped()), (3, 1));
+    time.set(0.0);
+    assert_eq!(
+        pacer.run_bounded(FRAME * 5, || time.get(), || time.set(0.100)),
+        1
+    );
+    assert_eq!((pacer.ran(), pacer.dropped()), (4, 5));
+}
+
+#[test]
 fn one_frame_of_elapsed_time_runs_one_frame() {
     let mut pacer = Pacer::new();
     assert_eq!(pacer.advance(FRAME), 1);
@@ -101,6 +146,18 @@ fn a_suspended_machine_reports_a_large_loss_rather_than_overflowing() {
     let mut pacer = Pacer::new();
     assert_eq!(pacer.advance(Duration::MAX), MAX_CATCH_UP);
     assert_eq!(pacer.dropped(), u64::MAX - MAX_CATCH_UP);
+}
+
+#[test]
+fn a_second_suspension_saturates_the_counters_instead_of_aborting() {
+    // `advance` owed `u64::MAX` once and survived; owing it again added to a total already at
+    // the ceiling, which `overflow-checks` turned into an abort. It now shares `run_bounded`'s
+    // saturating accounting (DECISION.md item 12).
+    let mut pacer = Pacer::new();
+    pacer.advance(Duration::MAX);
+    assert_eq!(pacer.advance(Duration::MAX), MAX_CATCH_UP);
+    assert_eq!(pacer.dropped(), u64::MAX);
+    assert_eq!(pacer.ran(), 2 * MAX_CATCH_UP);
 }
 
 #[test]

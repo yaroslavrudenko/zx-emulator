@@ -69,6 +69,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     HALT, NOP, NOP_T_STATES, UNCONTENDED_CODE, advance_to, elapsed, enable_interrupts, machine,
     set_pc, sinclair_rom, write_program,
@@ -135,7 +137,7 @@ fn armed_at(at: u32, iff1: bool) -> Spectrum {
     let mut machine = machine();
     advance_to(&mut machine, at);
 
-    let mut state = machine.cpu_state();
+    let mut state = machine.completed();
     state.iff1 = iff1;
     state.iff2 = iff1;
     state.im = InterruptMode::Mode1;
@@ -256,11 +258,11 @@ fn acceptance_depends_on_iff1_and_on_the_position_in_the_window() {
 
     for (name, at, iff1, vectors) in cases {
         let mut machine = armed_at(at, iff1);
-        let before = machine.cpu_state();
+        let before = machine.completed();
 
         machine.step();
 
-        let after = machine.cpu_state();
+        let after = machine.completed();
         if vectors {
             assert_eq!(
                 after.pc, MODE_1_VECTOR,
@@ -307,9 +309,9 @@ fn halt_is_escaped_by_the_frame_interrupt() {
     set_pc(&mut machine, UNCONTENDED_CODE);
 
     machine.step();
-    assert!(machine.cpu_state().halted, "HALT must stop the CPU");
+    assert!(machine.completed().halted, "HALT must stop the CPU");
     assert_eq!(
-        machine.cpu_state().pc,
+        machine.completed().pc,
         UNCONTENDED_CODE,
         "PC must stay on the HALT opcode, which is what makes resumption land correctly"
     );
@@ -318,7 +320,7 @@ fn halt_is_escaped_by_the_frame_interrupt() {
     machine.run_frame();
     assert_eq!(machine.frames(), 1);
     assert!(
-        machine.cpu_state().halted,
+        machine.completed().halted,
         "nothing but an interrupt may leave HALT, and the line is low only at a boundary"
     );
     assert!(
@@ -328,12 +330,12 @@ fn halt_is_escaped_by_the_frame_interrupt() {
 
     machine.step();
     assert!(
-        !machine.cpu_state().halted,
+        !machine.completed().halted,
         "the interrupt must resume the CPU"
     );
-    assert_eq!(machine.cpu_state().pc, MODE_1_VECTOR);
+    assert_eq!(machine.completed().pc, MODE_1_VECTOR);
 
-    let sp = machine.cpu_state().sp;
+    let sp = machine.completed().sp;
     let return_address = u16::from_le_bytes([
         machine.memory().read(sp),
         machine.memory().read(sp.wrapping_add(1)),

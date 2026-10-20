@@ -290,7 +290,7 @@ neither was caught by any gate, because both were a **missing connection** rathe
 calculation — the class a green suite is structurally unable to find.
 
 **Fixing them produced two more, and those are the interesting ones.** The repair for the silent
-tape cost 23% of a frame; the repair for the clicking shipped with its control loop inverted. Both
+tape cost ~~23% of a frame~~ +19.6 % on `quiet_48k` *(corrected 2026-10-20: the one figure this repository quotes for P1 is `quiet_48k`'s +19.6 %)*; the repair for the clicking shipped with its control loop inverted. Both
 passed every gate that covered them. They are in the table below with the originals rather than
 above it, because a section that recorded only the defects somebody else caused would be the same
 kind of document this project spends its comments arguing against.
@@ -301,7 +301,7 @@ kind of document this project spends its comments arguing against.
 | **S2** | Loading a tape was silent | The `EAR` line reached the CPU and **nothing else** — no path to the speaker existed | **fixed** — `Sample::tape`, mixed in the frontend |
 | **S3** | The tape, once audible, was too quiet | `TAPE_GAIN` was ruled at `0.5` by reasoning, and measured at 2.5% of full scale against the beeper's 12.9% | **fixed** — subsumed by S4: the ceiling that held the tape at `0.9` died with the shared denominator |
 | **S4** | — | Every source divides by one shared `FULL_SCALE`, so loudness given to the tape is **taken from the beeper**. At `TAPE_GAIN = 2.0` a lone beeper fell to 34.6% of the mix and the clipping gate failed on its own words: *"a 48K would be thin"* | **fixed** — the design change landed: the tape left the shared denominator, ruled equal to the beeper. 4.12% → 14.06% of device full scale derived, 14.3% measured; the beeper 12.13% → 14.06%; the worst-case five-source sum is 0.88125, proven under full scale at compile time, so there is no limiter; the thin-48K floor's margin went 1.1% → 17.2% |
-| **P1** | — | The fix for S2 cost **+23% of a frame** on a machine with no tape in the drive | **fixed** — the tape reports its own edge |
+| **P1** | — | The fix for S2 cost ~~**+23% of a frame**~~ **+19.6 %** on `quiet_48k` *(corrected 2026-10-20: the one figure this repository quotes for P1 is `quiet_48k`'s +19.6 %)* on a machine with no tape in the drive | **fixed** — the tape reports its own edge |
 | **P2** | — | The S1 control loop's **sign was inverted** — the setpoint was a repeller | **fixed**, and closed-loop gates added |
 | **P3** | — | `Envelope::level` could not prove its range: a bounds check and an underflow check per AY sample | **fixed** — a mask, +1 LOC |
 | **P4** | — | **No benchmark played a tape**, which is why P1 shipped green | **fixed** — `tape_playing_48k`; the lesson stands |
@@ -382,7 +382,7 @@ corrected, because how each survived a green suite is worth more than the defect
 
 | # | Finding | Measured | State |
 |---|---|---|---|
-| **P1** | The `set_tape` call added to `Ula::advance` cost **+23% of a frame**, on a machine with **no tape in the drive** | 11 of 11 bench cases regressed; `quiet_48k` 150.8 → 180.3 µs | **fixed** — 146.1 µs |
+| **P1** | The `set_tape` call added to `Ula::advance` cost ~~**+23% of a frame**~~ **+19.6 %** on `quiet_48k` (the one figure this repository quotes for P1, since 2026-10-20 — it had been written +23 %, +21.9 % and +19.6 % in different places), on a machine with **no tape in the drive** | 11 of 11 bench cases regressed; `quiet_48k` 150.8 → 180.3 µs | **fixed** — 146.1 µs |
 | **P2** | The control loop's **sign was inverted**: the setpoint was a repeller | 8.9 s of backlog over 20 minutes of browser drift, against 74 ms correct | **fixed** |
 | **P3** | `Envelope::level` could not prove its own range, so every AY sample paid a bounds check and an underflow check | up to **1.33 M** compare-and-branch pairs per second | **fixed** — a mask, +1 LOC |
 | **P4** | **No benchmark played a tape.** Zero `insert_tape` calls across every bench case, when the audit ran | `tape_playing_48k`: 147.4 µs, ~1 µs over the same frame drained silent | **fixed** — the hole that let P1 ship green is a case now |
@@ -474,6 +474,7 @@ defending that. So what followed was surgery rather than a rewrite — five chan
 | `Envelope::level` masks its position instead of letting the compiler doubt it | up to 1.33 M compare-and-branch pairs a second and three panic pads out of the AY loop — the mask makes the range provable, the same idiom the memory map already documents | +1 line |
 | The browser worklet's chunk array became a preallocated power-of-two `Float32Array` ring | the browser audio queue's missing ceiling — the desktop's written rule, drop rather than grow, holds in the browser now too — plus a five-load per-sample guard and per-sample field writes that block copies do instead | the worklet rewritten: 46 code lines became 67, and a ceiling it never had |
 | The desktop queue takes a frame of samples in one bulk `extend` | ~99 % of the audio mutex's hold time. The real-time callback shares that lock; the lock-free ring that removes it entirely was priced at +30 lines and refused, so a critical section a hundred times shorter is the clean mitigation | −6 lines |
+| *(Superseded, 2026-10-20.)* The row above is history: the desktop queue is now an `rtrb` single-producer ring whose consumer the callback owns, so the callback takes no lock at all, and the `VecDeque` + mutex it describes was deleted with its tests ported to the ring (DECISION.md item 7) | the callback lock: one → none | — |
 | `bundle::acknowledgement()` computes once behind a `LazyLock` | a whole-ROM `b"Sinclair"` scan that ran sixty times a second to answer a question whose answer cannot change while the process lives | +3 lines |
 | `Memory::is_contended` reads one derived `contended_slots` cache, rebuilt on the paging write | a dependent load→branch→load→load chain on ~3.5 M contention tests a second: ten instructions, three loads and two branches per test became four, one and one | +11 lines |
 
@@ -507,6 +508,13 @@ variance data set, derivation dated at the step itself — so the next P1-class 
 pre-push gate red on the machine the baseline was recorded on, instead of waiting for somebody to
 run a bench A/B against a hand-reverted tree. Nothing runs that gate automatically; that hole is
 older than this section, and it is still open where `docs/STATUS.md` records it.
+
+> **Superseded 2026-10-20 (DECISION.md item 2).** The wall-clock ceiling described above was
+> retired: the batched covered ticks took `quiet_48k` to about 74 µs, so a 159.5 µs ceiling would
+> pass a regression of more than double, and one unchanged binary's wall floor moved 7–12 %
+> between back-to-back runs. The PERF step now holds instructions retired per frame within 1 % of
+> `web/perf-baseline.txt` (`web/perf_gate.sh`, `docs/PERFORMANCE.md`). It still runs nowhere
+> automatically: CI's x86_64 runner skips it, counted.
 
 ### The games these were tested against
 
@@ -622,6 +630,11 @@ the doc used to claim the line formatted *"without allocating"*, and it and the 
 each say plainly which field obeys that and which does not. The finding stays open, written at the
 place a reader deciding whether a per-frame `format!` is allowed on this path will meet it.
 
+> **Closed since, and recorded as closed on 2026-10-20.** `Status::queue` now returns a
+> `QueueDisplay` (`crates/frontend/src/queue_display.rs`), the `Display` newtype the paragraph
+> above priced and refused; nothing on that line allocates. The paragraph is the record of the
+> refusal, not of the code.
+
 ### `extend` beats a `push` loop by type-system specialisation, and that is what settled the mutex
 
 The desktop producer used to hold the audio mutex across a ~958-iteration `push_back` loop with a
@@ -652,6 +665,13 @@ down *because* it looks like the answer: it converts a rare few-microsecond wait
 10.67 ms hole, which is audibly worse than the thing it avoids. The lock-free single-producer ring
 that removes the question entirely was priced at ~+30 lines and declined.
 
+> **Superseded, 2026-10-20 — the ring was adopted after all.** The owner approved `rtrb` 0.4.0
+> (`crates/page/Cargo.toml` records it), and the callback now owns the ring's consumer and never
+> locks; the frame thread's producer sits behind its own mutex, which the callback never touches.
+> The measurement above stands as the reason the mutex was tolerable, not as the current design.
+> The retired `VecDeque` model and its `extend` lived on as a `#[cfg(test)]` copy that nine policy
+> tests kept grading; those tests now grade the ring and the copy is gone (DECISION.md item 7).
+
 ### Growth amortisation is cheap to count, and worse than it looks
 
 `Recorder::samples` in `crates/frontend/src/bin/zx-shot.rs` starts from `Vec::new()`, and
@@ -678,6 +698,25 @@ here and not a row in the campaign table.
 > where Rust rounds up to a power of two, and the same 189 seconds measures **67.1 MB copied and
 > 100.7 MB live**. The figures above are on R-Type instead, because 28,429 frames is a number this
 > file already carries with its provenance and 189 seconds is not.
+
+> **Measured on 2026-10-20, and the finding is closed — the copying above does not happen.** The
+> 24-reallocation count stands as arithmetic. The "134 MB copied / 201 MB resident" did not survive
+> a measurement: the remedy this section describes — reserve the tape's length when the cassette
+> starts — was built and run against the code without it over the whole R-Type load (WAV of
+> 27,923,225 samples from frame 0 of 29,099), interleaved, twice each:
+>
+> ```text
+> /usr/bin/time -l zx-shot --rom testdata/roms/128-0.rom --rom testdata/roms/128-1.rom \
+>     --media testdata/games/RType.tzx --frames 200 --keys Enter --play-tape --keys-after Enter \
+>     --settle 300 --out r.ppm --snapshot r.z80 --wav r.wav
+> ```
+>
+> Maximum resident set ≈ 185.5 MB for both, peak memory footprint ≈ 178.6 MB for both,
+> instructions retired equal within noise (107.29 G vs 107.30 G), wall time within noise, outputs
+> byte-identical. The peak is set by `wav::encode` building the byte buffer while the samples are
+> still live, not by growth; and a reallocation this large is remapped by the allocator rather than
+> copied byte by byte. +10 lines for no measured gain fails RULE 4, so the reserve was not kept and
+> the finding is closed as measured-null (the judges' decision Q2, DECISION.md item 9).
 
 ### Without a garbage collector, the code does not always read honestly
 

@@ -108,6 +108,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     AcceptedInterrupt, InterruptedRun, PROLOGUE, SLED, advance_to_absolute, enable_interrupts,
     machine, run_recording_interrupts, set_pc, with_cpu_state, write_program,
@@ -618,7 +620,7 @@ fn every_family_resumes_after_the_handler_and_runs_its_loop_to_completion() {
             let label = format!("{}, {}", family.name, case.name);
             let mut machine = loaded(family, case, true);
             let outcome = run(&mut machine);
-            let state = machine.cpu_state();
+            let state = machine.completed();
 
             assert_eq!(
                 state.bc,

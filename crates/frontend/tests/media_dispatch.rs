@@ -98,8 +98,14 @@ fn the_number_of_roms_is_what_names_the_machine() {
     let one_two_eight = media::start(&[&editor[..], &basic[..]]).expect("two page-sized ROMs");
 
     assert_ne!(
-        forty_eight.snapshot().model(),
-        one_two_eight.snapshot().model(),
+        forty_eight
+            .snapshot()
+            .expect("completed instruction")
+            .model(),
+        one_two_eight
+            .snapshot()
+            .expect("completed instruction")
+            .model(),
         "one ROM and two ROMs must not produce the same machine",
     );
     assert_eq!(
@@ -197,7 +203,7 @@ fn a_saved_snapshot_reads_back_as_the_machine_that_wrote_it() {
     machine.run_frames(3);
     machine.memory_mut().write(0x8000, 0xA5);
 
-    let saved = media::save(&machine);
+    let saved = media::save(&machine).expect("completed instruction");
     let mut restored = media::start(&[&[0; PAGE_SIZE]]).expect("a page-sized ROM");
     media::insert(&mut restored, Kind::Z80, &saved).expect("our own snapshot");
 
@@ -211,8 +217,8 @@ fn a_saved_snapshot_reads_back_as_the_machine_that_wrote_it() {
     // states here was asserting something the `.z80` format cannot deliver, so the test was
     // wrong rather than the code, and it is narrowed rather than deleted: the other seventeen
     // fields are still compared.
-    let after = restored.cpu_state();
-    let mut expected = machine.cpu_state();
+    let after = restored.cpu_state().expect("completed instruction");
+    let mut expected = machine.cpu_state().expect("completed instruction");
     expected.wz = after.wz;
     expected.q = after.q;
     expected.halted = after.halted;

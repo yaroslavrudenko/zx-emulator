@@ -349,11 +349,8 @@ impl fmt::Display for Rung {
     /// formatting the whole readout in one `write!` into its reused buffer, rather than building
     /// a string per field fifty times a second.
     ///
-    /// *The sentence here claimed the readout allocates **nothing** fifty times a second.* This
-    /// field obeys that; the `snd` field in the same `write!` does not — `Status::queue` returns
-    /// a `String`. The claim is corrected rather than the code because every repair measured is
-    /// longer or breaks the single-`write!` property this impl exists to give; `Status::line`'s
-    /// own doc carries the measurement and the open finding.
+    /// The sound field now formats through a private `Display` value too, into the same reused
+    /// line: neither field builds a `String` on the frame path.
     ///
     /// [`Status::draw`]: ../zx/index.html
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -416,7 +413,9 @@ const LOADING: &str = " (loading)";
 /// > **That prediction was cashed in, and it held.** [`FLAT_OUT_BUDGET`] is the wall-clock budget
 /// > and [`Pacer::run_flat_out`] is the loop that reads it, and neither is a multiplier: this
 /// > table gained a fifth entry rather than a fifth *number*, [`Speed`] gained no variant, and
-/// > [`Pacer::advance`] — the one place a factor is applied — was not touched. What the budget
+/// > [`Pacer::advance`] — the one place a factor is applied — was not touched *(by that change; on
+/// > 2026-10-20 its counter update moved into the saturating `credit` it shares with
+/// > [`Pacer::run_bounded`], DECISION.md item 12 — the factor itself did not move)*. What the budget
 /// > buys over the top rung here is the difference between 64× and whatever the host is actually
 /// > good for, which on this one is about 98×; what it costs is that the figure is no longer
 /// > predictable from the table, which is why [`Rung::Automatic`] prints no multiplier at all.
@@ -546,27 +545,54 @@ impl Pacer {
     /// `a_suspended_machine_at_the_highest_multiplier_does_not_overflow` is the assertion rather
     /// than this sentence.
     pub const fn advance(&mut self, elapsed: Duration) -> u64 {
-        // `as` rather than `u32::into`, because `From` is not `const` and this function is.
-        // Both casts widen; neither can lose a bit.
+        let (due, run) = self.due(elapsed);
+        self.credit(due, run);
+        run
+    }
+
+    /// Execute owed frames within the same 30 ms best-effort budget as flat-out mode.
+    /// A frame already started cannot be preempted. Unlike `advance`, only completed
+    /// callbacks count as ran; mixing both routes retains `advance`'s legacy accounting.
+    pub fn run_bounded(
+        &mut self,
+        elapsed: Duration,
+        mut clock: impl FnMut() -> f64,
+        mut frame: impl FnMut(),
+    ) -> u64 {
+        let (due, limit) = self.due(elapsed);
+        let deadline = clock() + FLAT_OUT_BUDGET;
+        let mut completed = 0;
+        while completed < limit && (completed == 0 || clock() < deadline) {
+            frame();
+            completed += 1;
+        }
+        self.credit(due, completed);
+        completed
+    }
+
+    /// Count `ran` frames run against `due` owed — the one place both counters move, for
+    /// [`Pacer::advance`] and [`Pacer::run_bounded`] alike.
+    ///
+    /// Saturating, for the reason `advance` gives about elapsed time: a suspended laptop can owe
+    /// a count near `u64::MAX`, and the readout reporting a huge number beats an abort.
+    const fn credit(&mut self, due: u64, ran: u64) {
+        self.ran = self.ran.saturating_add(ran);
+        self.dropped = self.dropped.saturating_add(due - ran);
+    }
+
+    const fn due(&mut self, elapsed: Duration) -> (u64, u64) {
+        // Both casts widen; `From` is not const on the declared MSRV.
         let factor = self.speed.factor();
         self.owed += elapsed.as_nanos() * factor as u128;
         let whole = self.owed / FRAME_NANOS;
         self.owed -= whole * FRAME_NANOS;
-
         let due = if whole > u64::MAX as u128 {
             u64::MAX
         } else {
             whole as u64
         };
-        // Scaled, because the bound is a wall-clock one written as a frame count — see
-        // [`MAX_CATCH_UP`]. Unscaled it would clip every ordinary tick above real time and
-        // report the fast-forward as a permanent stall.
         let ceiling = MAX_CATCH_UP * factor as u64;
-        let run = if due < ceiling { due } else { ceiling };
-
-        self.ran += run;
-        self.dropped += due - run;
-        run
+        (due, if due < ceiling { due } else { ceiling })
     }
 
     /// Hand over frames until this tick's wall-clock budget is spent, and say how many that was.

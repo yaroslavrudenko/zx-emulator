@@ -56,10 +56,12 @@ bundled = []
 # `spectrum` is the whole machine; this crate is a consumer of it and adds no emulation.
 spectrum.workspace = true
 macroquad.workspace = true
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 # The browser's half of `src/host.rs`'s seam. Depended on unconditionally and with no `#[cfg]`
-# here, which is the point: both of its entry points compile and behave on every target — empty
-# query string, `Handoff::NoPage` — so this crate stays free of target-conditional code and
-# `tests/portability.rs` can assert that as a property rather than a habit.
+# here, which is the point: both of its entry points compile on every target — empty query
+# string and `Handoff::NoPage`. The private file/snapshot paths in `main.rs` and `snapshot.rs`
+# now route by target; `tests/portability.rs` confines those branches and retains the
+# branch-free guarantee for the headless machine modules.
 page.workspace = true
 # The same small typed-error crate `spectrum` already uses, so this crate's errors match its
 # siblings' shape. It replaces the `anyhow` the skeleton declared: `anyhow` erases the type,
@@ -80,6 +82,15 @@ thiserror.workspace = true
 # not one per corpus."*
 [dev-dependencies]
 testsupport.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "queue_alloc"
+harness = false
+
+[[bench]]
+name = "video_compare"
+harness = false
 
 [[bin]]
 name = "zx"

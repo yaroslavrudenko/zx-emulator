@@ -41,6 +41,8 @@
 
 mod common;
 
+use common::Completed;
+
 use common::{
     ALL_HALF_ROWS_PORT, ANCHORS, IDLE_HALF_ROW, MEMBRANE, UNCONTENDED_CODE, UNDRIVEN_BITS,
     half_row_keys, half_row_port, machine, read_port, set_pc, write_program,
@@ -233,7 +235,7 @@ fn the_cpu_reads_the_selected_half_row_through_in_a_n() {
         machine.step();
         machine.step();
 
-        let accumulator = (machine.cpu_state().af >> 8) as u8;
+        let accumulator = (machine.completed().af >> 8) as u8;
         assert_eq!(
             accumulator,
             IDLE_HALF_ROW & !(1_u8 << BIT),

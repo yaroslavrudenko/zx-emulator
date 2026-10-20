@@ -335,6 +335,14 @@ impl Tape {
         &self.pulses
     }
 
+    /// Whether moving the head `t_states` forward would flip the signal at least once.
+    ///
+    /// The guard [`crate::Ula`]'s batched ticks hold: a run with an edge inside it is taken
+    /// T-state by T-state, so the edge is stamped exactly where the per-tick loop stamps it.
+    pub(crate) fn flips_within(&self, t_states: u8) -> bool {
+        self.playing && self.remaining <= u32::from(t_states)
+    }
+
     /// Move the head `t_states` forward, flipping the signal at every half-period boundary.
     ///
     /// Called only from [`crate::Ula`]'s own `advance`, alongside the clock, so elapsed time
@@ -345,23 +353,30 @@ impl Tape {
     /// when the `EAR` line flips. It first did that by comparing [`Tape::level`] against a mirror
     /// held inside the generator — which meant evaluating the *timestamp* argument on every call,
     /// a `u64` multiply-add, **before** the guard that discarded it. Measured against
-    /// `benches/frame.rs`: **+21.9% on `quiet_48k`**, a machine with no tape in the drive at all.
+    /// `benches/frame.rs`: **+19.6 % on `quiet_48k`**, a machine with no tape in the drive at all.
     ///
     /// The edge was never unknown — `finish_pulse` is the only thing that moves the level and it
     /// runs right here. Returning it costs a `bool` that is already in a register and lets the
     /// caller put the timestamp inside the branch, which is where the work belongs.
-    pub(crate) fn advance(&mut self, mut t_states: u32) -> bool {
-        let mut flipped = false;
+    ///
+    /// *(Since 2026-10-20 it reports **when** as well as **that**: `Some(since)`, the T-states of
+    /// this advance that elapsed after the last flip, or `None` for no flip. A caller whose
+    /// clock has already moved by the whole advance stamps the edge at `now − since`, which is
+    /// the T-state the per-tick loop stamps it at — where the `bool` could only stamp it at the
+    /// end of a contention stall or a port delay, up to 12 T-states late. DECISION.md item 5;
+    /// the value was already in a register, so the cost is the subtraction on an edge.)*
+    pub(crate) fn advance(&mut self, mut t_states: u32) -> Option<u32> {
+        let mut since_flip = None;
         while self.playing && t_states > 0 {
             if self.remaining > t_states {
                 self.remaining -= t_states;
-                return flipped;
+                return since_flip;
             }
             t_states -= self.remaining;
             self.finish_pulse();
-            flipped = true;
+            since_flip = Some(t_states);
         }
-        flipped
+        since_flip
     }
 
     /// The current half-period has elapsed: flip the signal and take the next one.

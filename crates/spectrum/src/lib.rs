@@ -28,10 +28,10 @@
 //! returns. A machine that did would get the instruction count right and the time wrong,
 //! with nothing failing.
 //!
-//! **One step can overrun the frame.** A run of `DD`/`FD` prefixes is *one* instruction and
-//! guest memory decides how long it is, so there is no maximum to stop before.
-//! [`Spectrum::run_frame`] therefore watches for the frame *counter* to change rather than
-//! trying to land on 69888, and [`timing::Clock`] rolls over however far it is pushed.
+//! **One instruction may span frame boundaries.** A run of `DD`/`FD` prefixes is one
+//! instruction; `Cpu::step` now yields after one frame's prefix fetch budget, retaining
+//! the incomplete instruction without admitting an interrupt. [`Spectrum::run_frame`] watches
+//! the frame counter rather than trying to land on 69888; [`timing::Clock`] carries overshoot.
 //!
 //! # Verification, honestly
 //!
@@ -211,7 +211,7 @@
 //! | The chip's registers across a load | `tests/snapshot_apply.rs` — R1 over a 128, **and** a direct assertion that they travel, because a `snapshot` that never wrote them and a `restore` that never read them would leave R1 entirely green |
 //! | AY write **timing within the frame** | **nothing.** Music drivers write the chip from the interrupt handler and the audible result depends on when the writes land; no gate measures it |
 //! | The **sample rate** | **derived.** [`timing::Timing::cpu_hz`] divided by [`audio::SAMPLE_PERIOD_T_STATES`]. Both clocks are transcriptions; what is checked is that each implies a 50 Hz frame against its own frame length, which catches a transposed digit and establishes neither figure |
-//! | What **sound costs on the hot path** | **measured, and it is +0.9 µs a frame while a cassette is turning, nothing otherwise.** `Ula::tick` and `Ula::contend` are byte-identical to their pre-sound selves; `Ula::advance` is **not** — it carries one `bool` test, the value `crate::tape::Tape::advance`'s own loop guard already computed, and reaches the generator only on an `EAR` edge. Measured 2026-09-03 with `cargo bench -p spectrum --bench frame`, lowest median of three runs: `tape_playing_48k` 151.8 µs against `drained_48k` 150.9 µs, and `quiet_48k` 143.4 µs. *(This row read **"measured, and it is nothing … all three are byte-identical to their pre-M7-sound selves — nothing generates audio per T-state"**, and M8's tape half falsified all three clauses. Worse, the bench it named as *"the command that exists to keep it that way"* had **no case with a tape playing**, so a +23 % regression on exactly this path shipped green under it. `tape_playing_48k` is that missing case and is why this row can now carry a number instead of an absolute.)* |
+//! | What **sound costs on the hot path** | **measured, and it is +0.9 µs a frame while a cassette is turning, nothing otherwise.** `Ula::tick` and `Ula::contend` are byte-identical to their pre-sound selves; `Ula::advance` is **not** — it carries one `bool` test, the value `crate::tape::Tape::advance`'s own loop guard already computed, and reaches the generator only on an `EAR` edge. Measured 2026-09-03 with `cargo bench -p spectrum --bench frame`, lowest median of three runs: `tape_playing_48k` 151.8 µs against `drained_48k` 150.9 µs, and `quiet_48k` 143.4 µs. *(This row read **"measured, and it is nothing … all three are byte-identical to their pre-M7-sound selves — nothing generates audio per T-state"**, and M8's tape half falsified all three clauses. Worse, the bench it named as *"the command that exists to keep it that way"* had **no case with a tape playing**, so a +19.6 % regression on exactly this path shipped green under it. `tape_playing_48k` is that missing case and is why this row can now carry a number instead of an absolute.)* |
 //! | The **tape** reaching the speaker — the `EAR` line as a sample, not only as bit 6 | `tests/tape_signal.rs` — `the_tape_reaches_the_speaker_and_not_only_the_ear_bit` drives a train with real instructions and asserts both halves of it arrive in [`Sample`]`::tape`, with the beeper silent throughout so the two cannot be one field misread. The **stopped** cases are graded separately and were what corrected this field's own documentation: a tape stopped mid-high, and a cassette that runs out mid-high, both hold the line high, so *"a stopped tape is silent"* is true only of one that was never started. *(This table had **no row at all** for the tape reaching the speaker while the feature was shipping, which is the failure mode the rows reading **nothing** exist to prevent — an absent row and an honest `nothing` are indistinguishable to a reader and are opposite facts.)* |
 //! | Whether the tape **sounds like a real load** | **nothing.** The level is right and the timing is the pulse train's; how it should be filtered, and how loud it should sit against the beeper, are the frontend's and are observation |
 //! | Whether it **sounds right** | **nothing.** A human ear, `docs/M7.md`'s T4, and the honest bottom of this table |
@@ -254,7 +254,8 @@ pub use tape::Tape;
 pub use ula::{FLOATING_BUS_BYTE, Ula};
 
 use memory::BankIndex;
-use z80::{Cpu, CpuState, StepError};
+pub use z80::StateCaptureError;
+use z80::{Cpu, CpuState, OPCODE_FETCH_T_STATES, StepError};
 
 /// A ZX Spectrum — a 48K or a 128.
 ///
@@ -317,6 +318,14 @@ pub struct Spectrum {
     cpu: Cpu<Ula>,
 }
 
+fn cpu_for(ula: Ula) -> Cpu<Ula> {
+    let worst_m1 = u32::from(OPCODE_FETCH_T_STATES) + timing::MAX_CONTENTION_DELAY;
+    let budget = ula.clock().timing().frame_t_states() / worst_m1;
+    let max_prefix_fetches = core::num::NonZeroU32::new(budget)
+        .expect("Spectrum frame always has at least one opcode fetch");
+    Cpu::with_prefix_budget(ula, max_prefix_fetches)
+}
+
 impl Spectrum {
     /// Build a 48K holding `rom`, at the start of frame zero.
     ///
@@ -328,7 +337,7 @@ impl Spectrum {
     /// [`RomSizeError`] if `rom` is not exactly one 16 KB page.
     pub fn new(rom: &[u8]) -> Result<Self, RomSizeError> {
         Ok(Self {
-            cpu: Cpu::new(Ula::new(Memory::spectrum_48k(rom)?)),
+            cpu: cpu_for(Ula::new(Memory::spectrum_48k(rom)?)),
         })
     }
 
@@ -347,7 +356,7 @@ impl Spectrum {
     /// [`RomSizeError`] if either image is not exactly one 16 KB page.
     pub fn spectrum_128(editor: &[u8], basic: &[u8]) -> Result<Self, RomSizeError> {
         Ok(Self {
-            cpu: Cpu::new(Ula::new(Memory::spectrum_128(editor, basic)?)),
+            cpu: cpu_for(Ula::new(Memory::spectrum_128(editor, basic)?)),
         })
     }
 
@@ -438,8 +447,7 @@ impl Spectrum {
     }
 
     /// The complete CPU state — what a `.z80` or `.sna` snapshot carries.
-    #[must_use]
-    pub fn cpu_state(&self) -> CpuState {
+    pub fn cpu_state(&self) -> Result<CpuState, StateCaptureError> {
         self.cpu.state()
     }
 
@@ -618,12 +626,11 @@ impl Spectrum {
     ///
     /// The paging port goes with them, because eight banks without the map that arranges them
     /// do not describe a machine that can be restored.
-    #[must_use]
-    pub fn snapshot(&self) -> Snapshot {
+    pub fn snapshot(&self) -> Result<Snapshot, StateCaptureError> {
+        let cpu_state = self.cpu.state()?;
         let ula = self.cpu.bus();
         let memory = ula.memory();
-        let mut snapshot =
-            Snapshot::new(self.cpu.state(), ula.border(), ula.clock().frame_t_state());
+        let mut snapshot = Snapshot::new(cpu_state, ula.border(), ula.clock().frame_t_state());
         snapshot.set_model(memory.model(), memory.paging_port());
         for &bank in memory.model().banks() {
             let bank = BankIndex::new(bank);
@@ -632,7 +639,7 @@ impl Spectrum {
         if let Some(ay) = ula.ay() {
             snapshot.set_ay(ay);
         }
-        snapshot
+        Ok(snapshot)
     }
 
     /// Put `snapshot`'s state into this machine.
@@ -760,6 +767,21 @@ mod tests {
     use crate::memory::PAGE_SIZE;
     use crate::timing::{INTERRUPT_T_STATES, T_STATES_PER_FRAME};
 
+    /// The CPU's state at an instruction boundary — where every test that reads it stands, so the
+    /// `Result` `Cpu::state` returns for a capture mid-prefix-chain is always `Ok` here. One helper
+    /// in place of the same `.expect("completed instruction")` at every call site (DECISION.md
+    /// item 12).
+    trait Completed {
+        /// The machine's CPU state, which every caller reads between instructions.
+        fn completed(&self) -> z80::CpuState;
+    }
+
+    impl Completed for Spectrum {
+        fn completed(&self) -> z80::CpuState {
+            self.cpu_state().expect("completed instruction")
+        }
+    }
+
     /// A ROM of `NOP`s: the CPU runs off the end of it into RAM and wraps, forever.
     fn nop_machine() -> Spectrum {
         Spectrum::new(&[0x00; PAGE_SIZE]).expect("a page-sized ROM")
@@ -774,7 +796,7 @@ mod tests {
     fn a_fresh_machine_starts_at_the_top_of_frame_zero() {
         let machine = nop_machine();
         assert_eq!((machine.frames(), machine.frame_t_state()), (0, 0));
-        assert_eq!(machine.cpu_state().pc, 0);
+        assert_eq!(machine.completed().pc, 0);
     }
 
     #[test]
@@ -797,7 +819,7 @@ mod tests {
         // machine that summed `step` returns would run this frame roughly 20% long, and
         // no test anywhere would fail.
         let mut machine = nop_machine();
-        let mut state = machine.cpu_state();
+        let mut state = machine.completed();
         state.pc = 0x4000;
         machine.set_cpu_state(state);
         let mut charged = 0_u32;
@@ -825,7 +847,7 @@ mod tests {
 
     /// Enable interrupts in `mode`, leaving everything else as it stands.
     fn enable_interrupts(machine: &mut Spectrum, mode: z80::InterruptMode) {
-        let mut state = machine.cpu_state();
+        let mut state = machine.completed();
         state.iff1 = true;
         state.iff2 = true;
         state.im = mode;
@@ -839,10 +861,10 @@ mod tests {
         // machine keeps executing, and nothing is pushed.
         let mut machine = nop_machine();
         machine.run_frame();
-        assert!(!machine.cpu_state().iff1);
-        assert_eq!(machine.cpu_state().sp, u16::MAX, "nothing was pushed");
+        assert!(!machine.completed().iff1);
+        assert_eq!(machine.completed().sp, u16::MAX, "nothing was pushed");
         assert!(
-            machine.cpu_state().pc > 0x1000,
+            machine.completed().pc > 0x1000,
             "the CPU should have run a frame of NOPs, not vectored"
         );
         assert_eq!(machine.fault(), None);
@@ -860,17 +882,17 @@ mod tests {
         machine.step(); // the first step of the new frame sees `/INT` low
 
         assert_eq!(
-            machine.cpu_state().pc,
+            machine.completed().pc,
             0x0038,
             "mode 1 vectors to 0x0038 and the machine must not reimplement the rule"
         );
         assert!(
-            !machine.cpu_state().iff1,
+            !machine.completed().iff1,
             "acceptance clears both flip-flops"
         );
-        assert!(!machine.cpu_state().iff2);
+        assert!(!machine.completed().iff2);
         assert_eq!(
-            machine.cpu_state().sp,
+            machine.completed().sp,
             0xFEFE,
             "the return address was pushed"
         );
@@ -884,11 +906,11 @@ mod tests {
         }
         enable_interrupts(&mut machine, z80::InterruptMode::Mode1);
 
-        let before = machine.cpu_state().pc;
+        let before = machine.completed().pc;
         machine.step();
-        assert_ne!(machine.cpu_state().pc, 0x0038, "the line is no longer low");
-        assert!(machine.cpu_state().pc > before);
-        assert_eq!(machine.cpu_state().sp, 0xFF00, "nothing was pushed");
+        assert_ne!(machine.completed().pc, 0x0038, "the line is no longer low");
+        assert!(machine.completed().pc > before);
+        assert_eq!(machine.completed().sp, 0xFF00, "nothing was pushed");
     }
 
     #[test]
@@ -897,13 +919,13 @@ mod tests {
         machine.run_frame();
         enable_interrupts(&mut machine, z80::InterruptMode::Mode1);
         machine.step();
-        assert_eq!(machine.cpu_state().pc, 0x0038);
+        assert_eq!(machine.completed().pc, 0x0038);
 
         // Acceptance cleared `iff1`; the handler's `EI` is what lets the next one in.
         machine.run_frame();
         enable_interrupts(&mut machine, z80::InterruptMode::Mode1);
         machine.step();
-        assert_eq!(machine.cpu_state().pc, 0x0038);
+        assert_eq!(machine.completed().pc, 0x0038);
         assert_eq!(machine.frames(), 2);
     }
 
@@ -914,7 +936,7 @@ mod tests {
         machine.run_frames(2);
         machine.reset();
         assert_eq!((machine.frames(), machine.frame_t_state()), (0, 0));
-        assert_eq!(machine.cpu_state().pc, 0);
+        assert_eq!(machine.completed().pc, 0);
         assert_eq!(machine.memory().read(0x8000), 0xA5);
     }
 
@@ -928,7 +950,7 @@ mod tests {
         enable_interrupts(&mut machine, z80::InterruptMode::Mode0);
         machine.step();
         assert_eq!(machine.fault(), None);
-        assert_eq!(machine.cpu_state().pc, 0x0038, "0xFF decodes as RST 38h");
+        assert_eq!(machine.completed().pc, 0x0038, "0xFF decodes as RST 38h");
     }
 
     #[test]

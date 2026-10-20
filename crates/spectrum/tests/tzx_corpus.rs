@@ -33,6 +33,9 @@
 //! one appears. That is a deliberate departure from the shared policy and it belongs in the
 //! open register rather than in a comment — `docs/M6.md` records it under the `.tzx` section.
 
+mod common;
+
+use common::Completed;
 use spectrum::tape::{Tape, tzx};
 use spectrum::timing::T_STATES_PER_FRAME;
 use spectrum::{Model, Spectrum};
@@ -235,7 +238,7 @@ fn load_first_block(rom: &[u8], tape: Tape, flag: u8, length: u16) -> Option<u16
 
     let start = elapsed(&machine);
     while elapsed(&machine) - start < BUDGET {
-        let pc = machine.cpu_state().pc;
+        let pc = machine.completed().pc;
         if pc == LOADED || pc == FAILED {
             return Some(pc);
         }
